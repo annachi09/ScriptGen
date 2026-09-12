@@ -1,0 +1,979 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ScriptGen</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+
+  <!-- ---------------- Login screen ---------------- -->
+  <div id="login-screen" class="login-screen" hidden>
+    <form id="login-form" class="login-card">
+      <div class="login-brand">
+        <span class="brand-icon">🛠️</span>
+        <div>
+          <div class="brand-title">ScriptGen</div>
+          <div class="brand-subtitle">SQL review &amp; script generator</div>
+        </div>
+      </div>
+      <label class="field-label" for="login-username">Username</label>
+      <input id="login-username" class="text-input" autocomplete="username" required />
+      <label class="field-label" for="login-password">Password</label>
+      <input id="login-password" class="text-input" type="password" autocomplete="current-password" required />
+      <button type="submit" class="btn btn-primary btn-block">Sign in</button>
+      <div id="login-error" class="login-error" hidden></div>
+    </form>
+    <div class="server-info-line" id="login-server-info"></div>
+  </div>
+
+  <!-- ---------------- Forced password change (must_change_password) ---------------- -->
+  <div id="force-password-screen" class="login-screen" hidden>
+    <form id="force-password-form" class="login-card">
+      <div class="login-brand">
+        <span class="brand-icon">🔑</span>
+        <div>
+          <div class="brand-title">Set a new password</div>
+          <div class="brand-subtitle">Your account needs a password change before continuing</div>
+        </div>
+      </div>
+      <label class="field-label" for="force-pw-old">Temporary password</label>
+      <input id="force-pw-old" class="text-input" type="password" autocomplete="current-password" required />
+      <label class="field-label" for="force-pw-new">New password (min 8 characters)</label>
+      <input id="force-pw-new" class="text-input" type="password" autocomplete="new-password" required minlength="8" />
+      <label class="field-label" for="force-pw-confirm">Confirm new password</label>
+      <input id="force-pw-confirm" class="text-input" type="password" autocomplete="new-password" required minlength="8" />
+      <button type="submit" class="btn btn-primary btn-block">Set password &amp; continue</button>
+      <div id="force-pw-error" class="login-error" hidden></div>
+    </form>
+  </div>
+
+  <!-- ---------------- Main app shell ---------------- -->
+  <div id="app-shell" class="app-shell" hidden>
+
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon">🛠️</span>
+        <div class="brand-text">
+          <div class="brand-title">ScriptGen</div>
+          <div class="brand-subtitle" id="sidebar-conn-name">SQL Server</div>
+        </div>
+        <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn" title="Collapse sidebar">«</button>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item is-active" data-page="workspace" title="Workspace">
+          <span class="nav-icon">📝</span><span class="nav-label">Workspace</span>
+        </button>
+        <button class="nav-item" data-page="script" title="Script">
+          <span class="nav-icon">📄</span><span class="nav-label">Script</span>
+        </button>
+        <button class="nav-item" data-page="history" title="History">
+          <span class="nav-icon">🕓</span><span class="nav-label">History</span>
+        </button>
+        <button class="nav-item" data-page="dashboard" title="Dashboard">
+          <span class="nav-icon">📊</span><span class="nav-label">Dashboard</span>
+        </button>
+        <button class="nav-item" data-page="ai" title="AI Assist">
+          <span class="nav-icon">🤖</span><span class="nav-label">AI Assist</span>
+        </button>
+        <button class="nav-item" data-page="dateanomaly" title="DIFF DATES Anomaly">
+          <span class="nav-icon">🩹</span><span class="nav-label">DIFF DATES Anomaly</span>
+        </button>
+        <button class="nav-item" data-page="hierarchy" title="Hierarchy Analysis">
+          <span class="nav-icon">🗂️</span><span class="nav-label">Hierarchy Analysis</span>
+        </button>
+        <button class="nav-item" data-page="tools" title="Tools">
+          <span class="nav-icon">🧰</span><span class="nav-label">Tools</span>
+        </button>
+        <button class="nav-item" data-page="settings" title="Settings">
+          <span class="nav-icon">⚙️</span><span class="nav-label">Settings</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-spacer"></div>
+
+      <div class="sidebar-user">
+        <div class="user-avatar" id="user-avatar">?</div>
+        <div class="user-text">
+          <div class="user-name" id="user-name">&nbsp;</div>
+          <div class="user-role">Signed in</div>
+        </div>
+      </div>
+      <div class="sidebar-actions">
+        <button class="btn btn-ghost-dark" id="theme-toggle-btn" title="Toggle light/dark content theme">
+          <span class="btn-icon">🌗</span><span class="btn-label">Theme</span>
+        </button>
+        <button class="btn btn-ghost-dark" id="sign-out-btn" title="Sign out">
+          <span class="btn-icon">🚪</span><span class="btn-label">Sign out</span>
+        </button>
+      </div>
+
+      <div class="status-block" id="status-block">
+        <div class="status-row"><span class="status-dot" id="dot-backend"></span><span>Backend online</span></div>
+        <div class="status-row"><span class="status-dot" id="dot-db"></span><span id="db-status-text">Checking connection…</span></div>
+        <div class="server-info-line" id="sidebar-server-info" title="If this doesn't change after you restart the app, an old ScriptGen process is still running in the background on port 8420 - close every ScriptGen console window (check the taskbar too) and try again."></div>
+      </div>
+    </aside>
+
+    <main class="content">
+
+      <!-- ===== Workspace page ===== -->
+      <section class="page is-active" id="page-workspace">
+        <header class="page-header">
+          <h1>Workspace</h1>
+          <p class="page-subtitle">Run a query, edit results, and every changed row gets its own live preview.</p>
+        </header>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>SQL Query</h2>
+            <div class="card-header-actions">
+              <div class="dropdown" id="recent-dropdown">
+                <button type="button" class="btn btn-pill" id="recent-btn">🕘 Recent</button>
+                <div class="dropdown-menu" id="recent-menu" hidden></div>
+              </div>
+              <button type="button" class="btn btn-pill" id="format-btn">🪄 Format</button>
+              <button type="button" class="btn btn-primary" id="run-btn">▶ Run Query</button>
+            </div>
+          </div>
+          <textarea id="sql-editor" class="sql-editor" spellcheck="false">SELECT TOP 100 * FROM INFORMATION_SCHEMA.TABLES;</textarea>
+          <div class="editor-status" id="query-status">No query run yet.</div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Results</h2>
+            <div class="card-header-actions">
+              <span class="hint-text">double-click a cell to edit</span>
+            </div>
+          </div>
+
+          <div class="key-panel">
+            <div class="key-panel-row">
+              <label class="field-label">Key column(s)</label>
+              <button type="button" class="btn btn-pill-sm" id="autodetect-key-btn">Auto-detect Key</button>
+              <button type="button" class="btn btn-pill-sm" id="select-all-keys-btn">Select All</button>
+              <button type="button" class="btn btn-pill-sm" id="clear-keys-btn">Clear</button>
+            </div>
+            <div class="chip-row" id="key-chip-row"></div>
+            <div class="key-panel-row">
+              <label class="field-label">Target schema</label>
+              <input id="target-schema" class="text-input text-input-sm" value="dbo" />
+              <label class="field-label">Target table</label>
+              <input id="target-table" class="text-input text-input-sm" />
+              <label class="field-label">Jira / Program #</label>
+              <input id="program-field" class="text-input text-input-sm" placeholder="JIRAXXXX" />
+            </div>
+          </div>
+
+          <div class="grid-wrap">
+            <table class="data-grid" id="data-grid">
+              <thead><tr><th class="preview-col">🔗 SQL Preview</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="generate-row">
+            <button type="button" class="btn btn-primary" id="generate-update-btn">Generate Update Script</button>
+            <button type="button" class="btn btn-secondary" id="generate-rollback-btn">Generate Rollback Script</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Script page ===== -->
+      <section class="page" id="page-script">
+        <header class="page-header">
+          <h1>Script</h1>
+          <p class="page-subtitle">Review before you run it. Nothing here ever executes against the database.</p>
+        </header>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 id="script-title">Generated script</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="ai-review-btn">🤖 AI Review</button>
+              <button type="button" class="btn btn-pill" id="copy-script-btn">📋 Copy</button>
+              <button type="button" class="btn btn-pill" id="download-script-btn">⬇ Download .sql</button>
+            </div>
+          </div>
+          <pre class="script-output" id="script-output">No script generated yet — go to Workspace, edit some cells, and click Generate Update Script.</pre>
+        </div>
+
+        <div class="card" id="ai-review-card" hidden>
+          <div class="card-header">
+            <h2>🤖 AI Pre-Flight Review</h2>
+            <span class="hint-text">A second opinion, not a substitute for your own review</span>
+          </div>
+          <div class="ai-output" id="ai-review-output">Reviewing…</div>
+        </div>
+      </section>
+
+      <!-- ===== History page ===== -->
+      <section class="page" id="page-history">
+        <header class="page-header">
+          <h1>History</h1>
+          <p class="page-subtitle">Every script generated here or in the desktop app on this machine — a record of what was generated, not of anything actually run.</p>
+        </header>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Generated scripts</h2>
+            <div class="card-header-actions">
+              <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                <input type="checkbox" id="history-team-toggle" /> Show everyone's
+              </label>
+              <button type="button" class="btn btn-pill" id="history-refresh-btn">🔄 Refresh</button>
+            </div>
+          </div>
+          <div class="grid-wrap">
+            <table class="data-grid" id="history-table">
+              <thead><tr><th>When (UTC)</th><th>User</th><th>Kind</th><th>Table</th><th>Statements</th><th>Warnings</th><th>From</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="editor-status" id="history-status">Loading…</div>
+        </div>
+      </section>
+
+      <!-- ===== Dashboard page ===== -->
+      <section class="page" id="page-dashboard">
+        <header class="page-header">
+          <h1>Dashboard</h1>
+          <p class="page-subtitle">Summary stats for the current Workspace query result. Run a query first.</p>
+        </header>
+
+        <div class="card" id="dashboard-empty">
+          <p class="hint-text">No query result yet — go to Workspace, run a query, then come back here.</p>
+        </div>
+
+        <div id="dashboard-body" hidden>
+          <div class="kpi-row" id="kpi-row"></div>
+
+          <div class="card">
+            <div class="card-header">
+              <h2>🩺 Data Quality</h2>
+              <span class="hint-text">Observations synthesized from the stats below — nothing here blocks anything, just worth a second look</span>
+            </div>
+            <div class="quality-flags" id="quality-flags"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h2>📋 Per-column stats</h2>
+              <div class="card-header-actions">
+                <button type="button" class="btn btn-pill" id="dashboard-refresh-btn">🔄 Refresh</button>
+                <button type="button" class="btn btn-pill" id="dashboard-export-csv-btn">⬇ Export CSV</button>
+              </div>
+            </div>
+            <div class="grid-wrap">
+              <table class="data-grid" id="stats-table">
+                <thead><tr>
+                  <th class="stats-table-th-sortable" data-sort="name">Column</th>
+                  <th class="stats-table-th-sortable" data-sort="kind">Kind</th>
+                  <th class="stats-table-th-sortable" data-sort="non_null_count">Completeness</th>
+                  <th class="stats-table-th-sortable" data-sort="distinct_count">Distinct</th>
+                  <th class="stats-table-th-sortable" data-sort="unique_ratio">Unique %</th>
+                  <th class="stats-table-th-sortable" data-sort="min_value">Min</th>
+                  <th class="stats-table-th-sortable" data-sort="max_value">Max</th>
+                  <th class="stats-table-th-sortable" data-sort="mean_value">Mean</th>
+                  <th class="stats-table-th-sortable" data-sort="median_value">Median</th>
+                  <th class="stats-table-th-sortable" data-sort="stdev_value">Stdev</th>
+                  <th class="stats-table-th-sortable" data-sort="outlier_count" title="Values outside the Tukey IQR fence (Q1-1.5×IQR, Q3+1.5×IQR)">Outliers</th>
+                  <th>Top values</th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="dashboard-chart-grid">
+            <div class="card">
+              <div class="card-header"><h2>📊 Histogram</h2></div>
+              <div class="chart-controls">
+                <label class="field-label">Numeric column</label>
+                <select id="hist-column-select" class="text-input text-input-sm"></select>
+                <label class="field-label">Bins</label>
+                <input id="hist-bins" class="text-input text-input-sm" type="number" min="2" max="40" value="12" style="width:70px;" />
+                <button type="button" class="btn btn-pill-sm" id="hist-draw-btn">Draw</button>
+              </div>
+              <canvas id="hist-canvas" class="chart-canvas" width="760" height="240"></canvas>
+              <div class="hint-text" id="hist-empty-hint">Pick a numeric column and click Draw.</div>
+            </div>
+
+            <div class="card">
+              <div class="card-header"><h2>🔗 Correlation</h2></div>
+              <div class="chart-controls">
+                <label class="field-label">Column A</label>
+                <select id="corr-a-select" class="text-input text-input-sm"></select>
+                <label class="field-label">Column B</label>
+                <select id="corr-b-select" class="text-input text-input-sm"></select>
+                <button type="button" class="btn btn-pill-sm" id="corr-draw-btn">Draw</button>
+              </div>
+              <canvas id="corr-canvas" class="chart-canvas" width="760" height="280"></canvas>
+              <div class="hint-text" id="corr-r-text"></div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <h2>📦 Quartiles</h2>
+                <span class="hint-text">Min / P25 / Median / P75 / Max per numeric column, outliers marked</span>
+              </div>
+              <canvas id="boxplot-canvas" class="chart-canvas" width="760" height="220"></canvas>
+              <div class="hint-text" id="boxplot-empty-hint">No numeric columns in this result.</div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <h2>📈 Trend History</h2>
+                <span class="hint-text">Row count over time, from exported snapshots of this query's table</span>
+              </div>
+              <div class="chart-controls">
+                <button type="button" class="btn btn-pill-sm" id="trend-draw-btn">Load Trend</button>
+                <span class="hint-text" id="trend-hint"></span>
+              </div>
+              <canvas id="trend-canvas" class="chart-canvas" width="760" height="220"></canvas>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== AI Assist page ===== -->
+      <section class="page" id="page-ai">
+        <header class="page-header">
+          <h1>AI Assist</h1>
+          <p class="page-subtitle">Backed by Gemini — bring your own free API key in Settings. Nothing here ever runs against the database.</p>
+        </header>
+
+        <div class="card" id="ai-not-configured" hidden>
+          <p class="hint-text">AI Assist isn't configured yet. <a href="#" id="ai-goto-settings-link">Add a Gemini API key in Settings</a>.</p>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Suggest / Optimize / Explain</h2>
+            <span class="hint-text">Acts on the query currently in the Workspace editor</span>
+          </div>
+          <div class="key-panel-row" style="margin-bottom:10px;">
+            <input id="ai-intent-field" class="text-input" placeholder="What do you want next? e.g. add a filter for the last 30 days" style="flex:1;" />
+            <button type="button" class="btn btn-pill" id="ai-suggest-btn">✨ Suggest</button>
+            <button type="button" class="btn btn-pill" id="ai-optimize-btn">⚡ Optimize</button>
+            <button type="button" class="btn btn-pill" id="ai-explain-btn">💬 Explain</button>
+          </div>
+          <div class="ai-output" id="ai-main-output">Results will appear here.</div>
+          <div class="generate-row" id="ai-apply-row" hidden>
+            <button type="button" class="btn btn-secondary" id="ai-apply-btn">Apply suggested SQL to Workspace query</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Natural language → WHERE clause</h2>
+            <span class="hint-text">Returns just the clause body, to paste after your own WHERE</span>
+          </div>
+          <div class="key-panel-row">
+            <input id="ai-where-field" class="text-input" placeholder="e.g. only rows updated in the last 30 days" style="flex:1;" />
+            <button type="button" class="btn btn-pill" id="ai-where-btn">Build WHERE clause</button>
+          </div>
+          <div class="ai-output" id="ai-where-output"></div>
+        </div>
+      </section>
+
+      <!-- ===== Date Anomaly page ===== -->
+      <section class="page" id="page-dateanomaly">
+        <header class="page-header">
+          <h1>DIFF DATES Anomaly</h1>
+          <p class="page-subtitle">Finds readings stuck with the wrong READING_PREV_DATE after the date-system change, and generates a correction script for them and the downstream item-to-bill / XML rows.</p>
+        </header>
+
+        <nav class="da-subnav" aria-label="Date Anomaly functions">
+          <button type="button" class="da-subnav-btn is-active" data-da-sub="single">1-3. Single NISS</button>
+          <button type="button" class="da-subnav-btn" data-da-sub="batch">Batch</button>
+          <button type="button" class="da-subnav-btn" data-da-sub="detectall">Detect All</button>
+          <button type="button" class="da-subnav-btn" data-da-sub="history">History</button>
+        </nav>
+
+        <div class="da-subpage is-active" data-da-sub="single">
+        <div class="card">
+          <div class="card-header"><h2>1. Detect</h2></div>
+          <div class="key-panel-row" style="margin-bottom:10px;">
+            <label class="field-label">NISS</label>
+            <input id="da-niss" class="text-input" style="flex:1;" />
+            <label class="field-label" title="Only readings with ID_BILLING_PERIOD greater than this value are considered, in both the anomaly search and the search for the correct date to apply. Use it to exclude old/irrelevant billing periods for this NISS. 0 (default) means no floor - all periods are considered.">Billing period floor ⓘ</label>
+            <input id="da-threshold" class="text-input text-input-sm" type="number" value="0" title="ID_BILLING_PERIOD must be greater than this value. 0 = no floor." />
+            <button type="button" class="btn btn-primary" id="da-detect-btn">🔍 Detect Anomalies</button>
+          </div>
+          <div class="hint-text">Billing period floor: only readings with ID_BILLING_PERIOD greater than this number are checked (both for anomalies and for the "correct date" lookup). Leave at 0 to consider every billing period for this NISS.</div>
+          <div class="hint-text" id="da-summary"></div>
+          <div class="grid-wrap">
+            <table class="data-grid" id="da-anomaly-table">
+              <thead><tr><th>ID_READING</th><th>Billing Period</th><th>Reading Date</th><th>Read Status</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="card-header" style="margin-top:14px;">
+            <h2 style="font-size:14px;">Case explanation</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="da-explain-ai-btn" disabled title="Run Detect first">🤖 Analyze with AI</button>
+            </div>
+          </div>
+          <div class="hint-text">Case explanation above is generated automatically, no AI needed. "Analyze with AI" below is a separate, optional second opinion from Gemini.</div>
+          <div class="ai-output" id="da-explanation"></div>
+          <div class="ai-output" id="da-explain-ai-output"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>2. Resolve Bill Links</h2></div>
+          <p class="hint-text">Maps each anomalous reading to its GCCOM_ITEMS_TO_BILL / GCCOM_ITEMS_TO_BILL_XML rows, and checks whether those tables carry the update_program/date/user audit columns. Run Detect first.</p>
+          <button type="button" class="btn btn-secondary" id="da-resolve-btn" disabled>🧩 Resolve Bill Links</button>
+          <div class="hint-text" id="da-links-summary"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>3. Generate Correction Script</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="da-copy-btn">📋 Copy</button>
+              <button type="button" class="btn btn-pill" id="da-download-btn">⬇ Download .sql</button>
+            </div>
+          </div>
+          <div class="key-panel-row" style="margin-bottom:10px;">
+            <label class="field-label">Jira / Program #</label>
+            <input id="da-program" class="text-input text-input-sm" value="JIRAXXXX" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;" title="Strips every comment line (header, per-statement labels, footer reminders) - leaves just the bare UPDATE/DELETE statements.">
+              <input type="checkbox" id="da-clean-toggle" /> Clean script (no comments)
+            </label>
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;" title="When this NISS's anomalous readings span more than one billing period, generate the script for just the earliest (lowest) one - readings from later billing periods are excluded. No effect when there's only one billing period.">
+              <input type="checkbox" id="da-lowest-period-toggle" /> Lowest billing period only (if multiple)
+            </label>
+            <button type="button" class="btn btn-primary" id="da-generate-btn" disabled>📝 Generate Correction Script</button>
+          </div>
+          <pre class="script-output" id="da-output">No correction script generated yet — run Detect and Resolve Bill Links first.</pre>
+        </div>
+        </div><!-- /da-subpage: single -->
+
+        <div class="da-subpage" data-da-sub="batch">
+        <div class="card">
+          <div class="card-header">
+            <h2>Batch / Multi-NISS Processing</h2>
+            <div class="card-header-actions">
+              <select id="da-batch-recent" class="text-input text-input-sm" title="Reattach to a recent batch run">
+                <option value="">Recent runs…</option>
+              </select>
+              <button type="button" class="btn btn-pill" id="da-batch-copy-btn" disabled title="Run a batch first">📋 Copy</button>
+              <button type="button" class="btn btn-pill" id="da-batch-download-btn" disabled title="Run a batch first">⬇ Download .sql</button>
+              <button type="button" class="btn btn-pill" id="da-batch-explain-ai-btn" disabled title="Run a batch first">🤖 Analyze with AI</button>
+            </div>
+          </div>
+          <p class="hint-text">Runs in the background: Detect → Resolve → Generate for every NISS below, independently, using the same billing period floor and program #. One NISS failing (no anomalies, no correctly-billed reading, connection error) does not stop the rest. Each NISS keeps its own self-contained script in the combined output (no BEGIN TRANSACTION wrapper - statements run and commit on their own). A large list can take a while — this page polls for progress, and the run keeps going even if you navigate away or close the tab; come back and pick it from "Recent runs" above to reattach.</p>
+          <div class="key-panel-row" style="align-items:flex-start; margin-bottom:10px;">
+            <label class="field-label">NISS list</label>
+            <textarea id="da-batch-niss" class="text-input" style="flex:1; min-height:70px; font-family:monospace;" placeholder="One NISS per line (or comma-separated), e.g.&#10;10450618-301&#10;10450618-302"></textarea>
+          </div>
+          <div class="key-panel-row" style="margin-bottom:10px;">
+            <label class="field-label" title="Same meaning as the single-NISS floor above: only readings with ID_BILLING_PERIOD greater than this value are considered for every NISS in the batch.">Billing period floor ⓘ</label>
+            <input id="da-batch-threshold" class="text-input text-input-sm" type="number" value="0" />
+          </div>
+          <div class="key-panel-row" style="margin-bottom:10px;">
+            <label class="field-label">Jira / Program #</label>
+            <input id="da-batch-program" class="text-input text-input-sm" value="JIRAXXXX" style="width:160px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;" title="Strips comments from the combined batch script, including the per-NISS summary lines - leaves just the UPDATE statements, ready to run.">
+              <input type="checkbox" id="da-batch-clean-toggle" /> Clean script (no comments)
+            </label>
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;" title="For any NISS in this batch whose anomalous readings span more than one billing period, generate that NISS's script for just the earliest (lowest) one - readings from later billing periods are excluded. NISS with only one billing period are unaffected.">
+              <input type="checkbox" id="da-batch-lowest-period-toggle" /> Lowest billing period only (if multiple)
+            </label>
+          </div>
+          <div class="key-panel-row" style="margin-bottom:10px;">
+            <button type="button" class="btn btn-primary" id="da-batch-run-btn">🚀 Run Batch</button>
+            <button type="button" class="btn btn-secondary" id="da-batch-cancel-btn" hidden>✋ Cancel</button>
+          </div>
+          <div class="hint-text" id="da-batch-summary"></div>
+          <div class="grid-wrap">
+            <table class="data-grid" id="da-batch-table">
+              <thead><tr><th>NISS</th><th>Status</th><th>Readings</th><th>Items</th><th>Status advanced</th><th>XML</th><th>Anomalies cancelled</th><th title="Non-cycle (TIPTL00011) readings reset to 1000STSRED">Non-cycle reset</th><th title="Distinct GCGT_RE_READING.ID_BILLING_PERIOD values among this NISS's anomalous readings. More than 1 highlights the row orange.">Billing periods</th><th>Warnings</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="card-header-actions" style="margin:14px 0 6px;">
+            <span class="field-label" style="margin-right:auto;">Combined script</span>
+            <button type="button" class="btn btn-pill" id="da-batch-copy-btn-2" disabled title="Run a batch first">📋 Copy</button>
+            <button type="button" class="btn btn-pill" id="da-batch-download-btn-2" disabled title="Run a batch first">⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" id="da-batch-output">No batch run yet.</pre>
+          <div class="ai-output" id="da-batch-explain-ai-output"></div>
+        </div>
+        </div><!-- /da-subpage: batch -->
+
+        <div class="da-subpage" data-da-sub="history">
+        <div class="card">
+          <div class="card-header">
+            <h2>Analysis History</h2>
+            <div class="card-header-actions">
+              <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                <input type="checkbox" id="da-history-team-toggle" /> Show everyone's
+              </label>
+              <button type="button" class="btn btn-pill" id="da-history-refresh-btn">🔄 Refresh</button>
+            </div>
+          </div>
+          <p class="hint-text">Every NISS run through Detect, on this page or in a batch - including ones that never made it to Generate. Click a row to see its full case explanation.</p>
+          <div class="grid-wrap">
+            <table class="data-grid" id="da-history-table">
+              <thead><tr><th>When (UTC)</th><th>NISS</th><th>User</th><th>Source</th><th>Anomalies</th><th>Items</th><th>Status adv.</th><th>XML</th><th>Anomalies cancelled</th><th>Generated?</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="ai-output" id="da-history-detail"></div>
+        </div>
+        </div><!-- /da-subpage: history -->
+
+        <div class="da-subpage" data-da-sub="detectall">
+        <div class="card">
+          <div class="card-header">
+            <h2>Detect All Pending Anomalies</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="da-cleanup-detect-btn">🔍 Detect All</button>
+              <button type="button" class="btn btn-pill" id="da-cleanup-export-csv-btn" hidden>⬇ Export CSV</button>
+              <button type="button" class="btn btn-pill" id="da-cleanup-export-xlsx-btn" hidden>⬇ Export Excel</button>
+            </div>
+          </div>
+          <p class="hint-text">Scans <strong>every</strong> NISS at once for OPEN Diff Date System anomalies (no NISS needed here) — for discovering pending cases rather than investigating one you already know about.</p>
+          <div class="warning-banner">
+            ℹ️ <strong>Generate Script for Selected</strong> runs the full original correction (<code>READING_PREV_DATE</code>, <code>INI_DATE</code>, <code>XML_TO_BILL</code>, <code>GCCOM_ITEMS_TO_BILL.STATUS</code>, cancelling <code>GCCOM_ANOMALOUS</code>, and resetting any non-cycle <code>TIPTL00011</code> readings) for each selected row's Supply/NISS — the same pipeline as Single NISS/Batch — via a background batch run. You'll be switched to the <strong>Batch</strong> tab to watch it run.
+          </div>
+          <div class="hint-text" id="da-cleanup-summary"></div>
+
+          <div class="key-panel-row da-cleanup-filter-bar" id="da-cleanup-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <input id="da-cleanup-filter-search" class="text-input text-input-sm" placeholder="Account or NISS…" style="width:160px;" />
+            <label class="field-label">Offered service</label>
+            <select id="da-cleanup-filter-service" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Anomaly type</label>
+            <select id="da-cleanup-filter-type" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Needs status advance</label>
+            <select id="da-cleanup-filter-advance" class="text-input text-input-sm">
+              <option value="">All</option>
+              <option value="yes">Yes only</option>
+              <option value="no">No only</option>
+            </select>
+            <label class="field-label">All cycle</label>
+            <select id="da-cleanup-filter-cycle" class="text-input text-input-sm">
+              <option value="">All</option>
+              <option value="yes">Yes only</option>
+              <option value="no">No only</option>
+            </select>
+            <label class="field-label" title="Distinct GCGT_RE_READING.ID_BILLING_PERIOD values across this item's linked readings - more than 1 highlights the row orange.">Multi billing period</label>
+            <select id="da-cleanup-filter-multiperiod" class="text-input text-input-sm">
+              <option value="">All</option>
+              <option value="yes">Multiple periods only</option>
+              <option value="no">Single period only</option>
+            </select>
+            <button type="button" class="btn btn-pill-sm" id="da-cleanup-filter-clear-btn">✕ Clear filters</button>
+          </div>
+
+          <div class="kpi-row" id="da-cleanup-kpi-row" style="margin:18px 0 4px;"></div>
+          <div class="da-cleanup-chart-grid" id="da-cleanup-chart-grid" hidden>
+            <div>
+              <div class="hint-text">By offered service <span class="chart-hint-tap">— click a bar to filter</span></div>
+              <canvas id="da-cleanup-chart-service" class="chart-canvas" width="360" height="200"></canvas>
+              <div class="chart-legend" id="da-cleanup-chart-service-legend"></div>
+            </div>
+            <div>
+              <div class="hint-text">By anomaly type <span class="chart-hint-tap">— click a bar to filter</span></div>
+              <canvas id="da-cleanup-chart-type" class="chart-canvas" width="360" height="200"></canvas>
+              <div class="chart-legend" id="da-cleanup-chart-type-legend"></div>
+            </div>
+          </div>
+
+          <div class="grid-wrap" style="margin-top:18px;">
+            <table class="data-grid" id="da-cleanup-table">
+              <thead><tr>
+                <th><input type="checkbox" id="da-cleanup-select-all" title="Select all visible rows" /></th>
+                <th>ID_ITEM_TO_BILL</th>
+                <th>Account</th>
+                <th>Supply (NISS)</th>
+                <th>Offered service</th>
+                <th>Contract status</th>
+                <th>Anomaly type</th>
+                <th>Anomaly status</th>
+                <th>Item status</th>
+                <th>Needs status advance?</th>
+                <th title="Yes = every reading linked to this item is a cycle-type reading. No = at least one linked reading isn't.">All cycle?</th>
+                <th title="Distinct GCGT_RE_READING.ID_BILLING_PERIOD values across this item's linked readings. More than 1 highlights the row orange.">Billing periods</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>Generate Cleanup Script</h2></div>
+          <p class="hint-text">Generates the STATUS-advance + anomaly-cancel script for whatever is checked above (respects the active filters — only checked rows are included, whether or not they're currently visible).</p>
+          <p class="hint-text" id="da-cleanup-selection-hint" style="font-weight:600; color: var(--text-secondary);">☝️ Check one or more rows in the table above to enable Generate — check exactly one to also enable Explain.</p>
+          <div class="key-panel-row" style="margin:10px 0;">
+            <label class="field-label">Jira / Program #</label>
+            <input id="da-cleanup-program" class="text-input text-input-sm" value="JIRAXXXX" style="width:160px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;" title="Strips every comment line, including the bulk-cleanup warning above - leaves just the bare UPDATE statements.">
+              <input type="checkbox" id="da-cleanup-clean-toggle" /> Clean script (no comments)
+            </label>
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;" title="For any selected NISS whose anomalous readings span more than one billing period, generate that NISS's script for just the earliest (lowest) one - readings from later billing periods are excluded. NISS with only one billing period are unaffected.">
+              <input type="checkbox" id="da-cleanup-lowest-period-toggle" /> Lowest billing period only (if multiple)
+            </label>
+            <button type="button" class="btn btn-primary" id="da-cleanup-generate-btn" disabled title="Check at least one row in the table above">📝 Generate Script for Selected</button>
+            <button type="button" class="btn btn-secondary" id="da-cleanup-explain-btn" disabled title="Enabled only when exactly one row is selected">🤖 Explain Selected</button>
+          </div>
+          <div class="ai-output" id="da-cleanup-explain-output"></div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" id="da-cleanup-copy-btn">📋 Copy</button>
+            <button type="button" class="btn btn-pill" id="da-cleanup-download-btn">⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" id="da-cleanup-output">No cleanup script generated yet — Detect All, select items, then Generate.</pre>
+        </div>
+        </div><!-- /da-subpage: detectall -->
+      </section>
+
+      <!-- ===== Hierarchy Analysis page ===== -->
+      <section class="page" id="page-hierarchy">
+        <header class="page-header">
+          <h1>Hierarchy Analysis</h1>
+          <p class="page-subtitle">Finds every PRIMARY meter hierarchy (GCGT_RE_MEASUREMENT_POINT.MP_TYPE = Principal or Principal acoplado, MP status Active or Disconnected) with a reading that hasn't been billed yet, narrowed to each primary's earliest pending billing period.</p>
+        </header>
+
+        <div class="warning-banner">
+          ℹ️ <strong>Draft feature.</strong> The "primary" definition (MP_TYPE IN Principal / Principal acoplado, via GCGT_RE_MP_TYPE) and MP status filter (Active or Disconnected only, via GCGT_RE_MEASURE_POINT_STATUS) reflect your own correction to an earlier IND_DIST_PPAL-based draft. The pending read-status/reading-type filters were derived from live schema lookups, not yet confirmed against your own judgment — see chat for the exact query and assumptions, and flag anything that looks wrong. Results are also floored to billing periods after <strong>10000000193</strong> (MIN_BILLING_PERIOD) — older pending periods are left out.
+        </div>
+
+        <div class="card" id="hier-dashboard-card" hidden>
+          <div class="card-header">
+            <h2>Overview</h2>
+          </div>
+          <p class="hint-text">Recomputed from whatever's currently visible below — apply a filter and this updates with it.</p>
+          <div class="kpi-row" id="hier-dashboard-kpi-row"></div>
+          <div class="kpi-row" id="hier-dashboard-type-row" style="margin-top:10px;"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Pending Primary Hierarchies</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="hier-detect-btn">🔍 Detect Pending Primaries</button>
+              <button type="button" class="btn btn-pill" id="hier-export-csv-btn" hidden>⬇ Export CSV</button>
+              <button type="button" class="btn btn-pill" id="hier-export-xlsx-btn" hidden>⬇ Export Excel</button>
+            </div>
+          </div>
+          <p class="hint-text">Scans <strong>every</strong> primary measuring point at once for a not-yet-billed Cycle/Distribution reading — no NISS/id needed here. Click 🔗 on a row to drill into that hierarchy's full member list. <span class="row-primary-only-swatch">■</span> green rows have every secondary already sent to bill (or further) — the primary's own reading is the only thing left to fix in that hierarchy.</p>
+          <div class="hint-text" id="hier-summary"></div>
+
+          <div class="key-panel-row" id="hier-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <input id="hier-filter-search" class="text-input text-input-sm" placeholder="NISS or measuring point…" style="width:180px;" />
+            <label class="field-label">Read status</label>
+            <select id="hier-filter-status" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Reading type</label>
+            <select id="hier-filter-type" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">MP status</label>
+            <select id="hier-filter-mpstatus" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Billing period</label>
+            <select id="hier-filter-billingperiod" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label" style="display:flex;align-items:center;gap:6px;">
+              <input type="checkbox" id="hier-filter-primaryonly" />
+              Primary-only <span class="row-primary-only-swatch">■</span>
+            </label>
+            <button type="button" class="btn btn-pill-sm" id="hier-filter-clear-btn">✕ Clear filters</button>
+          </div>
+
+          <div class="kpi-row" id="hier-kpi-row" style="margin:18px 0 4px;"></div>
+
+          <div class="grid-wrap" style="margin-top:18px;">
+            <table class="data-grid" id="hier-table">
+              <thead><tr>
+                <th class="stats-table-th-sortable" data-sort="id_measuring_point">Measuring Point</th>
+                <th class="stats-table-th-sortable" data-sort="id_main_mp">Main MP</th>
+                <th class="stats-table-th-sortable" data-sort="niss">Supply (NISS)</th>
+                <th class="stats-table-th-sortable" data-sort="mp_type">MP Type</th>
+                <th class="stats-table-th-sortable" data-sort="mp_status">MP Status</th>
+                <th class="stats-table-th-sortable" data-sort="secondary_count">Secondaries</th>
+                <th class="stats-table-th-sortable" data-sort="secondaries_not_sent_count" title="How many secondaries still have a not-yet-sent (Available/Anomalous) reading, or none at all in scope — 0 means only the primary itself needs attention">Sec. Not Sent</th>
+                <th class="stats-table-th-sortable" data-sort="calc_module_type">Type (Calc Module)</th>
+                <th class="stats-table-th-sortable" data-sort="id_billing_period">Billing Period</th>
+                <th class="stats-table-th-sortable" data-sort="id_reading">Reading</th>
+                <th class="stats-table-th-sortable" data-sort="reading_date">Reading Date</th>
+                <th class="stats-table-th-sortable" data-sort="reading_type">Reading Type</th>
+                <th class="stats-table-th-sortable" data-sort="read_status">Read Status</th>
+                <th class="stats-table-th-sortable" data-sort="ready_usage" title="READY_USAGE — the analyst's own most-important field on this page">★ Ready Usage</th>
+                <th class="stats-table-th-sortable" data-sort="reading_usage">Usage</th>
+                <th></th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" id="hier-detail-card" hidden>
+          <div class="card-header">
+            <h2>Hierarchy Detail <span id="hier-detail-title" class="hint-text"></span></h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill-sm" id="hier-detail-close-btn">✕ Close</button>
+            </div>
+          </div>
+          <p class="hint-text">Every member of this hierarchy (its own row plus any children whose ID_MAIN_MP points to it) across its full reading history — the analyst's own drill-down query, run for this one measuring point. <span class="row-not-billed-swatch">■</span> = supply not yet billed (always sorted to the top).</p>
+          <div class="key-panel-row" id="hier-detail-filter-row">
+            <label class="field-label" style="display:flex;align-items:center;gap:6px;">
+              <input type="checkbox" id="hier-detail-filter-notbilled" />
+              Not billed only
+            </label>
+          </div>
+          <div class="grid-wrap">
+            <table class="data-grid" id="hier-detail-table">
+              <thead><tr>
+                <th class="stats-table-th-sortable" data-sort="id_measuring_point">Measuring Point</th>
+                <th class="stats-table-th-sortable" data-sort="id_main_mp">Main MP</th>
+                <th class="stats-table-th-sortable" data-sort="niss">NISS</th>
+                <th>Primary?</th>
+                <th class="stats-table-th-sortable" data-sort="perc_dist">% Dist</th>
+                <th class="stats-table-th-sortable" data-sort="mp_type">MP Type</th>
+                <th class="stats-table-th-sortable" data-sort="status">MP Status</th>
+                <th class="stats-table-th-sortable" data-sort="id_billing_period">Billing Period</th>
+                <th class="stats-table-th-sortable" data-sort="id_reading">Reading</th>
+                <th class="stats-table-th-sortable" data-sort="reading_date">Reading Date</th>
+                <th class="stats-table-th-sortable" data-sort="reading_type">Reading Type</th>
+                <th class="stats-table-th-sortable" data-sort="read_status">Read Status</th>
+                <th class="stats-table-th-sortable" data-sort="ready_usage" title="READY_USAGE — the analyst's own most-important field on this page">★ Ready Usage</th>
+                <th class="stats-table-th-sortable" data-sort="value">Value</th>
+                <th></th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Reading-history popup (task #143) - opened via the "Readings"
+             link on a Hierarchy Detail row. Shows every reading for that
+             row's supply (ID_SECTOR_SUPPLY), with the billing period the
+             row itself was reviewed at highlighted (analyst's own ask:
+             "highlight the reading in the pop up window when we click it
+             from the details"). -->
+        <div class="hier-reading-modal-overlay" id="hier-reading-modal-overlay" hidden>
+          <div class="hier-reading-modal">
+            <div class="card-header">
+              <h2>Reading History <span id="hier-reading-modal-title" class="hint-text"></span></h2>
+              <div class="card-header-actions">
+                <button type="button" class="btn btn-pill-sm" id="hier-reading-modal-close-btn">✕ Close</button>
+              </div>
+            </div>
+            <p class="hint-text">Every reading for this supply (ID_SECTOR_SUPPLY), newest billing period first. <span class="row-checking-swatch">■</span> = the billing period being reviewed on the row you opened this from.</p>
+            <div class="grid-wrap">
+              <table class="data-grid" id="hier-reading-modal-table">
+                <thead><tr>
+                  <th>Billing Period</th><th>ID Reading</th><th>Reading Type</th><th>Usage Type</th>
+                  <th>Read Status</th><th>Prev Date</th><th>Reading Date</th><th>Prev Value</th>
+                  <th>Value</th><th>Reading Usage</th><th>★ Ready Usage</th><th>Est.</th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Tools page ===== -->
+      <section class="page" id="page-tools">
+        <header class="page-header">
+          <h1>Tools</h1>
+          <p class="page-subtitle">Saved queries, schema validation, and snapshot comparison.</p>
+        </header>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Saved Queries</h2>
+            <span class="hint-text">Named, kept until you delete them — unlike the Workspace Recent menu</span>
+          </div>
+          <div class="key-panel-row" style="margin-bottom:10px;">
+            <input id="save-query-name" class="text-input" placeholder="Name for the current Workspace query" style="flex:1;" />
+            <button type="button" class="btn btn-pill" id="save-query-btn">💾 Save Current Query</button>
+          </div>
+          <div class="grid-wrap">
+            <table class="data-grid" id="saved-queries-table">
+              <thead><tr><th>Name</th><th>Query</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>Validate Target Schema</h2></div>
+          <p class="hint-text">Checks the Workspace's Target schema/table/key columns against the table's actual columns before you generate a script.</p>
+          <button type="button" class="btn btn-pill" id="validate-schema-btn">🔍 Validate</button>
+          <div class="ai-output" id="schema-validate-output"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Snapshot Diff Viewer</h2>
+            <span class="hint-text">Compares two exported snapshots of the same table/query</span>
+          </div>
+          <div class="key-panel-row" style="margin-bottom:10px;">
+            <input id="snapshot-export-name" class="text-input" placeholder="Name for a new snapshot of the current Workspace result" style="flex:1;" />
+            <button type="button" class="btn btn-pill" id="snapshot-export-btn">📤 Export Snapshot</button>
+          </div>
+          <div class="key-panel-row" style="margin-bottom:10px;">
+            <label class="field-label">Older</label>
+            <select id="snapshot-a-select" class="text-input text-input-sm"></select>
+            <label class="field-label">Newer</label>
+            <select id="snapshot-b-select" class="text-input text-input-sm"></select>
+            <button type="button" class="btn btn-pill-sm" id="snapshot-refresh-btn">🔄 Refresh List</button>
+          </div>
+          <div class="key-panel-row">
+            <label class="field-label">Key column(s), comma-separated (blank = full-row match)</label>
+            <input id="snapshot-key-columns" class="text-input text-input-sm" style="flex:1;" />
+            <button type="button" class="btn btn-pill-sm" id="snapshot-compare-btn">Compare</button>
+          </div>
+          <div class="hint-text" id="snapshot-diff-summary"></div>
+          <div class="grid-wrap">
+            <table class="data-grid" id="snapshot-diff-table">
+              <thead><tr><th>Key</th><th>Status</th><th>Detail</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Settings page ===== -->
+      <section class="page" id="page-settings">
+        <header class="page-header">
+          <h1>Settings</h1>
+          <p class="page-subtitle">Your account, connections, AI Assist, and (for admins) user management — the web equivalent of the desktop app's Config dialog.</p>
+        </header>
+
+        <div class="card">
+          <div class="card-header"><h2>My Account</h2></div>
+          <p class="hint-text">Signed in as <strong id="account-username-text"></strong> — role: <span class="badge" id="account-role-badge"></span></p>
+          <form id="change-password-form" class="form-grid">
+            <div><label class="field-label">Current password</label><input id="cp-old" class="text-input" type="password" autocomplete="current-password" required /></div>
+            <div><label class="field-label">New password (min 8 characters)</label><input id="cp-new" class="text-input" type="password" autocomplete="new-password" required minlength="8" /></div>
+            <div><label class="field-label">Confirm new password</label><input id="cp-confirm" class="text-input" type="password" autocomplete="new-password" required minlength="8" /></div>
+          </form>
+          <div class="generate-row">
+            <button type="submit" form="change-password-form" class="btn btn-primary">Change Password</button>
+            <span class="hint-text" id="cp-result"></span>
+          </div>
+        </div>
+
+        <div id="admin-settings-section" hidden>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Users</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="add-user-btn">＋ Add User</button>
+            </div>
+          </div>
+          <p class="hint-text">Least-privilege roles: <strong>Viewer</strong> can browse and run read queries only; <strong>Editor</strong> can also generate scripts, export snapshots, and use full AI Assist; <strong>Admin</strong> can additionally manage connections, AI settings, and other users.</p>
+          <div class="grid-wrap">
+            <table class="data-grid" id="users-table">
+              <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <form id="user-form" class="connection-form" hidden>
+            <h3>Add User</h3>
+            <div class="form-grid">
+              <div><label class="field-label">Username</label><input id="user-username" class="text-input" required /></div>
+              <div><label class="field-label">Temporary password (min 8 characters)</label><input id="user-password" class="text-input" type="password" required minlength="8" /></div>
+              <div>
+                <label class="field-label">Role</label>
+                <select id="user-role" class="text-input">
+                  <option value="viewer">Viewer</option>
+                  <option value="editor" selected>Editor</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+            </div>
+            <p class="hint-text">They'll be asked to set their own password on first login.</p>
+            <div class="generate-row">
+              <button type="submit" class="btn btn-primary">Add User</button>
+              <button type="button" class="btn btn-secondary" id="user-form-cancel-btn">Cancel</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Menu Access</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-primary" id="menu-access-save-btn">Save</button>
+            </div>
+          </div>
+          <p class="hint-text">Which sidebar pages each role sees. This only hides the nav button — it's not a second permission system, the real gates (what a role can actually DO) are unchanged and still enforced server-side regardless of what's checked here. Admin always keeps Settings, so there's always a way back into this panel.</p>
+          <div class="grid-wrap">
+            <table class="data-grid" id="menu-access-table">
+              <thead><tr><th>Page</th><th>Viewer</th><th>Editor</th><th>Admin</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Connections</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="add-connection-btn">＋ Add Connection</button>
+            </div>
+          </div>
+          <div class="grid-wrap">
+            <table class="data-grid" id="connections-table">
+              <thead><tr><th>Name</th><th>Server</th><th>Database</th><th>Username</th><th>Active</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <form id="connection-form" class="connection-form" hidden>
+            <h3 id="connection-form-title">Add Connection</h3>
+            <div class="form-grid">
+              <div><label class="field-label">Name</label><input id="conn-name" class="text-input" required /></div>
+              <div><label class="field-label">Server</label><input id="conn-server" class="text-input" required /></div>
+              <div><label class="field-label">Port</label><input id="conn-port" class="text-input" type="number" value="1433" /></div>
+              <div><label class="field-label">Database (blank = default)</label><input id="conn-database" class="text-input" /></div>
+              <div><label class="field-label">Username</label><input id="conn-username" class="text-input" /></div>
+              <div><label class="field-label">Password</label><input id="conn-password" class="text-input" type="password" placeholder="(leave blank to keep existing)" /></div>
+              <div><label class="field-label">Timeout (seconds)</label><input id="conn-timeout" class="text-input" type="number" value="10" /></div>
+              <div class="form-grid-wide"><label class="field-label">Notes</label><input id="conn-notes" class="text-input" /></div>
+            </div>
+            <div class="generate-row">
+              <button type="button" class="btn btn-secondary" id="conn-test-btn">Test Connection</button>
+              <button type="submit" class="btn btn-primary" id="conn-save-btn">Save</button>
+              <button type="button" class="btn btn-secondary" id="conn-cancel-btn">Cancel</button>
+              <span class="hint-text" id="conn-test-result"></span>
+            </div>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>AI Assist (Gemini)</h2></div>
+          <div class="form-grid">
+            <div><label class="field-label">Model</label><input id="ai-model-field" class="text-input" value="gemini-3.6-flash" /></div>
+            <div><label class="field-label">API key</label><input id="ai-key-field" class="text-input" type="password" placeholder="(leave blank to keep existing)" /></div>
+          </div>
+          <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:8px;">
+            <input type="checkbox" id="ai-enabled-checkbox" checked /> Enabled
+          </label>
+          <div class="generate-row">
+            <button type="button" class="btn btn-secondary" id="ai-test-key-btn">Test Key</button>
+            <button type="button" class="btn btn-primary" id="ai-save-btn">Save</button>
+            <span class="hint-text" id="ai-key-status-text"></span>
+          </div>
+        </div>
+
+        </div><!-- /#admin-settings-section -->
+      </section>
+
+    </main>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+# ScriptGen - runtime dependencies
+# Install with: pip install -r requirements.txt
+#
+# python-tds is pure Python (zero compiled extensions), so nothing here
+# ever needs to compile or link against anything - no C build tools, no
+# ODBC/Oracle client install, on any machine running the built .exe.
+# (An earlier draft used `pymssql`, which bundles a compiled FreeTDS
+# binding; it has no prebuilt wheel for every Python version and can
+# fall back to a from-source build that fails without VC++ build tools
+# installed. python-tds avoids that whole class of problem.)
+
+python-tds==1.17.1       # SQL Server driver - pure Python, no compiled extensions at all
+cryptography==43.0.3     # Fernet encryption for the stored connection password/AI key
+requests==2.32.3         # HTTP calls to the Gemini API
+openpyxl==3.1.5          # .xlsx export for the results grid / Dashboard stats table - pure Python, no compiled extensions
+sqlparse==0.6.0          # Query editor's "Format" button (prettify SQL) - pure Python, no compiled extensions
+
+# --- Legacy desktop UI (app/ui/*) - being retired in favor of web/, see
+# README's "Web + desktop, one codebase" section. Kept only until the web
+# UI reaches full feature parity (Dashboard/AI Assist/Tools tab, still
+# Tkinter-only for now); safe to drop once that's done.
+tksheet==7.2.13          # Editable spreadsheet-style grid widget for Tkinter
+ttkbootstrap>=2.2,<3     # Modern flat theming for Tkinter (light/dark theme toggle)
+matplotlib>=3.9,<4       # Charts embedded in the Dashboard window
+
+# --- Web UI (web/) - FastAPI backend + plain HTML/CSS/JS frontend, same
+# app.core/app.db logic underneath. Runs as a real website (uvicorn) OR
+# gets wrapped in a native window for the desktop build - one codebase,
+# two launch modes (see desktop_launcher.py).
+fastapi==0.141.1         # web/server.py - routes, request validation (pydantic)
+uvicorn[standard]==0.46.0 # ASGI server that actually runs the FastAPI app
+itsdangerous==2.2.0      # Signs the session cookie (starlette.SessionMiddleware)
+bcrypt==5.0.0            # One-way hashing for web login passwords (web/auth.py) -
+                          # deliberately NOT the reversible Fernet scheme config.py
+                          # uses for the DB password/AI key, since a login password
+                          # only ever needs to be verified, never read back.
+pywebview==5.4           # Wraps the same web UI in a native desktop window for the
+                          # .exe build - no compiled extensions of its own on Windows
+                          # (uses the OS's built-in WebView2/Edge runtime).
+
+pyinstaller>=6.15,<7     # Used only to BUILD the standalone .exe (dev-time only).
+                          # Range, not a strict pin: pip picks the newest release
+                          # that supports whatever Python you have installed -
+                          # older PyInstaller releases don't support brand-new
+                          # Python versions yet, which is what failed here.

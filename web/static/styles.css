@@ -1,0 +1,953 @@
+/* ScriptGen web UI - dark sidebar / light content look, modeled after
+   the "Bill Checker" reference screenshot: near-black sidebar with a
+   status footer, light blue-gray content area, rounded white cards,
+   pill-shaped buttons and toggles. */
+
+:root {
+  --sidebar-bg: #12131c;
+  --sidebar-bg-active: #232a44;
+  --sidebar-text: #aab0c0;
+  --sidebar-text-muted: #6b7280;
+  --sidebar-text-active: #ffffff;
+  --sidebar-border: #23242f;
+
+  --content-bg: #eef1f6;
+  --card-bg: #ffffff;
+  --card-border: #e4e7ee;
+  --card-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 10px rgba(16, 24, 40, 0.05);
+
+  --text-primary: #14151f;
+  --text-secondary: #6b7280;
+  --text-muted: #9aa1af;
+
+  --accent: #3b5bfd;
+  --accent-hover: #2c48e0;
+  --accent-bg-soft: #eef0ff;
+
+  --success: #22c55e;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+
+  --radius-lg: 14px;
+  --radius-md: 10px;
+  --radius-sm: 8px;
+  --radius-pill: 999px;
+
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+/* .login-screen/.app-shell both set their own `display` unconditionally
+   (flex, for centering/layout) and are toggled via the `hidden` attribute
+   in app.js - but an author-stylesheet class rule and the browser's
+   built-in `[hidden] { display: none }` UA rule have EQUAL selector
+   specificity, and author styles win a tie. Without this, `hidden` is
+   silently a no-op on any element whose own class already sets `display`,
+   which is exactly the login screen / app shell toggle this page relies
+   on - so this has to be both !important and after those rules. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--content-bg);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+}
+
+button { font-family: inherit; }
+
+/* ---------------- Login screen ---------------- */
+.login-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Soft radial glow over the sidebar-dark base, rather than the previous
+     hard-edge diagonal (two colors meeting at a sharp 45% seam, which
+     read as a rendering glitch rather than an intentional design). */
+  background:
+    radial-gradient(900px circle at 15% 20%, rgba(59, 91, 253, 0.22), transparent 55%),
+    radial-gradient(700px circle at 85% 85%, rgba(59, 91, 253, 0.12), transparent 50%),
+    var(--sidebar-bg);
+}
+
+.login-card {
+  width: 340px;
+  background: var(--card-bg);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 40px rgba(10, 12, 24, 0.25);
+  padding: 32px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.brand-icon { font-size: 26px; }
+.brand-title { font-weight: 700; font-size: 17px; color: var(--text-primary); }
+.brand-subtitle { font-size: 12px; color: var(--text-secondary); }
+
+.login-error {
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 12.5px;
+  margin-top: 4px;
+}
+
+/* ---------------- Shared form controls ---------------- */
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.text-input {
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  font-size: 13.5px;
+  color: var(--text-primary);
+  background: #fff;
+  outline: none;
+}
+.text-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg-soft); }
+.text-input-sm { padding: 6px 9px; font-size: 13px; }
+
+.btn {
+  border: none;
+  border-radius: var(--radius-md);
+  padding: 9px 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn-block { width: 100%; justify-content: center; margin-top: 6px; }
+
+.btn-primary { background: var(--accent); color: #fff; box-shadow: 0 1px 2px rgba(59, 91, 253, 0.15), 0 2px 6px rgba(59, 91, 253, 0.18); }
+.btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+
+.btn-secondary { background: #eef0f4; color: var(--text-primary); }
+.btn-secondary:hover:not(:disabled) { background: #e3e6ec; }
+
+.btn-pill {
+  background: #fff;
+  color: var(--accent);
+  border: 1px solid #c7cffb;
+  border-radius: var(--radius-pill);
+  padding: 8px 16px;
+  font-size: 13px;
+}
+.btn-pill:hover:not(:disabled) { background: var(--accent-bg-soft); }
+
+.btn-pill-sm {
+  background: #fff;
+  color: var(--text-secondary);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-pill);
+  padding: 5px 12px;
+  font-size: 12px;
+}
+.btn-pill-sm:hover:not(:disabled) { background: #f4f5f8; }
+
+.btn-ghost-dark {
+  background: transparent;
+  color: var(--sidebar-text);
+  border: 1px solid var(--sidebar-border);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: 12.5px;
+}
+.btn-ghost-dark:hover { background: #1c1e2c; color: #fff; }
+
+/* ---------------- App shell ---------------- */
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 250px;
+  flex: none;
+  background: var(--sidebar-bg);
+  color: var(--sidebar-text);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 14px;
+  gap: 4px;
+  /* Width is the only thing animated - collapsing/expanding just hides
+     text via [hidden] below, no layout-thrashing transitions on those. */
+  transition: width 0.15s ease;
+  overflow: hidden;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 18px;
+}
+.brand-text .brand-title { color: #fff; }
+.brand-text .brand-subtitle { color: var(--sidebar-text-muted); }
+
+/* ---------------- Collapsible sidebar ----------------
+   Reclaims horizontal space for wide tables (Hierarchy Analysis, Detect
+   All, etc). Collapsed state persists via localStorage (see app.js's
+   initSidebarCollapse(), same IIFE-on-load + click-handler pattern the
+   theme toggle just above already uses). Icon-only nav items keep their
+   `title` attribute (added directly in the HTML) as a hover tooltip once
+   their label text is hidden. */
+.sidebar-collapse-btn {
+  margin-left: auto;
+  flex: none;
+  background: transparent;
+  border: 1px solid var(--sidebar-border);
+  color: var(--sidebar-text-muted);
+  border-radius: var(--radius-md);
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  cursor: pointer;
+  font-size: 12px;
+}
+.sidebar-collapse-btn:hover { background: #1a1c29; color: #fff; }
+
+.sidebar.is-collapsed { width: 64px; }
+.sidebar.is-collapsed .sidebar-brand { padding: 6px 0 18px; justify-content: center; }
+.sidebar.is-collapsed .brand-text,
+.sidebar.is-collapsed .nav-label,
+.sidebar.is-collapsed .nav-soon,
+.sidebar.is-collapsed .user-text,
+.sidebar.is-collapsed .btn-label,
+.sidebar.is-collapsed .status-row span:not(.status-dot),
+.sidebar.is-collapsed .server-info-line { display: none; }
+.sidebar.is-collapsed .sidebar-collapse-btn { margin-left: 0; }
+.sidebar.is-collapsed .nav-item,
+.sidebar.is-collapsed .sidebar-actions .btn { justify-content: center; }
+.sidebar.is-collapsed .sidebar-user { justify-content: center; padding: 10px 0; }
+.sidebar.is-collapsed .status-block { align-items: center; }
+/* Rotated rather than swapped to a different glyph - one element, no
+   extra markup/JS branching to keep the icon in sync with the state. */
+.sidebar.is-collapsed .sidebar-collapse-btn { transform: rotate(180deg); }
+
+.nav { display: flex; flex-direction: column; gap: 2px; }
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: none;
+  color: var(--sidebar-text);
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.nav-item:hover:not(.is-disabled) { background: #1a1c29; color: #fff; }
+.nav-item.is-active { background: var(--sidebar-bg-active); color: var(--sidebar-text-active); font-weight: 700; }
+.nav-item.is-disabled { cursor: default; color: var(--sidebar-text-muted); }
+.nav-icon { font-size: 15px; width: 18px; text-align: center; }
+.nav-label { flex: 1; }
+.nav-soon {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: #23242f;
+  color: var(--sidebar-text-muted);
+  border-radius: var(--radius-pill);
+  padding: 2px 6px;
+}
+
+.sidebar-spacer { flex: 1; }
+
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 8px;
+  border-top: 1px solid var(--sidebar-border);
+  margin-top: 8px;
+}
+.user-avatar {
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12.5px; font-weight: 700;
+  flex: none;
+}
+.user-name { font-size: 13px; font-weight: 600; color: #fff; }
+.user-role { font-size: 11px; color: var(--sidebar-text-muted); }
+
+.sidebar-actions { padding: 0 8px 10px; }
+
+.status-block {
+  border-top: 1px solid var(--sidebar-border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--sidebar-text-muted);
+  padding-left: 8px;
+}
+.status-row { display: flex; align-items: center; gap: 7px; }
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text-muted);
+  flex: none;
+}
+.status-dot.is-ok { background: var(--success); }
+.status-dot.is-bad { background: var(--danger); }
+.status-dot.is-pending { background: var(--warning); }
+
+/* ---------------- Content area ---------------- */
+.content {
+  flex: 1;
+  padding: 28px 34px;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.page { display: none; }
+.page.is-active { display: block; }
+
+.page-header { margin-bottom: 18px; }
+.page-header h1 { margin: 0 0 4px; font-size: 22px; font-weight: 700; }
+.page-subtitle { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
+
+/* In-page sub-navigation, e.g. the Date Anomaly page's Single NISS /
+   Batch / Detect All / History split - a lighter-weight tab bar than the
+   main sidebar nav, scoped to one page rather than switching pages.
+   Styled as a segmented control (light track, active segment lifted onto
+   a white pill) rather than plain underlined text links, so it reads
+   unambiguously as clickable navigation rather than a row of labels. */
+.da-subnav {
+  display: inline-flex;
+  gap: 2px;
+  background: #e4e8f0;
+  border-radius: var(--radius-pill);
+  padding: 4px;
+  margin-bottom: 22px;
+}
+.da-subnav-btn {
+  border: none;
+  background: none;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-pill);
+  transition: background-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+}
+.da-subnav-btn:hover:not(.is-active) { color: var(--text-primary); background: rgba(255, 255, 255, 0.6); }
+.da-subnav-btn.is-active {
+  color: var(--accent);
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.12);
+}
+.da-subpage { display: none; }
+.da-subpage.is-active { display: block; }
+
+/* Server-start diagnostic line (login screen + sidebar) - see server.py's
+   SERVER_STARTED_AT comment for why this exists: it's the fastest way to
+   tell whether "restarting the app" actually started a new process. */
+.server-info-line {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+  margin-top: 10px;
+  text-align: center;
+  cursor: help;
+}
+
+/* Groups the three filter dropdowns + clear button into one visually
+   distinct toolbar panel - previously plain inline-styled text/controls
+   floating directly on the card background, easy to misread as part of
+   the summary text above rather than an interactive filter bar. */
+.da-cleanup-filter-bar {
+  background: #fafbfd;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+/* The anomaly-type filter's <option> text can be long ("code — long
+   description"), and a <select> otherwise sizes itself to its widest
+   option - capped so one long label doesn't blow out the whole toolbar
+   row onto its own line. */
+.da-cleanup-filter-bar select.text-input-sm {
+  max-width: 220px;
+  text-overflow: ellipsis;
+}
+
+.da-cleanup-chart-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+@media (max-width: 720px) {
+  .da-cleanup-chart-grid { grid-template-columns: 1fr; }
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-shadow);
+  padding: 22px 24px;
+  margin-bottom: 22px;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.card-header h2 { margin: 0; font-size: 15px; font-weight: 700; }
+.card-header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hint-text { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+
+/* Reading-history popup (task #143) - a small modal over the Hierarchy
+   Detail table, opened per-row. Fixed full-screen overlay + centered
+   scrollable card, same radius/shadow tokens as .card so it reads as
+   part of this app rather than a bolted-on component. z-index above the
+   toast container (see #toast-container, z-index: 1000) so a toast fired
+   while the modal is open still surfaces above it. */
+.hier-reading-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 17, 23, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+  padding: 24px;
+}
+.hier-reading-modal {
+  background: var(--card-bg);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 50px rgba(10, 12, 24, 0.35);
+  padding: 22px 24px;
+  width: min(900px, 100%);
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.hier-detail-reading-btn { white-space: nowrap; }
+
+.sql-editor {
+  width: 100%;
+  min-height: 110px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  font-family: "SF Mono", Consolas, "Courier New", monospace;
+  font-size: 13px;
+  resize: vertical;
+  outline: none;
+  color: var(--text-primary);
+}
+.sql-editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg-soft); }
+
+.editor-status { margin-top: 8px; font-size: 12px; color: var(--text-secondary); }
+
+.key-panel {
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #fafbfd;
+}
+.key-panel-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.chip {
+  border: 1px solid var(--card-border);
+  background: #fff;
+  border-radius: var(--radius-pill);
+  padding: 5px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+.chip.is-selected { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.grid-wrap {
+  overflow: auto;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  max-height: 420px;
+}
+
+.data-grid { border-collapse: collapse; width: 100%; font-size: 13px; }
+.data-grid th, .data-grid td {
+  border-bottom: 1px solid var(--card-border);
+  border-right: 1px solid var(--card-border);
+  padding: 7px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+.data-grid thead th {
+  position: sticky; top: 0;
+  background: #f6f7fb;
+  font-weight: 700;
+  color: var(--text-secondary);
+  z-index: 1;
+}
+.data-grid td.preview-col {
+  font-family: "SF Mono", Consolas, "Courier New", monospace;
+  font-size: 11.5px;
+  color: #4338ca;
+  background: #f7f8ff;
+  white-space: pre-wrap;
+  max-width: 420px;
+}
+.data-grid td.row-idx { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.data-grid td.is-changed { background: #fff7e0; }
+.data-grid tr.row-is-changed td.row-idx { background: #dbeafe; color: #1d4ed8; font-weight: 700; }
+/* DIFF DATES Anomaly: more than 1 distinct GCGT_RE_READING.ID_BILLING_PERIOD detected for the
+   NISS/item - see app.js's daRowClassForBillingPeriods() for where this class is applied (Single
+   NISS anomaly table, Detect All table, Batch results table). Distinct from .is-changed's paler
+   amber above (that one flags an edited grid cell, an unrelated concept) - deliberately a more
+   saturated orange with a left accent bar so it reads as "needs attention" at a glance. */
+.data-grid tr.row-multi-period td { background: #ffe4c2; }
+.data-grid tr.row-multi-period td:first-child { border-left: 3px solid #f59e0b; }
+/* Hierarchy Analysis detail drill-down: a hierarchy member (supply) whose
+   own READ_STATUS isn't in the "billed" set (7000STSRED/7001STSRED) -
+   including one with no reading at all in scope. Deliberately a distinct
+   red rather than .row-multi-period's orange - "not billed" is a stronger
+   signal than "has more than one billing period", and the two concepts
+   can otherwise coexist on the same row elsewhere in the app. */
+.data-grid tr.row-not-billed td { background: #fdd9d9; }
+.data-grid tr.row-not-billed td:first-child { border-left: 3px solid #ef4444; }
+.row-not-billed-swatch { color: #ef4444; }
+/* Reading-history popup (task #143): the row whose BILLING_PERIOD matches
+   the Hierarchy Detail row the popup was opened from - "the reading being
+   checked". Blue rather than red/orange since this isn't a problem flag,
+   just an orientation cue - the analyst's own ask was specifically to
+   highlight WHICH row they're looking at, not to flag it as an issue. */
+.data-grid tr.row-checking-period td { background: #dbe7ff; }
+.data-grid tr.row-checking-period td:first-child { border-left: 3px solid var(--accent); }
+.row-checking-swatch { color: var(--accent); }
+/* Pending Primaries table: a primary whose SECONDARIES_NOT_SENT_COUNT is
+   0 - every secondary is already sent to bill (or further), so the
+   primary's own pending reading is the ONLY thing left to fix in that
+   whole hierarchy. Green rather than red/orange/blue - unlike this
+   page's other row classes, this ISN'T a "needs attention" flag, it's
+   the opposite: a reassurance that the fix is isolated/simple. */
+.data-grid tr.row-primary-only td { background: #d7f5e3; }
+.data-grid tr.row-primary-only td:first-child { border-left: 3px solid var(--success); }
+.row-primary-only-swatch { color: var(--success); }
+.data-grid td[contenteditable="true"]:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.generate-row { display: flex; gap: 10px; margin-top: 14px; }
+
+.script-output {
+  white-space: pre-wrap;
+  font-family: "SF Mono", Consolas, "Courier New", monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: #0f1117;
+  color: #d7dbe6;
+  border-radius: var(--radius-md);
+  padding: 16px;
+  max-height: 65vh;
+  overflow: auto;
+  margin: 0;
+}
+
+.dropdown { position: relative; }
+.dropdown-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  background: #fff;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 24px rgba(16, 24, 40, 0.12);
+  min-width: 260px;
+  max-height: 260px;
+  overflow-y: auto;
+  z-index: 20;
+  padding: 6px;
+}
+.dropdown-item {
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dropdown-item:hover { background: #f2f3f7; }
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #14151f;
+  color: #fff;
+  padding: 10px 18px;
+  border-radius: var(--radius-pill);
+  font-size: 13px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.25);
+  z-index: 100;
+}
+/* Errors render as a distinct notification card pinned to the upper-left
+   corner instead of the bottom-center pill above - more prominent (errors
+   need attention, not a passive confirmation) and out of the way of the
+   sidebar/page content, which all live at top-center/right. Overrides
+   every positioning property the base .toast rule sets, not just
+   background, since it's a different placement entirely, not just a
+   different color of the same pill. */
+.toast.is-error {
+  top: 20px;
+  bottom: auto;
+  left: 20px;
+  right: auto;
+  transform: none;
+  max-width: 420px;
+  background: #7f1d1d;
+  border-radius: var(--radius-md);
+  border-left: 4px solid #ef4444;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  animation: toast-slide-in 0.18s ease-out;
+}
+@keyframes toast-slide-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------------- Dashboard ---------------- */
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.kpi-card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-shadow);
+  padding: 14px 16px;
+}
+.kpi-value { font-size: 24px; font-weight: 700; color: var(--text-primary); }
+.kpi-label { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
+
+.kpi-card-clickable {
+  cursor: pointer;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
+}
+.kpi-card-clickable:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.kpi-card-clickable.is-active {
+  border-color: var(--accent);
+  background: rgba(59, 91, 253, 0.07);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.kpi-card-clickable.is-active .kpi-value { color: var(--accent); }
+:root[data-theme="dark"] .kpi-card-clickable.is-active { background: rgba(91, 124, 250, 0.14); }
+
+.chart-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.chart-hint-tap { font-weight: 500; color: var(--text-muted); }
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.chart-legend-item { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+.chart-legend-item:hover { color: var(--text-primary); }
+.chart-legend-swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+
+.chart-tooltip {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  background: #14151f;
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 12px rgba(16, 24, 40, 0.25);
+  white-space: nowrap;
+}
+
+.chart-canvas {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  background: #fbfbfd;
+}
+
+/* ---- Dashboard: modernized KPI cards ----
+   Each card gets a colored top accent bar (data-kpi="...") instead of the
+   plain uniform card the KPI row used before - color follows the metric's
+   MEANING (rows=neutral ink, numeric=accent blue, categorical=amber,
+   empty/nulls=danger red, duplicates=purple, completeness=success green),
+   not decorative rank, consistent with this app's established "color
+   follows entity, not decoration" dataviz stance (see the KPI-card round's
+   notes elsewhere in this file/README). A small icon sits next to the
+   label for quick scanning. */
+.kpi-card {
+  position: relative;
+  overflow: hidden;
+  padding-top: 16px;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.kpi-card::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: var(--text-muted);
+}
+.kpi-card[data-kpi="rows"]::before,
+.kpi-card[data-kpi="columns"]::before { background: var(--text-secondary); }
+.kpi-card[data-kpi="numeric"]::before { background: var(--accent); }
+.kpi-card[data-kpi="categorical"]::before { background: var(--warning); }
+.kpi-card[data-kpi="empty"]::before,
+.kpi-card[data-kpi="nulls"]::before { background: var(--danger); }
+.kpi-card[data-kpi="duplicates"]::before { background: #8b5cf6; }
+.kpi-card[data-kpi="completeness"]::before { background: var(--success); }
+.kpi-card:hover { box-shadow: 0 4px 14px rgba(16, 24, 40, 0.1); transform: translateY(-1px); }
+.kpi-card-icon { font-size: 13px; margin-right: 4px; opacity: 0.8; }
+
+/* ---- Dashboard: Data Quality card ---- */
+.quality-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.quality-flags:empty::before {
+  content: "No data-quality issues detected in this result.";
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.quality-flag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 6px 11px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--card-border);
+  background: #fafbfd;
+}
+.quality-flag b { font-weight: 700; }
+.quality-flag[data-kind="likely_key"] { border-color: #c7d2fe; background: var(--accent-bg-soft); color: #3730a3; }
+.quality-flag[data-kind="constant"] { border-color: var(--card-border); background: #f3f4f6; color: var(--text-secondary); }
+.quality-flag[data-kind="high_nulls"] { border-color: #fecaca; background: #fef2f2; color: #b91c1c; }
+.quality-flag[data-kind="has_outliers"] { border-color: #fde68a; background: #fffbeb; color: #92400e; }
+
+/* ---- Dashboard: per-column stats table modernization ---- */
+.kind-badge {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+}
+.kind-badge[data-kind="numeric"] { background: var(--accent-bg-soft); color: var(--accent); }
+.kind-badge[data-kind="categorical"] { background: #fff7e6; color: #92400e; }
+.kind-badge[data-kind="empty"] { background: #fef2f2; color: #b91c1c; }
+
+.completeness-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 90px;
+}
+.completeness-bar-track {
+  flex: 1;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: #e9ebf1;
+  overflow: hidden;
+}
+.completeness-bar-fill { height: 100%; border-radius: var(--radius-pill); background: var(--success); }
+.completeness-bar-text { font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+
+.stats-table-th-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.stats-table-th-sortable:hover { color: var(--text-primary); }
+.stats-table-sort-arrow { font-size: 9px; opacity: 0.55; margin-left: 3px; }
+
+/* ---- Dashboard: responsive 2-column chart grid ---- */
+.dashboard-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 22px;
+}
+.dashboard-chart-grid > .card { margin-bottom: 0; }
+
+.boxplot-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.boxplot-row-label {
+  width: 130px;
+  flex: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------- AI Assist ---------------- */
+.ai-output {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.6;
+  background: #fafbfd;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  min-height: 40px;
+  color: var(--text-primary);
+}
+.ai-output:empty::before { content: "—"; color: var(--text-muted); }
+.ai-output.is-error { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+
+.warning-banner {
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+.warning-banner code { background: rgba(0, 0, 0, 0.06); padding: 1px 4px; border-radius: 4px; }
+
+/* ---------------- Settings: connection form ---------------- */
+.connection-form {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--card-border);
+}
+.connection-form h3 { margin: 0 0 12px; font-size: 14px; }
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px 16px;
+}
+.form-grid > div { display: flex; flex-direction: column; gap: 4px; }
+.form-grid-wide { grid-column: 1 / -1; }
+
+.row-action-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12.5px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+}
+.row-action-btn:hover { background: #f2f3f7; color: var(--text-primary); }
+.row-action-btn.is-danger:hover { background: #fef2f2; color: #b91c1c; }
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: #ecfdf5;
+  color: #047857;
+}
+
+/* ---------------- Dark content theme ---------------- */
+:root[data-theme="dark"] {
+  --content-bg: #14151f;
+  --card-bg: #1b1d29;
+  --card-border: #2a2c3a;
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+
+  --text-primary: #e8e9ee;
+  --text-secondary: #9aa0b4;
+  --text-muted: #6b7280;
+
+  --accent-bg-soft: #1e2352;
+
+  color-scheme: dark;
+}
+:root[data-theme="dark"] .text-input,
+:root[data-theme="dark"] .chart-canvas { background: #14151f; color: var(--text-primary); border-color: var(--card-border); }
+:root[data-theme="dark"] .btn-secondary { background: #262838; color: var(--text-primary); }
+:root[data-theme="dark"] .btn-secondary:hover:not(:disabled) { background: #2f3143; }
+:root[data-theme="dark"] .btn-pill,
+:root[data-theme="dark"] .btn-pill-sm { background: #1b1d29; }
+:root[data-theme="dark"] .data-grid thead th { background: #21232f; }
+:root[data-theme="dark"] .data-grid td.preview-col { background: #1a1c2e; color: #a5b4fc; }
+:root[data-theme="dark"] .data-grid tr.row-multi-period td { background: #4a2f0f; }
+:root[data-theme="dark"] .data-grid tr.row-multi-period td:first-child { border-left: 3px solid #fb923c; }
+:root[data-theme="dark"] .data-grid tr.row-not-billed td { background: #4a1616; }
+:root[data-theme="dark"] .data-grid tr.row-not-billed td:first-child { border-left: 3px solid #f87171; }
+:root[data-theme="dark"] .data-grid tr.row-primary-only td { background: #123524; }
+:root[data-theme="dark"] .data-grid tr.row-primary-only td:first-child { border-left: 3px solid #34d399; }
+:root[data-theme="dark"] .key-panel { background: #1a1c29; }
+:root[data-theme="dark"] .da-cleanup-filter-bar { background: #1a1c29; }
+:root[data-theme="dark"] .da-subnav { background: #14151f; }
+:root[data-theme="dark"] .da-subnav-btn.is-active { background: #262838; color: #fff; }
+:root[data-theme="dark"] .da-subnav-btn:hover:not(.is-active) { background: rgba(255, 255, 255, 0.04); }
+:root[data-theme="dark"] .ai-output { background: #1a1c29; }
+:root[data-theme="dark"] .warning-banner { background: #2c2410; border-color: #4a3c14; color: #fbbf24; }
+:root[data-theme="dark"] .warning-banner code { background: rgba(255, 255, 255, 0.1); }
+:root[data-theme="dark"] .dropdown-menu { background: #1b1d29; }
+:root[data-theme="dark"] .badge { background: #052e22; color: #34d399; }
+:root[data-theme="dark"] .quality-flag { background: #1a1c29; }
+:root[data-theme="dark"] .quality-flag[data-kind="likely_key"] { border-color: #383f78; background: #1e2352; color: #a5b4fc; }
+:root[data-theme="dark"] .quality-flag[data-kind="constant"] { background: #21232f; color: var(--text-secondary); }
+:root[data-theme="dark"] .quality-flag[data-kind="high_nulls"] { border-color: #5c2323; background: #2c1414; color: #fca5a5; }
+:root[data-theme="dark"] .quality-flag[data-kind="has_outliers"] { border-color: #4a3c14; background: #2c2410; color: #fbbf24; }
+:root[data-theme="dark"] .kind-badge[data-kind="categorical"] { background: #2c2410; color: #fbbf24; }
+:root[data-theme="dark"] .kind-badge[data-kind="empty"] { background: #2c1414; color: #fca5a5; }
+:root[data-theme="dark"] .completeness-bar-track { background: #2a2c3a; }

@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+build/
+dist/
+*.spec
+.pytest_cache/
+exports/
+
+# Local secrets (2026-09-12 git-integration round) - see .env.example.
+# Never commit the real .env; *.key covers scriptgen.key/web_session.key
+# if either ever ends up somewhere other than data/ (which is already
+# ignored above - this is belt-and-suspenders, not the primary guard).
+.env
+*.key
+
+# Editor/OS cruft
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Coverage / misc test artifacts
+.coverage
+htmlcov/
