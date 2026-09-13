@@ -14,12 +14,23 @@ background thread does the actual DB work, and the frontend polls
 GET /api/date-anomaly/batch/{job_id} for progress until it's done.
 
 Threading note: app.db.mssql.run_query() takes a ConnectionConfig
-(plain data - server/user/password/etc, not a live connection/socket)
-and opens+closes its own pytds connection on every call, so handing the
-same ConnectionConfig to a background thread is safe - there's no
-shared live connection object being touched from two threads at once,
-just a fresh short-lived connection per query the way every other route
-already does it.
+(plain data - server/user/password/etc, not a live connection/socket),
+so handing the same ConnectionConfig to a background thread is always
+safe - there's no shared live connection object being touched from two
+threads at once. By DEFAULT run_query also opens+closes its own fresh
+pytds connection on every single call, which is the right choice for
+every other page's one-off queries, but was the actual reason Batch
+felt slow (RJ, 2026-09-13): each NISS is ~6 queries, and when the DB is
+reached through a local tunnel, the connection HANDSHAKE dwarfs the
+query's own execution time - a 50-NISS batch was paying that handshake
+cost ~300 times over. _run_batch below wraps the whole job in
+mssql.reuse_connection(conn_cfg), which opens ONE connection for this
+thread and makes every run_query()/get_table_columns() call
+transparently reuse it (see that function's own docstring in
+app/db/mssql.py) - run_query's call sites here didn't need to change at
+all. It also self-heals if the tunnel drops mid-run (see run_query's
+reconnect-and-retry logic) instead of every remaining NISS in the batch
+failing off a dead connection.
 
 Same in-memory-only trade-off as web/session_store.py's SessionStore:
 fine for "a few teammates against one server process" (the target for
@@ -73,6 +84,15 @@ class BatchJob:
     combined_sql: Optional[str] = None
     cancel_requested: bool = False
     error: Optional[str] = None  # only set on a STATUS_FAILED batch-wide failure
+    # Set when the background thread actually starts running (not when the
+    # job is queued - created_at_utc already covers that), and when it
+    # reaches a terminal status. The frontend uses the gap between
+    # started_at_utc and "now" (while running) or finished_at_utc (once
+    # done) to show elapsed time / items-per-second / an ETA - RJ, 2026-09-13:
+    # "show how many processed and how many pending and percentage, with
+    # item per second processed".
+    started_at_utc: Optional[str] = None
+    finished_at_utc: Optional[str] = None
 
     @property
     def niss_total(self) -> int:
@@ -83,6 +103,8 @@ class BatchJob:
             "job_id": self.id,
             "created_by": self.created_by,
             "created_at_utc": self.created_at_utc,
+            "started_at_utc": self.started_at_utc,
+            "finished_at_utc": self.finished_at_utc,
             "niss_total": self.niss_total,
             "threshold": self.threshold,
             "program": self.program,
@@ -166,100 +188,113 @@ def start_batch(
 
 def _run_batch(job: BatchJob, conn_cfg: ConnectionConfig, internal_db_path: str) -> None:
     job.status = STATUS_RUNNING
-
-    # Audit-column presence is a schema fact, not a per-NISS one - check
-    # once, up front. A failure here means the connection/schema itself
-    # is unreachable, so the whole job fails rather than each NISS
-    # reporting the identical error individually.
-    try:
-        reading_cols = mssql.get_table_columns(conn_cfg, date_anomaly.READING_SCHEMA, date_anomaly.READING_TABLE)
-        item_cols = mssql.get_table_columns(conn_cfg, date_anomaly.ADMIN_SCHEMA, date_anomaly.ITEMS_TO_BILL_TABLE)
-        reading_has_audit = "update_program" in {c.lower() for c in reading_cols}
-        item_has_audit = "update_program" in {c.lower() for c in item_cols}
-    except mssql.ConnectionError_ as exc:
-        job.error = str(exc)
-        job.status = STATUS_FAILED
-        job.combined_sql = date_anomaly.build_batch_script([], program=job.program, clean=job.clean)
-        return
+    job.started_at_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     results: list[date_anomaly.BatchNissResult] = []
-    for niss in job.niss_list:
-        if job.cancel_requested:
-            job.status = STATUS_CANCELLED
-            break
+    try:
+        # One shared connection for the ENTIRE job (schema check + every
+        # NISS) instead of one fresh connection per query - see
+        # mssql.reuse_connection's own docstring for the full reasoning.
+        # This is the actual fix for "batch is slow": through a local
+        # tunnel, the connection handshake (not the query) is what
+        # dominates, and unbatched this was paying that cost ~6 times per
+        # NISS. mssql.run_query's signature/call sites below are
+        # completely unchanged - reuse is transparent to every caller.
+        with mssql.reuse_connection(conn_cfg):
+            # Audit-column presence is a schema fact, not a per-NISS one -
+            # check once, up front. A failure here means the
+            # connection/schema itself is unreachable, so the whole job
+            # fails rather than each NISS reporting the identical error.
+            reading_cols = mssql.get_table_columns(conn_cfg, date_anomaly.READING_SCHEMA, date_anomaly.READING_TABLE)
+            item_cols = mssql.get_table_columns(conn_cfg, date_anomaly.ADMIN_SCHEMA, date_anomaly.ITEMS_TO_BILL_TABLE)
+            reading_has_audit = "update_program" in {c.lower() for c in reading_cols}
+            item_has_audit = "update_program" in {c.lower() for c in item_cols}
 
-        result = _process_one_niss(
-            conn_cfg, niss, job.threshold, job.program, reading_has_audit, item_has_audit,
-            lowest_billing_period_only=job.lowest_billing_period_only,
-        )
-        results.append(result)
-        job.processed += 1
-        job.results.append({
-            "niss": result.niss,
-            "status": result.status,
-            "reading_count": result.reading_count,
-            "item_count": result.item_count,
-            "xml_count": result.xml_count,
-            "anomalous_count": result.anomalous_count,
-            "item_status_count": result.item_status_count,
-            "orphan_reading_count": result.orphan_reading_count,
-            "billing_period_count": result.billing_period_count,
-            "scoped_to_lowest_period": result.scoped_to_lowest_period,
-            "warning_count": len(result.warnings),
-            "error": result.error,
-        })
+            for niss in job.niss_list:
+                if job.cancel_requested:
+                    job.status = STATUS_CANCELLED
+                    break
 
-        if result.status == date_anomaly.STATUS_OK:
-            try:
-                script_history.record_script(
-                    internal_db_path,
-                    username=job.created_by,
-                    kind=script_history.KIND_DATE_ANOMALY,
-                    schema_name="",
-                    table_name=f"NISS {niss} (batch)",
-                    program=job.program,
-                    statement_count=(
-                        result.reading_count + result.item_count + result.xml_count
-                        + result.anomalous_count + result.item_status_count
-                        + (2 if result.orphan_reading_count else 0)
-                    ),
-                    warning_count=len(result.warnings),
-                    sql_text=result.sql_text,
-                    source=script_history.SOURCE_WEB,
+                result = _process_one_niss(
+                    conn_cfg, niss, job.threshold, job.program, reading_has_audit, item_has_audit,
+                    lowest_billing_period_only=job.lowest_billing_period_only,
                 )
-            except Exception:
-                # Same stance as every other Script History write in this
-                # app: a record of the event, never a precondition for
-                # seeing the script.
-                pass
+                results.append(result)
+                job.processed += 1
+                job.results.append({
+                    "niss": result.niss,
+                    "status": result.status,
+                    "reading_count": result.reading_count,
+                    "item_count": result.item_count,
+                    "xml_count": result.xml_count,
+                    "anomalous_count": result.anomalous_count,
+                    "item_status_count": result.item_status_count,
+                    "orphan_reading_count": result.orphan_reading_count,
+                    "billing_period_count": result.billing_period_count,
+                    "scoped_to_lowest_period": result.scoped_to_lowest_period,
+                    "warning_count": len(result.warnings),
+                    "error": result.error,
+                })
 
-        if result.status in (date_anomaly.STATUS_OK, date_anomaly.STATUS_NO_ANOMALIES):
-            # One-shot record (see app.db.date_anomaly_history's
-            # record_analysis docstring) - batch already has every field
-            # known by the time a NISS finishes, unlike the single-NISS
-            # web flow which records at Detect and refines afterward.
-            # ERROR results are intentionally not recorded here - job.results
-            # / combined_sql already surface those, and there's no reliable
-            # anomaly_count to attach to a NISS that failed before Detect
-            # could even determine one.
-            try:
-                date_anomaly_history.record_analysis(
-                    internal_db_path,
-                    username=job.created_by, niss=niss, threshold=job.threshold,
-                    anomaly_count=result.reading_count,
-                    item_count=result.item_count, xml_count=result.xml_count,
-                    item_status_count=result.item_status_count, anomalous_count=result.anomalous_count,
-                    generated=(result.status == date_anomaly.STATUS_OK),
-                    explanation=result.explanation,
-                    source=date_anomaly_history.SOURCE_BATCH,
-                )
-            except Exception:
-                pass
-    else:
-        # Loop finished without hitting the cancel `break` above.
-        job.status = STATUS_DONE
+                if result.status == date_anomaly.STATUS_OK:
+                    try:
+                        script_history.record_script(
+                            internal_db_path,
+                            username=job.created_by,
+                            kind=script_history.KIND_DATE_ANOMALY,
+                            schema_name="",
+                            table_name=f"NISS {niss} (batch)",
+                            program=job.program,
+                            statement_count=(
+                                result.reading_count + result.item_count + result.xml_count
+                                + result.anomalous_count + result.item_status_count
+                                + (2 if result.orphan_reading_count else 0)
+                            ),
+                            warning_count=len(result.warnings),
+                            sql_text=result.sql_text,
+                            source=script_history.SOURCE_WEB,
+                        )
+                    except Exception:
+                        # Same stance as every other Script History write in
+                        # this app: a record of the event, never a
+                        # precondition for seeing the script.
+                        pass
+
+                if result.status in (date_anomaly.STATUS_OK, date_anomaly.STATUS_NO_ANOMALIES):
+                    # One-shot record (see app.db.date_anomaly_history's
+                    # record_analysis docstring) - batch already has every
+                    # field known by the time a NISS finishes, unlike the
+                    # single-NISS web flow which records at Detect and
+                    # refines afterward. ERROR results are intentionally
+                    # not recorded here - job.results/combined_sql already
+                    # surface those, and there's no reliable anomaly_count
+                    # to attach to a NISS that failed before Detect could
+                    # even determine one.
+                    try:
+                        date_anomaly_history.record_analysis(
+                            internal_db_path,
+                            username=job.created_by, niss=niss, threshold=job.threshold,
+                            anomaly_count=result.reading_count,
+                            item_count=result.item_count, xml_count=result.xml_count,
+                            item_status_count=result.item_status_count, anomalous_count=result.anomalous_count,
+                            generated=(result.status == date_anomaly.STATUS_OK),
+                            explanation=result.explanation,
+                            source=date_anomaly_history.SOURCE_BATCH,
+                        )
+                    except Exception:
+                        pass
+            else:
+                # Loop finished without hitting the cancel `break` above.
+                job.status = STATUS_DONE
+    except mssql.ConnectionError_ as exc:
+        # The shared connection itself couldn't be opened (or the
+        # up-front schema check failed) - whatever's in `results` so far
+        # (possibly none) still becomes a valid, if incomplete, script.
+        job.error = str(exc)
+        job.status = STATUS_FAILED
 
     job.combined_sql = date_anomaly.build_batch_script(results, program=job.program, clean=job.clean)
+    job.finished_at_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def _process_one_niss(
@@ -339,8 +374,24 @@ def _process_one_niss(
                     item_map[reading_id].append(item_id)
 
         item_ids = sorted({v for ids in item_map.values() for v in ids}, key=str)
+        # RJ, 2026-09-13: "you are updating using id_item_to_bill, you
+        # need to get first the id_xml from gccom_item_to_bill and
+        # update with that id" - same fix as web/server.py's
+        # date_anomaly_resolve, needed here too since batch runs its
+        # own copy of the resolve step.
+        item_to_xml_map: dict = {}
+        item_xml_id_sql = date_anomaly.build_item_xml_id_query(item_ids)
+        if item_xml_id_sql:
+            item_xml_id_result = mssql.run_query(conn_cfg, item_xml_id_sql)
+            for r in item_xml_id_result.rows:
+                row = dict(zip(item_xml_id_result.columns, r))
+                id_xml_val = _col(row, "ID_XML")
+                if id_xml_val is not None:
+                    item_to_xml_map[_col(row, "ID_ITEM_TO_BILL")] = id_xml_val
+
         xml_rows: dict = {}
-        xml_sql = date_anomaly.build_xml_lookup_query(item_ids)
+        real_id_xmls = sorted({v for v in item_to_xml_map.values()}, key=str)
+        xml_sql = date_anomaly.build_xml_lookup_query(real_id_xmls)
         if xml_sql:
             xml_result = mssql.run_query(conn_cfg, xml_sql)
             for r in xml_result.rows:
@@ -382,6 +433,7 @@ def _process_one_niss(
         niss=niss, threshold=threshold, correct_date=correct_date,
         correct_date_source_reading=correct_date_reading,
         anomaly_id_readings=id_readings, item_to_bill_map=item_map, xml_rows=xml_rows,
+        item_to_xml_map=item_to_xml_map,
         anomalous_item_ids=anomalous_item_ids,
         item_status_ids=item_status_ids,
         orphan_usage_id_readings=orphan_usage_ids,

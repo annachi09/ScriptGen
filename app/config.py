@@ -49,7 +49,14 @@ class ConnectionConfig:
     database: str = ""  # blank = server default database for this login
     username: str = ""
     password_enc: str = ""  # Fernet-encrypted; never store plaintext
-    timeout_seconds: int = 10
+    # RJ hit a real timeout live on Bill Issuance Validator's Case 2 scan
+    # (2026-09-16, a heavier UNION + window-function query over a tunnel) -
+    # 10s was too tight for anything but the simplest queries. Bumped to
+    # 30s as a friendlier default for NEW connections; existing saved
+    # connections keep whatever value they already have (this default only
+    # applies the first time a connection is created) - raise it further
+    # in Settings > Connections if a specific query still needs more.
+    timeout_seconds: int = 30
     # Purely informational - reminds the user this needs their tunnel up.
     notes: str = ""
 

@@ -91,14 +91,14 @@ def test_build_pending_bulks_sql_excludes_ended_accounts_and_cancelled_services(
 
 def test_build_bill_detail_sql_embeds_account_literal_escaped():
     sql = bc.build_bill_detail_sql(BILLING_PERIOD, DATE_FROM, DATE_TO, ACCOUNT_NUMBER)
-    assert f"pf2.reference = N'{ACCOUNT_NUMBER}'" in sql
+    assert f"pf2.reference = '{ACCOUNT_NUMBER}'" in sql
 
 
 def test_build_bill_detail_sql_escapes_single_quote_in_account_number():
     sql = bc.build_bill_detail_sql(BILLING_PERIOD, DATE_FROM, DATE_TO, "O'BRIEN-1")
     # The embedded quote must be doubled (T-SQL's escape convention), not
     # left bare - a bare quote there would break out of the string literal.
-    assert "pf2.reference = N'O''BRIEN-1'" in sql
+    assert "pf2.reference = 'O''BRIEN-1'" in sql
 
 
 def test_build_bill_detail_sql_embeds_billing_period_and_dates():

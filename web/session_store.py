@@ -68,7 +68,8 @@ class DateAnomalyState:
     correct_date: Any = None
     correct_date_reading: Any = None
     item_to_bill_map: dict = field(default_factory=dict)     # id_reading -> list[id_item_to_bill] (one reading can map to more than one item-to-bill row)
-    xml_rows: dict = field(default_factory=dict)              # id_xml -> raw XML_TO_BILL text
+    item_to_xml_map: dict = field(default_factory=dict)       # id_item_to_bill -> real id_xml (GCCOM_ITEMS_TO_BILL.ID_XML - NOT the same value as id_item_to_bill, confirmed 2026-09-13)
+    xml_rows: dict = field(default_factory=dict)              # REAL id_xml (from item_to_xml_map) -> raw XML_TO_BILL text
     anomalous_item_ids: list = field(default_factory=list)    # id_item_to_bill values with an OPEN GCCOM_ANOMALOUS record to cancel (Part 5)
     item_status_ids: list = field(default_factory=list)       # id_item_to_bill values still at STTOBILL00, to advance to STTOBILL01 (Part 3)
     history_id: Any = None                                    # app.db.date_anomaly_history row id for this analysis pass, set at Detect

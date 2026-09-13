@@ -58,9 +58,27 @@ def format_sql_literal(value: Any) -> str:
     # Fallback: string (also covers values typed by hand in the grid,
     # which arrive as str even if the destination column is numeric -
     # see coerce_to_column_type in diff_engine for that case).
+    #
+    # Plain '...' (NOT N'...') on purpose - real bug found live 2026-09-17
+    # while chasing Case 2 detection-query timeouts: every status/code
+    # column this app filters on (GCCOM_BILL.BILLING_STATUS, GCCOM_
+    # CONTRACTED_SERVICE.STATUS, etc, confirmed live via sys.columns) is
+    # plain varchar, not nvarchar. Comparing a varchar column to an N'...'
+    # (nvarchar) literal makes SQL Server implicitly CONVERT() the column
+    # to compare them - which silently disables index seeks on every
+    # index that leads with that column. A query built with N'...'
+    # literals against these columns timed out at 120s three different
+    # ways (OR EXISTS, UNION, direct join - the join SHAPE was never the
+    # problem); the exact same query with plain '...' literals ran in
+    # ~7s. A plain '...' literal is safe either way - SQL Server still
+    # matches it correctly against a genuinely nvarchar column, it just
+    # doesn't force a conversion (and therefore doesn't break an index)
+    # on the varchar columns this app actually has. This one change
+    # benefits every query builder in app/core that goes through this
+    # function, not just Bill Issuance Validator.
     text = str(value)
     escaped = text.replace("'", "''")
-    return "N'" + escaped + "'"
+    return "'" + escaped + "'"
 
 
 def quote_ident(name: str) -> str:

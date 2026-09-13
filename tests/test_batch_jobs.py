@@ -125,6 +125,31 @@ def test_to_public_dict_exposes_expected_fields():
     assert d["error"] is None
 
 
+def test_to_public_dict_started_and_finished_default_to_none():
+    # A freshly-created (still queued) job hasn't started running yet -
+    # the frontend's progress/rate display (RJ, 2026-09-13) uses this to
+    # know there's nothing meaningful to show yet.
+    job = BatchJob(
+        id="abc123", created_by="alice", created_at_utc="2026-01-01T00:00:00+00:00",
+        niss_list=["A"], threshold=0, program="JIRA-1",
+    )
+    d = job.to_public_dict()
+    assert d["started_at_utc"] is None
+    assert d["finished_at_utc"] is None
+
+
+def test_to_public_dict_exposes_started_and_finished_once_set():
+    job = BatchJob(
+        id="abc123", created_by="alice", created_at_utc="2026-01-01T00:00:00+00:00",
+        niss_list=["A"], threshold=0, program="JIRA-1",
+    )
+    job.started_at_utc = "2026-01-01T00:00:05+00:00"
+    job.finished_at_utc = "2026-01-01T00:00:15+00:00"
+    d = job.to_public_dict()
+    assert d["started_at_utc"] == "2026-01-01T00:00:05+00:00"
+    assert d["finished_at_utc"] == "2026-01-01T00:00:15+00:00"
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))

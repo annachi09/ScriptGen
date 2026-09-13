@@ -48,6 +48,7 @@ SOURCE_WEB = "web"
 KIND_UPDATE = "update"
 KIND_ROLLBACK = "rollback"
 KIND_DATE_ANOMALY = "date_anomaly_correction"
+KIND_BILL_ISSUANCE = "bill_issuance_correction"
 
 
 @dataclass

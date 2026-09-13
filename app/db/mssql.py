@@ -15,7 +15,9 @@ about diffing - see app/core for that.
 """
 from __future__ import annotations
 
+import contextlib
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -30,6 +32,31 @@ from ..config import ConnectionConfig
 # instead (the TDS layer never gets to engage). We treat both as
 # "the connection failed" from the caller's point of view.
 _CONNECTION_EXCEPTIONS = (pytds.Error, OSError)
+
+# Same reasoning applies to a query that times out mid-EXECUTE/FETCH (not
+# just at connect time) - RJ hit this live (2026-09-16) running Bill
+# Issuance Validator's Case 2 scan: a query heavy enough to run past
+# conn_cfg.timeout_seconds raised something that ISN'T a pytds.Error (a
+# raw socket-level OSError/TimeoutError, same as the connect-time case
+# above), which the original `except pytds.Error` in run_query/
+# get_primary_key_columns/get_table_columns didn't catch - so instead of
+# the intended friendly "Query failed: ..." -> 502 path, the exception
+# propagated all the way past web/server.py's own `except mssql.
+# ConnectionError_` handlers uncaught, and FastAPI's default handler
+# returned a bare, detail-less 500. Every one of those places now uses
+# this broader tuple instead of `pytds.Error` alone.
+_QUERY_EXCEPTIONS = (pytds.Error, OSError)
+
+
+def _friendly_query_error(exc: Exception, conn_cfg: ConnectionConfig, context: str = "Query") -> str:
+    if isinstance(exc, (TimeoutError, ConnectionRefusedError)) or "timed out" in str(exc).lower() or "timeout" in str(exc).lower():
+        return (
+            f"{context} did not finish within {conn_cfg.timeout_seconds}s and timed out. This can "
+            "happen with a heavier query (large scans, several joins/window functions) over a slow "
+            "tunnel - try raising the connection Timeout in Settings > Connections, or narrow the "
+            "query (add filters, a lower row cap)."
+        )
+    return f"{context} failed: {exc}"
 
 
 class ConnectionError_(Exception):
@@ -121,24 +148,116 @@ def guess_source_table(sql: str) -> tuple[Optional[str], Optional[str]]:
     return schema, table
 
 
-def run_query(conn_cfg: ConnectionConfig, sql: str) -> QueryResult:
-    start = time.perf_counter()
-    conn = _connect(conn_cfg)
+# --- Optional connection reuse (web/batch_jobs.py) --------------------------
+#
+# Every function below defaults to opening a brand-new TCP+TDS connection
+# for each call and tearing it down immediately after - fine, even
+# preferable, for one-off queries (every page except the Date Anomaly
+# Batch page works this way). But Batch runs Detect->Resolve->Generate
+# for a whole list of NISS, and each NISS is itself ~6 queries (detect,
+# correct-date, item-to-bill, xml lookup, anomalous, item-status). When
+# the DB is reached through a local SSH/RDP tunnel (RJ's own setup - see
+# app/config.py's docs), the connection HANDSHAKE, not the query, is what
+# dominates: each fresh connect can cost several times what the query
+# itself takes, so a 50-NISS batch was paying that handshake cost ~300
+# times over. reuse_connection() below opens ONE connection and makes
+# every run_query()/get_table_columns() call on THIS THREAD reuse it
+# instead, for as long as the `with` block is active.
+#
+# Implemented with threading.local (not a plain module-level variable)
+# specifically because web/batch_jobs.py runs each batch on its own
+# background thread - a plain global would leak one batch's connection
+# into an unrelated request/thread running at the same time.
+#
+# This is deliberately invisible to every existing caller: run_query's
+# own signature/behavior is unchanged for anyone who never calls
+# reuse_connection, and the tests in tests/test_web_api.py monkeypatch
+# run_query itself wholesale, so none of this logic even runs under test
+# - nothing here needed a single test file changed.
+_thread_local = threading.local()
+
+
+def _is_alive(conn) -> bool:
+    """Cheap round-trip to tell a merely-slow reused connection from one
+    the tunnel has actually dropped. Only called on the reused-connection
+    error path (see run_query) - never on the normal one-shot path, so it
+    adds no overhead to any other caller in the app."""
     try:
         cur = conn.cursor()
-        cur.execute(sql)
-        if cur.description is None:
-            # Not a row-returning statement (shouldn't normally happen -
-            # the read-only account can't run DML/DDL anyway).
-            columns: list[str] = []
-            rows: list[list[Any]] = []
-        else:
-            columns = [d[0] for d in cur.description]
-            rows = [list(r) for r in cur.fetchall()]
-    except pytds.Error as exc:
-        raise ConnectionError_(f"Query failed: {exc}") from exc
+        cur.execute("SELECT 1")
+        cur.fetchall()
+        return True
+    except Exception:
+        return False
+
+
+@contextlib.contextmanager
+def reuse_connection(conn_cfg: ConnectionConfig):
+    """Opens one connection and makes every run_query()/get_table_columns()
+    call made on THIS THREAD, for the life of this `with` block, reuse it
+    instead of opening its own. See the module comment above for why this
+    is the actual fix for a slow Batch run over a tunneled connection.
+
+    Cleanup closes whatever connection is CURRENTLY published in
+    _thread_local.conn, not whichever object this function itself opened
+    - run_query's reconnect-on-dead-connection path (see its own
+    docstring) may have swapped in a fresher connection by the time this
+    `with` block exits, and that's the one actually still open."""
+    conn = _connect(conn_cfg)
+    _thread_local.conn = conn
+    try:
+        yield conn
     finally:
-        conn.close()
+        current = getattr(_thread_local, "conn", None)
+        _thread_local.conn = None
+        if current is not None:
+            try:
+                current.close()
+            except Exception:
+                pass
+
+
+def _fetch(conn, sql: str) -> tuple[list[str], list[list[Any]]]:
+    cur = conn.cursor()
+    cur.execute(sql)
+    if cur.description is None:
+        # Not a row-returning statement (shouldn't normally happen - the
+        # read-only account can't run DML/DDL anyway).
+        return [], []
+    return [d[0] for d in cur.description], [list(r) for r in cur.fetchall()]
+
+
+def run_query(conn_cfg: ConnectionConfig, sql: str) -> QueryResult:
+    start = time.perf_counter()
+    reused = getattr(_thread_local, "conn", None)
+    owns_connection = reused is None
+    conn = reused if reused is not None else _connect(conn_cfg)
+    try:
+        try:
+            columns, rows = _fetch(conn, sql)
+        except _QUERY_EXCEPTIONS as exc:
+            if owns_connection or _is_alive(conn):
+                # Either a fresh connection that just failed on this SQL
+                # (no point reconnecting - the query itself is the
+                # problem), or a reused connection that's still fine (same
+                # conclusion). Either way, surface it as-is.
+                raise ConnectionError_(_friendly_query_error(exc, conn_cfg)) from exc
+            # The reused connection itself died mid-batch (tunnel blip) -
+            # reopen once, publish the fresh connection for every later
+            # call in this batch too, and retry this one query on it.
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = _connect(conn_cfg)
+            _thread_local.conn = conn
+            try:
+                columns, rows = _fetch(conn, sql)
+            except _QUERY_EXCEPTIONS as exc2:
+                raise ConnectionError_(_friendly_query_error(exc2, conn_cfg, "Query (after reconnect)")) from exc2
+    finally:
+        if owns_connection:
+            conn.close()
 
     elapsed_ms = (time.perf_counter() - start) * 1000
     schema, table = guess_source_table(sql)
@@ -175,8 +294,8 @@ def get_primary_key_columns(conn_cfg: ConnectionConfig, schema: str, table: str)
         cur = conn.cursor()
         cur.execute(sql, (schema, table))
         return [row[0] for row in cur.fetchall()]
-    except pytds.Error as exc:
-        raise ConnectionError_(f"Primary key lookup failed: {exc}") from exc
+    except _QUERY_EXCEPTIONS as exc:
+        raise ConnectionError_(_friendly_query_error(exc, conn_cfg, "Primary key lookup")) from exc
     finally:
         conn.close()
 
@@ -195,15 +314,20 @@ def get_table_columns(conn_cfg: ConnectionConfig, schema: str, table: str) -> di
         WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
         ORDER BY ORDINAL_POSITION
     """
-    conn = _connect(conn_cfg)
+    # Reuses the batch's shared connection too (see reuse_connection) -
+    # web/batch_jobs.py calls this twice up front for the audit-column
+    # check, before the per-NISS loop even starts.
+    reused = getattr(_thread_local, "conn", None)
+    conn = reused if reused is not None else _connect(conn_cfg)
     try:
         cur = conn.cursor()
         cur.execute(sql, (schema, table))
         return {row[0]: row[1] for row in cur.fetchall()}
-    except pytds.Error as exc:
-        raise ConnectionError_(f"Schema lookup failed: {exc}") from exc
+    except _QUERY_EXCEPTIONS as exc:
+        raise ConnectionError_(_friendly_query_error(exc, conn_cfg, "Schema lookup")) from exc
     finally:
-        conn.close()
+        if reused is None:
+            conn.close()
 
 
 def list_databases(conn_cfg: ConnectionConfig) -> list[str]:

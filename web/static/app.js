@@ -122,6 +122,7 @@ const EDITOR_ONLY_IDS = [
   "save-query-btn", "snapshot-export-btn",
   "ai-suggest-btn", "ai-optimize-btn", "ai-review-btn", "ai-where-btn",
   "da-generate-btn", "da-batch-run-btn", "da-cleanup-generate-btn",
+  "biss2-generate-btn",
 ];
 
 function applyRolePermissionsToUI() {
@@ -1260,7 +1261,17 @@ $("#da-detect-btn").addEventListener("click", async () => {
       const tr = document.createElement("tr");
       tr.className = multiPeriodClass;
       if (multiPeriodClass) tr.title = `${result.billing_period_count} distinct billing periods detected for this NISS`;
-      tr.innerHTML = `<td>${escapeHtml(r.id_reading)}</td><td>${escapeHtml(r.id_billing_period)}</td><td>${escapeHtml(r.reading_date)}</td><td>${escapeHtml(r.read_status)}</td>`;
+      // RJ, 2026-09-13: "if not all cycle, i need to know if it contains
+      // removal or not" - shows the actual GCGT_RE_READING_TYPE.DESCRIPTION
+      // per reading (falls back to the bare TIPTL code if this reading's
+      // type isn't in that lookup), with a non-cycle reading (r.is_cycle_reading
+      // false - e.g. Removal, Reconnection) visually flagged so it's not
+      // just buried in a plain list.
+      const typeLabel = r.reading_type_desc || r.reading_type || "";
+      const typeCell = r.is_cycle_reading
+        ? escapeHtml(typeLabel)
+        : `<span class="badge-noncycle" title="Non-cycle reading type - not Cycle/Direct Connection">${escapeHtml(typeLabel)}</span>`;
+      tr.innerHTML = `<td>${escapeHtml(r.id_reading)}</td><td>${escapeHtml(r.id_billing_period)}</td><td>${escapeHtml(r.reading_date)}</td><td>${escapeHtml(r.read_status)}</td><td>${typeCell}</td>`;
       tbody.appendChild(tr);
     });
 
@@ -1443,10 +1454,55 @@ function daBatchSetRunningUI(isRunning) {
   $("#da-batch-cancel-btn").hidden = !isRunning;
 }
 
+// Seconds since the job actually started running (job.started_at_utc,
+// set by the background thread itself - distinct from created_at_utc,
+// which is when it was merely queued) up to now (still running) or
+// finished_at_utc (terminal) - the denominator for items/sec below.
+function daBatchElapsedSeconds(job) {
+  if (!job.started_at_utc) return null;
+  const start = new Date(job.started_at_utc).getTime();
+  const end = job.finished_at_utc ? new Date(job.finished_at_utc).getTime() : Date.now();
+  return Math.max((end - start) / 1000, 0.001); // avoid a divide-by-zero flash right at start
+}
+
+// Processed/pending/percent/rate strip (RJ, 2026-09-13: "show how many
+// processed and how many pending and percentage, with item per second
+// processed") - a thin progress bar plus 4 compact KPI cards, both
+// hidden until the job has actually started (a still-queued job has no
+// started_at_utc yet, nothing meaningful to show).
+function daBatchRenderProgress(job) {
+  const track = $("#da-batch-progress-track");
+  const kpiRow = $("#da-batch-progress-kpi-row");
+  if (!job.started_at_utc || job.niss_total === 0) {
+    track.hidden = true;
+    kpiRow.hidden = true;
+    return;
+  }
+  const pending = Math.max(job.niss_total - job.processed, 0);
+  const percent = (job.processed / job.niss_total) * 100;
+  const elapsed = daBatchElapsedSeconds(job);
+  const rate = elapsed && job.processed > 0 ? job.processed / elapsed : 0;
+
+  track.hidden = false;
+  $("#da-batch-progress-fill").style.width = `${Math.min(percent, 100).toFixed(1)}%`;
+
+  kpiRow.hidden = false;
+  const cards = [
+    ["Processed", job.processed],
+    ["Pending", pending],
+    ["Complete", `${percent.toFixed(1)}%`],
+    ["Rate", rate > 0 ? `${rate.toFixed(2)}/sec` : "—"],
+  ];
+  kpiRow.innerHTML = cards.map(([label, value]) =>
+    `<div class="kpi-card"><div class="kpi-value">${escapeHtml(String(value))}</div><div class="kpi-label">${escapeHtml(label)}</div></div>`
+  ).join("");
+}
+
 async function daBatchRenderJob(job) {
   daBatchLastJobId = job.job_id;
   $("#da-batch-explain-ai-btn").disabled = job.results.length === 0;
   daBatchRenderResultsTable(job.results);
+  daBatchRenderProgress(job);
   const label = DA_BATCH_JOB_STATUS_LABEL[job.status] || job.status;
   let summary = `${label} — ${job.processed}/${job.niss_total} NISS processed.`;
   if (job.error) summary += `  Job failed: ${job.error}`;
@@ -1563,6 +1619,8 @@ async function daBatchStartRun({ niss_list, threshold, program, clean, lowest_bi
   daBatchStopPolling();
   daBatchSetRunningUI(true);
   $("#da-batch-summary").textContent = `Starting batch for ${niss_list.length} NISS…`;
+  $("#da-batch-progress-track").hidden = true;
+  $("#da-batch-progress-kpi-row").hidden = true;
   document.querySelector("#da-batch-table tbody").innerHTML = "";
   $("#da-batch-output").textContent = "Running…";
   $("#da-batch-explain-ai-btn").disabled = true;
@@ -1711,6 +1769,23 @@ function daCleanupVisibleIndices() {
       // match a specific-value filter elsewhere on this page.
       if (daCleanupFilters.allCycle === "yes" && r.all_cycle !== true) return false;
       if (daCleanupFilters.allCycle === "no" && r.all_cycle !== false) return false;
+      // RJ, 2026-09-13: "add cycle with removal, and cycle with
+      // reconnection, or cycle with both removal and reconnection" - a
+      // finer breakdown of the non-cycle composition than the plain
+      // Yes/No above, keyed off r.non_cycle_reading_types (the comma-
+      // separated description text from the query's STUFF/FOR XML
+      // column - e.g. "Removal", "Reconnection", "Removal, Reconnection").
+      // Substring match on the human-readable description, not a code,
+      // since that's what this field actually carries.
+      if (["removal", "reconnection", "both", "other"].includes(daCleanupFilters.allCycle)) {
+        const types = (r.non_cycle_reading_types || "");
+        const hasRemoval = types.includes("Removal");
+        const hasReconnection = types.includes("Reconnection");
+        if (daCleanupFilters.allCycle === "removal" && !(hasRemoval && !hasReconnection)) return false;
+        if (daCleanupFilters.allCycle === "reconnection" && !(hasReconnection && !hasRemoval)) return false;
+        if (daCleanupFilters.allCycle === "both" && !(hasRemoval && hasReconnection)) return false;
+        if (daCleanupFilters.allCycle === "other" && (!types || hasRemoval || hasReconnection)) return false;
+      }
       // billing_period_count can be null (see the field's own comment on
       // the /detect-all response shape) - neither option should match a
       // null, same "don't guess" stance as allCycle just above.
@@ -1792,6 +1867,7 @@ function daCleanupRenderTable() {
       <td>${escapeHtml(r.item_status ?? "")}</td>
       <td>${r.needs_status_advance ? "Yes" : ""}</td>
       <td>${r.all_cycle === true ? "Yes" : r.all_cycle === false ? "No" : ""}</td>
+      <td>${r.non_cycle_reading_types ? `<span class="badge-noncycle">${escapeHtml(r.non_cycle_reading_types)}</span>` : ""}</td>
       <td>${r.billing_period_count ?? ""}</td>
     `);
     tbody.appendChild(tr);
@@ -1833,7 +1909,7 @@ function daCleanupPopulateFilterOptions() {
 $("#da-cleanup-export-csv-btn").addEventListener("click", () => {
   const visible = daCleanupVisibleIndices();
   if (!visible.length) return;
-  const header = ["id_item_to_bill", "account", "supply", "offered_service", "contract_status", "anomalous_type", "anomalous_status", "item_status", "needs_status_advance", "all_cycle", "billing_period_count"];
+  const header = ["id_item_to_bill", "account", "supply", "offered_service", "contract_status", "anomalous_type", "anomalous_status", "item_status", "needs_status_advance", "all_cycle", "non_cycle_reading_types", "billing_period_count"];
   const lines = [header.join(",")];
   visible.forEach((idx) => {
     const r = daCleanupRows[idx];
@@ -1842,6 +1918,7 @@ $("#da-cleanup-export-csv-btn").addEventListener("click", () => {
       daCleanupTypeText(r), r.anomalous_status_description || r.anomalous_status || "",
       r.item_status, r.needs_status_advance ? "Yes" : "",
       r.all_cycle === true ? "Yes" : r.all_cycle === false ? "No" : "",
+      r.non_cycle_reading_types ?? "",
       r.billing_period_count ?? "",
     ].map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`);
     lines.push(row.join(","));
@@ -1880,6 +1957,7 @@ $("#da-cleanup-export-xlsx-btn").addEventListener("click", async () => {
         item_status: String(r.item_status ?? ""),
         needs_status_advance: !!r.needs_status_advance,
         all_cycle: r.all_cycle === true || r.all_cycle === false ? r.all_cycle : null,
+        non_cycle_reading_types: String(r.non_cycle_reading_types ?? ""),
         billing_period_count: r.billing_period_count ?? null,
       };
     });
@@ -1950,13 +2028,22 @@ function daCleanupRenderDashboard(rows) {
   const distinctAccounts = new Set(rows.map((r) => r.account).filter(Boolean)).size;
 
   const advanceActive = daCleanupFilters.needsAdvance === "yes";
+  // "Needs status advance" (RJ, 2026-09-13: "not clear what that is") means
+  // this item's GCCOM_ITEMS_TO_BILL.STATUS is still ITEM_STATUS_FROM
+  // (STTOBILL00, "pending") and hasn't been moved to ITEM_STATUS_TO
+  // (STTOBILL01) yet - see app/core/date_anomaly.py's Part 3 comment. The
+  // Generate Cleanup Script button below does that move for whatever's
+  // checked, so this count is "how many rows still need that one-time
+  // status bump" - spelled out in the card label itself now instead of
+  // relying on a hover tooltip nobody may notice.
+  const advanceTitle = "Billing STATUS is still STTOBILL00 (“pending”) - hasn't been advanced to STTOBILL01 yet. Generate Cleanup Script does that for whatever's checked. Click to toggle this filter.";
   $("#da-cleanup-kpi-row").innerHTML = [
-    ["Shown", total, false],
-    ["Needs status advance", needsAdvance, true],
-    ["Distinct offered services", distinctServices, false],
-    ["Distinct accounts", distinctAccounts, false],
-  ].map(([label, value, clickable]) =>
-    `<div class="kpi-card${clickable ? " kpi-card-clickable" : ""}${clickable && advanceActive ? " is-active" : ""}"${clickable ? ' id="da-cleanup-kpi-advance" title="Click to toggle the Needs status advance filter"' : ""}><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div></div>`
+    ["Shown", total, false, ""],
+    ["Billing status still pending (STTOBILL00)", needsAdvance, true, advanceTitle],
+    ["Distinct offered services", distinctServices, false, ""],
+    ["Distinct accounts", distinctAccounts, false, ""],
+  ].map(([label, value, clickable, title]) =>
+    `<div class="kpi-card${clickable ? " kpi-card-clickable" : ""}${clickable && advanceActive ? " is-active" : ""}"${clickable ? ` id="da-cleanup-kpi-advance" title="${title}"` : ""}><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div></div>`
   ).join("");
 
   const advanceCard = $("#da-cleanup-kpi-advance");
@@ -3315,6 +3402,356 @@ $("#hier-export-xlsx-btn").addEventListener("click", async () => {
   }
 });
 
+// ---------------- Bill Issuance Validator: in-page sub-nav (Case 1/2/...) ----------------
+// Same "lighter-weight tab switch" idiom as DIFF DATES Anomaly's own
+// sub-nav (see that comment above), but keyed off data-biss-sub instead
+// of data-da-sub and with its OWN listener - deliberately NOT reusing
+// the data-da-sub selector/listener, which is scoped by attribute value
+// but still queries ALL `.da-subnav-btn`/`.da-subpage` elements in the
+// document; if Bill Issuance's buttons carried data-da-sub too, clicking
+// one would strip `is-active` from every DA subnav button (none of
+// which match this page's sub value), silently breaking DIFF DATES
+// Anomaly's own sub-nav state next time that page is opened. Reuses the
+// same `.da-subnav`/`.da-subnav-btn`/`.da-subpage` CSS classes for
+// identical styling - those rules are generic tab-bar styling, nothing
+// DA-specific about them.
+$$(".da-subnav-btn[data-biss-sub]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const sub = btn.dataset.bissSub;
+    $$(".da-subnav-btn[data-biss-sub]").forEach((b) => b.classList.toggle("is-active", b === btn));
+    $$(".da-subpage[data-biss-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.bissSub === sub));
+  });
+});
+
+// ---------------- Bill Issuance Validator ----------------
+// RJ, 2026-09-15: accounts whose next Electricity/Water bill is stuck
+// (BILLING_STATUS ESTFAC0015) behind a Rate (176) bill still being put to
+// collection - see app/core/bill_issuance_validator.py's module docstring
+// for the full query chain. Stateless, single flat result set - no
+// filters/drill-down yet (unlike Hierarchy Analysis), so this reuses the
+// same sort-header/CSV-export conventions but skips the filter-row/KPI-
+// dashboard machinery those pages have.
+let billissRows = [];
+let billissSortKey = null;
+let billissSortDir = 1;
+
+function billissVisibleIndices() {
+  const indices = billissRows.map((_, i) => i);
+  if (billissSortKey) {
+    indices.sort((a, b) => _hierCompareValues(billissRows[a][billissSortKey], billissRows[b][billissSortKey], billissSortDir));
+  }
+  return indices;
+}
+
+function billissRenderKpiRow() {
+  // No duplicates by design (RJ, 2026-09-15: "i dont want duplicates") -
+  // one row per account, Electricity preferred over Water - so "rows"
+  // and "distinct accounts" are always the same number now; only the
+  // Electricity/Water split is worth its own card.
+  const electricityCount = billissRows.filter((r) => String(r.offered_service_next) === "1").length;
+  const waterCount = billissRows.filter((r) => String(r.offered_service_next) === "19").length;
+  const cards = [
+    ["rows", "🧾", "Accounts blocked", billissRows.length],
+    ["electricity", "⚡", "Electricity blocked", electricityCount],
+    ["water", "💧", "Water blocked (Electricity OK)", waterCount],
+  ];
+  $("#billiss-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
+    `<div class="kpi-card" data-kpi="${kpi}">
+      <div class="kpi-value">${value}</div>
+      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
+    </div>`
+  ).join("");
+}
+
+function billissRenderTable() {
+  const visible = billissVisibleIndices();
+  const tbody = $("#billiss-table tbody");
+  tbody.innerHTML = "";
+  visible.forEach((idx) => {
+    const r = billissRows[idx];
+    const tr = document.createElement("tr");
+    tr.innerHTML = (
+      `<td>${escapeHtml(r.reference ?? "")}</td>` +
+      `<td>${escapeHtml(r.notice_update_date ?? "")}</td>` +
+      `<td>${escapeHtml(r.id_bill_rate ?? "")}</td>` +
+      `<td>${escapeHtml(r.period_rate ?? "")}</td>` +
+      `<td>${escapeHtml(r.id_bill_next ?? "")}</td>` +
+      `<td title="ID_OFFERED_SERVICE ${escapeHtml(r.offered_service_next ?? "")}">${escapeHtml(r.offered_service_next_desc ?? r.offered_service_next ?? "")}</td>` +
+      `<td>${escapeHtml(r.period_next ?? "")}</td>` +
+      `<td title="${escapeHtml(r.status_next ?? "")}">${escapeHtml(r.status_next_desc ?? r.status_next ?? "")}</td>`
+    );
+    tbody.appendChild(tr);
+  });
+  billissRenderKpiRow();
+  $("#billiss-export-csv-btn").hidden = billissRows.length === 0;
+}
+
+hierWireSortableHeaders(
+  "#billiss-table",
+  () => billissSortKey, (k) => { billissSortKey = k; },
+  () => billissSortDir, (d) => { billissSortDir = d; },
+  billissRenderTable,
+);
+
+$("#billiss-detect-btn").addEventListener("click", async () => {
+  const btn = $("#billiss-detect-btn");
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "Scanning…";
+  try {
+    const data = await api("/api/bill-issuance/detect", { method: "POST" });
+    billissRows = data.rows;
+    billissSortKey = null;
+    billissSortDir = 1;
+    document.querySelectorAll("#billiss-table thead th[data-sort]").forEach((h) => {
+      h.querySelector(".stats-table-sort-arrow")?.remove();
+    });
+    billissRenderTable();
+    $("#billiss-summary").textContent = data.possibly_truncated
+      ? `${billissRows.length}+ stuck bills found (capped at ${data.limit} - list may be incomplete).`
+      : `${billissRows.length} stuck bill(s) found.`;
+  } catch (err) {
+    showToast(err.message || "Scan failed.", true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+});
+
+$("#billiss-export-csv-btn").addEventListener("click", () => {
+  const visible = billissVisibleIndices();
+  if (!visible.length) return;
+  const header = ["id_payment_form", "reference", "notice_update_date", "id_bill_rate", "period_rate", "id_bill_next", "offered_service_next", "offered_service_next_desc", "period_next", "status_next", "status_next_desc"];
+  const lines = [header.join(",")];
+  visible.forEach((idx) => {
+    const r = billissRows[idx];
+    lines.push(header.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(","));
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "bill_issuance_validator.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------- Bill Issuance Validator: Case 2 (terminated account, --
+// billing-period mismatch) ----------------
+// RJ, 2026-09-15, redesigned 2026-09-16/17 (RJ's own words: "i want to
+// see clearly the grouped account and which one has an issue... the idea
+// is i only want to see the accounts, maybe its a drill down to show the
+// bills"). See app/core/bill_issuance_validator.py's Case 2 comment
+// block for the full business-rule narrative, RJ's own 342702 example,
+// and the 2026-09-17 performance fix (index seeks defeated by N'...'
+// string literals - see app/core/sql_format.py). One row per ACCOUNT
+// (not per bill/service) with an expandable drill-down for per-service
+// detail - reuses the same sort-header convention as Case 1/Hierarchy
+// Analysis, plus a checkbox column (same idiom as Detect All's
+// da-cleanup-select-all/daCleanupSelected) so the analyst can scope the
+// generated script to specific accounts, or leave nothing checked to
+// generate for every flagged account (see biss2-generate-btn).
+let biss2Accounts = [];
+let biss2SortKey = null;
+let biss2SortDir = 1;
+let biss2Selected = new Set(); // selected row indices - into biss2Accounts
+let biss2Expanded = new Set(); // expanded row indices - into biss2Accounts
+
+function biss2VisibleIndices() {
+  const showComplete = $("#biss2-show-complete").checked;
+  let indices = biss2Accounts.map((_, i) => i);
+  if (!showComplete) indices = indices.filter((i) => !biss2Accounts[i].complete);
+  if (biss2SortKey) {
+    indices.sort((a, b) => _hierCompareValues(biss2Accounts[a][biss2SortKey], biss2Accounts[b][biss2SortKey], biss2SortDir));
+  }
+  return indices;
+}
+
+function biss2RenderKpiRow() {
+  const total = biss2Accounts.length;
+  const needsAction = biss2Accounts.filter((a) => !a.complete).length;
+  const complete = total - needsAction;
+  const servicesNeedingUpdate = biss2Accounts.reduce((sum, a) => sum + a.needs_update_count, 0);
+  const cards = [
+    ["accounts", "🧾", "Terminated accounts scanned", total],
+    ["needsaction", "⚠️", "Accounts needing action", needsAction],
+    ["complete", "✅", "Accounts already Complete", complete],
+    ["services", "🔧", "Services needing a period update", servicesNeedingUpdate],
+  ];
+  $("#biss2-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
+    `<div class="kpi-card" data-kpi="${kpi}">
+      <div class="kpi-value">${value}</div>
+      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
+    </div>`
+  ).join("");
+}
+
+function biss2RenderServiceRows(idx) {
+  const acct = biss2Accounts[idx];
+  const rows = acct.services.map((s) => (
+    `<tr class="biss2-service-row ${s.needs_update ? "row-multi-period" : ""}">` +
+      `<td></td><td></td>` +
+      `<td title="ID_OFFERED_SERVICE ${escapeHtml(s.id_offered_service ?? "")}">${escapeHtml(s.offered_service_desc || s.id_offered_service || "")}</td>` +
+      `<td colspan="2">Final bill (termination date ${escapeHtml(s.end_date ?? "")}): ` +
+        (s.id_bill
+          ? `Bill ${escapeHtml(s.id_bill)}, period ${escapeHtml(s.id_billing_period ?? "")}, status ${escapeHtml(s.billing_status ?? "")}`
+          : `<strong>none found</strong> - no bill dated exactly this service's termination date`) +
+      `</td>` +
+      `<td>${s.needs_update ? "Needs update" : "OK"}</td>` +
+    `</tr>`
+  )).join("");
+  return rows;
+}
+
+function biss2RenderTable() {
+  const visible = biss2VisibleIndices();
+  const tbody = $("#biss2-table tbody");
+  tbody.innerHTML = "";
+  visible.forEach((idx) => {
+    const acct = biss2Accounts[idx];
+    const tr = document.createElement("tr");
+    tr.className = acct.complete ? "" : "row-multi-period";
+    const td0 = document.createElement("td");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = biss2Selected.has(idx);
+    cb.addEventListener("change", () => {
+      if (cb.checked) biss2Selected.add(idx); else biss2Selected.delete(idx);
+      $("#biss2-select-all").checked = visible.length > 0 && visible.every((i) => biss2Selected.has(i));
+    });
+    td0.appendChild(cb);
+    tr.appendChild(td0);
+    const expanded = biss2Expanded.has(idx);
+    tr.insertAdjacentHTML("beforeend", (
+      `<td style="cursor:pointer;text-align:center;" data-biss2-toggle="${idx}">${expanded ? "▾" : "▸"}</td>` +
+      `<td style="cursor:pointer;" data-biss2-toggle="${idx}">${escapeHtml(acct.reference ?? "")}</td>` +
+      `<td>${acct.service_count}</td>` +
+      `<td>${acct.needs_update_count}</td>` +
+      `<td>${escapeHtml(acct.target_period ?? "")}</td>` +
+      `<td>${acct.complete ? "Complete" : "Needs action"}</td>`
+    ));
+    tbody.appendChild(tr);
+    if (expanded) {
+      tbody.insertAdjacentHTML("beforeend", biss2RenderServiceRows(idx));
+    }
+  });
+  tbody.querySelectorAll("[data-biss2-toggle]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const idx = Number(el.dataset.biss2Toggle);
+      if (biss2Expanded.has(idx)) biss2Expanded.delete(idx); else biss2Expanded.add(idx);
+      biss2RenderTable();
+    });
+  });
+  biss2RenderKpiRow();
+  $("#biss2-export-csv-btn").hidden = biss2Accounts.length === 0;
+  $("#biss2-select-all").checked = visible.length > 0 && visible.every((i) => biss2Selected.has(i));
+}
+
+hierWireSortableHeaders(
+  "#biss2-table",
+  () => biss2SortKey, (k) => { biss2SortKey = k; },
+  () => biss2SortDir, (d) => { biss2SortDir = d; },
+  biss2RenderTable,
+);
+
+$("#biss2-select-all").addEventListener("change", (e) => {
+  const visible = biss2VisibleIndices();
+  if (e.target.checked) visible.forEach((idx) => biss2Selected.add(idx));
+  else visible.forEach((idx) => biss2Selected.delete(idx));
+  biss2RenderTable();
+});
+
+$("#biss2-show-complete").addEventListener("change", () => biss2RenderTable());
+
+$("#biss2-detect-btn").addEventListener("click", async () => {
+  const btn = $("#biss2-detect-btn");
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "Scanning…";
+  try {
+    const daysBack = Number($("#biss2-days-back").value) || 0; // 0 = "All time" (no lookback filter)
+    const data = await api(`/api/bill-issuance/case2/detect?days_back=${daysBack}`, { method: "POST" });
+    biss2Accounts = data.accounts;
+    biss2Selected = new Set();
+    biss2Expanded = new Set();
+    biss2SortKey = null;
+    biss2SortDir = 1;
+    document.querySelectorAll("#biss2-table thead th[data-sort]").forEach((h) => {
+      h.querySelector(".stats-table-sort-arrow")?.remove();
+    });
+    biss2RenderTable();
+    $("#biss2-summary").textContent = data.possibly_truncated
+      ? `${data.account_count}+ account(s) found (row cap of ${data.limit} hit - list may be incomplete, try a shorter lookback), ${data.accounts_needing_action} needing action.`
+      : `${data.account_count} terminated account(s) found, ${data.accounts_needing_action} needing action.`;
+  } catch (err) {
+    showToast(err.message || "Scan failed.", true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+});
+
+$("#biss2-export-csv-btn").addEventListener("click", () => {
+  const visible = biss2VisibleIndices();
+  if (!visible.length) return;
+  const header = ["id_payment_form", "reference", "service_count", "needs_update_count", "target_period", "complete"];
+  const lines = [header.join(",")];
+  visible.forEach((idx) => {
+    const a = biss2Accounts[idx];
+    lines.push(header.map((k) => `"${String(a[k] ?? "").replace(/"/g, '""')}"`).join(","));
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a2 = document.createElement("a");
+  a2.href = url; a2.download = "bill_issuance_validator_case2.csv";
+  document.body.appendChild(a2); a2.click(); a2.remove();
+  URL.revokeObjectURL(url);
+});
+
+$("#biss2-generate-btn").addEventListener("click", async () => {
+  const program = $("#biss2-program").value.trim();
+  if (!program) { showToast("Enter the Jira/Program # this change is for.", true); return; }
+  const clean = $("#biss2-clean-toggle").checked;
+  // Empty selection = every flagged account (server-side default - see
+  // bill_issuance_case2_generate's own docstring).
+  const selectedForms = [...new Set([...biss2Selected].map((idx) => String(biss2Accounts[idx].id_payment_form)))];
+  const btn = $("#biss2-generate-btn");
+  btn.disabled = true;
+  try {
+    const result = await api("/api/bill-issuance/case2/generate", {
+      method: "POST",
+      body: { id_payment_forms: selectedForms, program, clean },
+    });
+    $("#biss2-output").textContent = result.sql_text;
+    let msg = `Update script generated: ${result.update_count} statement(s).`;
+    if (result.warnings.length) msg += `  ${result.warnings.length} warning(s) - see comments at the top of the script.`;
+    showToast(msg);
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = state.role === "viewer";
+  }
+});
+
+$("#biss2-copy-btn").addEventListener("click", async () => {
+  const text = $("#biss2-output").textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("Update script copied to clipboard.");
+  } catch (_) {
+    showToast("Couldn't copy - select and copy manually.", true);
+  }
+});
+
+$("#biss2-download-btn").addEventListener("click", () => {
+  const text = $("#biss2-output").textContent;
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "bill_issuance_case2_update.sql";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
 // ---------------- Server-start diagnostic (login screen + sidebar) ------
 // Unauthenticated /api/server-info - see server.py's SERVER_STARTED_AT
 // comment. Fetched once at boot, before login, so it's visible even on the
@@ -3347,6 +3784,7 @@ const bcState = {
   columns: [], rows: [],          // raw values from the last search (rows[i][j] aligns with columns[j])
   statusFilter: "all",
   search: "",
+  amountMin: "", amountMax: "",   // pending_amount range filter, applied client-side (RJ, 2026-09-13)
   billingPeriod: "",
   notes: {},                      // account_number -> {status, note, updated_by, updated_at_utc}
   noteModalAccount: null,
@@ -3358,6 +3796,32 @@ const bcState = {
 
   billingPeriodsLoaded: false,
 };
+
+// Column-name-keyed sort state for the Results and Bills-detail tables
+// (RJ, 2026-09-13: "sortable table" from the feature roadmap). Reuses
+// _hierCompareValues (generic, not actually hierarchy-specific) since
+// both tables store rows as plain arrays aligned to a columns array,
+// same shape that comparator already expects.
+let bcSortKey = null, bcSortDir = 1;
+let bcDetailSortKey = null, bcDetailSortDir = 1;
+
+// Same idea as hierWireSortableHeaders, but Bulk Checker's <thead> is
+// rebuilt from scratch (dynamic SQL columns) on every render, so the
+// click listeners AND the current sort arrow both need to be reapplied
+// each time rather than wired once at page load.
+function bcWireSortableHeaders(tableSelector, getKey, setKey, getDir, setDir, rerender) {
+  document.querySelectorAll(`${tableSelector} thead th[data-sort]`).forEach((th) => {
+    if (th.dataset.sort === getKey()) {
+      th.insertAdjacentHTML("beforeend", `<span class="stats-table-sort-arrow">${getDir() === 1 ? "▲" : "▼"}</span>`);
+    }
+    th.addEventListener("click", () => {
+      const key = th.dataset.sort;
+      setDir(getKey() === key ? -getDir() : 1);
+      setKey(key);
+      rerender();
+    });
+  });
+}
 
 const BC_NOTE_STATUS_LABELS = { open: "Open", being_handled: "Being handled", resolved: "Resolved" };
 function bcNoteIcon(status) {
@@ -3498,6 +3962,14 @@ $("#bc-search-box").addEventListener("input", () => {
   bcState.search = $("#bc-search-box").value;
   bcRenderResultsTable();
 });
+$("#bc-amount-min").addEventListener("input", () => {
+  bcState.amountMin = $("#bc-amount-min").value;
+  bcRenderResultsTable();
+});
+$("#bc-amount-max").addEventListener("input", () => {
+  bcState.amountMax = $("#bc-amount-max").value;
+  bcRenderResultsTable();
+});
 
 async function bcRunSearch() {
   const date_from = bcMonthToDate($("#bc-date-from").value);
@@ -3525,6 +3997,11 @@ async function bcRunSearch() {
     bcRenderKpiRow(result);
     await bcLoadNotesForPeriod(billing_period);
     bcRenderResultsTable();
+    if (bcState.statusFilter === "all") {
+      bcLoadTrendContext(billing_period);
+    } else {
+      $("#bc-trend-hint").hidden = true;
+    }
   } catch (err) {
     $("#bc-search-status").textContent = "Search failed.";
     showToast(err.message, true);
@@ -3533,21 +4010,182 @@ async function bcRunSearch() {
   }
 }
 
+// ---------------- Trend context (RJ, 2026-09-13: "context and trends,
+// not just totals") ----------------
+// /api/bulk-checker/trend returns one row per billing period ever fully
+// ("all"-filter) searched (bulk_checker_db._SEARCH_HISTORY_TABLE keys on
+// billing_period, so it's always that period's LATEST full search, not a
+// log of every search run). There's no due-date/aging concept anywhere
+// in the analyst-supplied queries this page is built on, so rather than
+// invent one, "trend" here means: compare this billing period's numbers
+// to the nearest lower billing period that's ever been fully searched -
+// labeled by period, not by calendar assumption, since periods aren't
+// guaranteed to have been searched back-to-back.
+async function bcLoadTrendContext(currentBillingPeriod) {
+  try {
+    const data = await api("/api/bulk-checker/trend");
+    const entries = data.entries || [];
+    const idx = entries.findIndex((e) => String(e.billing_period) === String(currentBillingPeriod));
+    if (idx <= 0) { $("#bc-trend-hint").hidden = true; return; }
+    bcRenderTrendContext(entries[idx], entries[idx - 1]);
+  } catch (_) {
+    $("#bc-trend-hint").hidden = true;
+  }
+}
+
+function bcTrendDelta(curr, prev) {
+  const diff = curr - prev;
+  if (prev === 0) return diff === 0 ? "" : " (new)";
+  const pctVal = (diff / Math.abs(prev)) * 100;
+  const arrow = diff > 0 ? "▲" : diff < 0 ? "▼" : "→";
+  return ` ${arrow}${Math.abs(pctVal).toFixed(1)}%`;
+}
+
+function bcRenderTrendContext(current, previous) {
+  const money = (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+  $("#bc-trend-hint").hidden = false;
+  $("#bc-trend-hint").textContent =
+    `📈 vs billing period ${previous.billing_period} (last searched ${bcFormatCell(previous.searched_at_utc)}): ` +
+    `Total ${previous.total} → ${current.total}${bcTrendDelta(current.total, previous.total)}, ` +
+    `Outstanding ${money(previous.outstanding_amount)} → ${money(current.outstanding_amount)}${bcTrendDelta(current.outstanding_amount, previous.outstanding_amount)}`;
+}
+
+// ---------------- Analyze One Account (RJ, 2026-09-13) - a standalone
+// lookup straight into the Bills drill-down for one account, without
+// needing to run the bulk search above first. Reuses the same cycle
+// dates + billing period fields since build_bill_detail_sql still needs
+// them to scope the query. ----------------
+function bcRunSingleAccountLookup() {
+  const accountNumber = $("#bc-single-account").value.trim();
+  const billing_period = $("#bc-billing-period").value.trim();
+  if (!accountNumber) {
+    showToast("Enter an account number.", true);
+    return;
+  }
+  if (!$("#bc-date-from").value || !$("#bc-date-to").value || !billing_period) {
+    showToast("Fill in the cycle dates and billing period above first.", true);
+    return;
+  }
+  bcState.billingPeriod = billing_period;
+  bcOpenDetail(accountNumber);
+}
+$("#bc-single-account-btn").addEventListener("click", bcRunSingleAccountLookup);
+$("#bc-single-account").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") bcRunSingleAccountLookup();
+});
+
+// ---------------- Saved Searches (backend already existed from round 1;
+// wired to the UI now - RJ, 2026-09-13) ----------------
+async function bcLoadSavedSearches() {
+  try {
+    const data = await api("/api/bulk-checker/saved-searches");
+    const menu = $("#bc-saved-menu");
+    menu.innerHTML = "";
+    if (!data.searches.length) {
+      menu.innerHTML = `<div class="dropdown-item hint-text">No saved searches yet.</div>`;
+    }
+    data.searches.forEach((s) => {
+      const item = document.createElement("div");
+      item.className = "dropdown-item";
+      item.style.display = "flex";
+      item.style.justifyContent = "space-between";
+      item.style.alignItems = "center";
+      item.style.gap = "8px";
+      const label = document.createElement("span");
+      label.textContent = `${s.name} — period ${s.billing_period}`;
+      label.style.cursor = "pointer";
+      label.title = `${s.date_from} to ${s.date_to}`;
+      label.addEventListener("click", () => {
+        $("#bc-date-from").value = bcDateToMonth(s.date_from);
+        $("#bc-date-to").value = bcDateToMonth(s.date_to);
+        $("#bc-billing-period").value = s.billing_period;
+        $("#bc-saved-menu").hidden = true;
+        bcRunSearch();
+      });
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "btn btn-pill-sm";
+      delBtn.textContent = "✕";
+      delBtn.title = "Delete this saved search";
+      delBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        try {
+          await api(`/api/bulk-checker/saved-searches/${s.id}`, { method: "DELETE" });
+          bcLoadSavedSearches();
+        } catch (err) {
+          showToast(err.message || "Could not delete saved search.", true);
+        }
+      });
+      item.appendChild(label);
+      item.appendChild(delBtn);
+      menu.appendChild(item);
+    });
+  } catch (_) {
+    // Best-effort - the search/detail flows work fine without this.
+  }
+}
+
+$("#bc-saved-btn").addEventListener("click", () => {
+  const menu = $("#bc-saved-menu");
+  if (menu.hidden) bcLoadSavedSearches();
+  menu.hidden = !menu.hidden;
+});
+document.addEventListener("click", (e) => {
+  if (!$("#bc-saved-dropdown").contains(e.target)) $("#bc-saved-menu").hidden = true;
+});
+
+$("#bc-save-search-btn").addEventListener("click", async () => {
+  const date_from = bcMonthToDate($("#bc-date-from").value);
+  const date_to = bcMonthToDate($("#bc-date-to").value);
+  const billing_period = $("#bc-billing-period").value.trim();
+  if (!date_from || !date_to || !billing_period) {
+    showToast("Fill in both dates and the billing period first.", true);
+    return;
+  }
+  const name = prompt("Name this search (e.g. \"This month's outstanding\"):");
+  if (!name || !name.trim()) return;
+  try {
+    await api("/api/bulk-checker/saved-searches", {
+      method: "POST",
+      body: { name: name.trim(), date_from, date_to, billing_period },
+    });
+    showToast("Search saved.");
+  } catch (err) {
+    showToast(err.message || "Could not save search.", true);
+  }
+});
+
+// Cards whose value maps directly onto a STATUS_FILTERS value can act as
+// a filter toggle (RJ, 2026-09-13: "make every component actionable") -
+// clicking one sets that status filter and reruns the search; clicking
+// the already-active one clears back to "all". "Total" and "Outstanding"
+// have no matching single-status filter, so they stay plain.
 function bcRenderKpiRow(result) {
   const cards = [
-    ["rows", "📄", "Total", result.row_count],
-    ["pending", "🕓", "Pending (no file)", result.pending_count],
-    ["missing", "⚠️", "Missing bill", result.missing_bill_count],
-    ["invoicing", "🧾", "In invoicing", result.in_invoicing_count],
-    ["outstanding", "💰", "Outstanding", result.outstanding_amount.toLocaleString(undefined, { maximumFractionDigits: 2 })],
+    ["rows", "📄", "Total", result.row_count, null],
+    ["pending", "🕓", "Pending (no file)", result.pending_count, "pending"],
+    ["missing", "⚠️", "Missing bill", result.missing_bill_count, "missing_bill"],
+    ["invoicing", "🧾", "In invoicing", result.in_invoicing_count, "in_invoicing"],
+    ["outstanding", "💰", "Outstanding", result.outstanding_amount.toLocaleString(undefined, { maximumFractionDigits: 2 }), null],
   ];
-  $("#bc-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
-    `<div class="kpi-card" data-kpi="${kpi}">
-      <div class="kpi-value">${escapeHtml(String(value))}</div>
-      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
-    </div>`
-  ).join("");
+  $("#bc-kpi-row").innerHTML = cards.map(([kpi, icon, label, value, filterValue]) => {
+    const clickable = filterValue !== null;
+    const active = clickable && bcState.statusFilter === filterValue;
+    return `<div class="kpi-card${clickable ? " kpi-card-clickable" : ""}${active ? " is-active" : ""}" data-kpi="${kpi}"` +
+      `${clickable ? ` data-bc-status-filter="${filterValue}" title="Click to filter to this status - click again to clear"` : ""}>` +
+      `<div class="kpi-value">${escapeHtml(String(value))}</div>` +
+      `<div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div></div>`;
+  }).join("");
 }
+
+$("#bc-kpi-row").addEventListener("click", (ev) => {
+  const card = ev.target.closest("[data-bc-status-filter]");
+  if (!card) return;
+  const filterValue = card.dataset.bcStatusFilter;
+  bcState.statusFilter = bcState.statusFilter === filterValue ? "all" : filterValue;
+  $("#bc-status-filter").value = bcState.statusFilter;
+  bcRunSearch();
+});
 
 function bcVisibleColumnIdx() {
   return bcState.columns.map((c, i) => i).filter((i) => !BC_RESULTS_HIDDEN_COLUMNS.has(bcState.columns[i]));
@@ -3556,15 +4194,33 @@ function bcVisibleColumnIdx() {
 function bcVisibleResultRows() {
   const search = bcState.search.trim().toLowerCase();
   const visibleIdx = bcVisibleColumnIdx();
-  if (!search) return bcState.rows;
-  return bcState.rows.filter((row) => visibleIdx.some((i) => String(row[i]).toLowerCase().includes(search)));
+  let rows = bcState.rows;
+  if (search) rows = rows.filter((row) => visibleIdx.some((i) => String(row[i]).toLowerCase().includes(search)));
+
+  // Amount-range filter (RJ, 2026-09-13) - client-side over the already-
+  // loaded result set, same pattern as every other Results filter here.
+  const amountIdx = bcColIdx(bcState.columns, "pending_amount");
+  if (amountIdx !== -1) {
+    const min = parseFloat(bcState.amountMin);
+    const max = parseFloat(bcState.amountMax);
+    if (!Number.isNaN(min)) rows = rows.filter((row) => { const v = parseFloat(row[amountIdx]); return !Number.isNaN(v) && v >= min; });
+    if (!Number.isNaN(max)) rows = rows.filter((row) => { const v = parseFloat(row[amountIdx]); return !Number.isNaN(v) && v <= max; });
+  }
+
+  if (bcSortKey) {
+    const idx = bcColIdx(bcState.columns, bcSortKey);
+    if (idx !== -1) rows = [...rows].sort((a, b) => _hierCompareValues(a[idx], b[idx], bcSortDir));
+  }
+  return rows;
 }
 
 function bcRenderResultsTable() {
   const visibleIdx = bcVisibleColumnIdx();
   const thead = $("#bc-results-table thead tr");
-  thead.innerHTML = visibleIdx.map((i) => `<th>${escapeHtml(bcPrettifyLabel(bcState.columns[i]))}</th>`).join("")
-    + `<th>Missing/Invoicing</th><th>Notes</th><th></th>`;
+  thead.innerHTML = visibleIdx.map((i) =>
+    `<th class="stats-table-th-sortable" data-sort="${escapeHtml(bcState.columns[i])}">${escapeHtml(bcPrettifyLabel(bcState.columns[i]))}</th>`
+  ).join("") + `<th>Missing/Invoicing</th><th>Notes</th><th></th>`;
+  bcWireSortableHeaders("#bc-results-table", () => bcSortKey, (k) => { bcSortKey = k; }, () => bcSortDir, (d) => { bcSortDir = d; }, bcRenderResultsTable);
 
   const accountIdx = bcColIdx(bcState.columns, "ACCOUNT_NUMBER");
   const isPendingIdx = bcColIdx(bcState.columns, "is_pending");
@@ -3773,6 +4429,10 @@ function bcVisibleDetailRows() {
     rows = rows.filter((row) => bcClassifyDetailRow(row) === bcState.detailFilter);
   }
   if (search) rows = rows.filter((row) => row.some((v) => String(v).toLowerCase().includes(search)));
+  if (bcDetailSortKey) {
+    const idx = bcColIdx(bcState.detailColumns, bcDetailSortKey);
+    if (idx !== -1) rows = [...rows].sort((a, b) => _hierCompareValues(a[idx], b[idx], bcDetailSortDir));
+  }
   return rows;
 }
 
@@ -3780,8 +4440,10 @@ function bcRenderDetailTable() {
   const visibleIdx = bcVisibleDetailColumnIdx();
   const sectorSupplyIdx = bcColIdx(bcState.detailColumns, "ID_SECTOR_SUPPLY");
   const thead = $("#bc-detail-table thead tr");
-  thead.innerHTML = visibleIdx.map((i) => `<th>${escapeHtml(bcPrettifyLabel(bcState.detailColumns[i]))}</th>`).join("")
-    + `<th>Readings</th>`;
+  thead.innerHTML = visibleIdx.map((i) =>
+    `<th class="stats-table-th-sortable" data-sort="${escapeHtml(bcState.detailColumns[i])}">${escapeHtml(bcPrettifyLabel(bcState.detailColumns[i]))}</th>`
+  ).join("") + `<th>Readings</th>`;
+  bcWireSortableHeaders("#bc-detail-table", () => bcDetailSortKey, (k) => { bcDetailSortKey = k; }, () => bcDetailSortDir, (d) => { bcDetailSortDir = d; }, bcRenderDetailTable);
   const idBillIdx = bcColIdx(bcState.detailColumns, "id_bill");
 
   const tbody = $("#bc-detail-table tbody");

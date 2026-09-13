@@ -716,6 +716,7 @@ app/core/schema_check.py     query/key columns vs. a live table's actual columns
 app/core/ai_assist.py        Gemini API calls (suggest / optimize / explain / NL-WHERE builder / script review / test key)
 app/core/stats.py            per-column summary stats + histogram bucketing + KPI rollup + Pearson correlation for the Dashboard
 app/core/hierarchy_analysis.py system-wide scan for pending PRIMARY meter hierarchies + drill-down + reading-history popup
+app/core/bill_issuance_validator.py system-wide scan for accounts whose next Electricity/Water bill is stuck (ESTFAC0015) behind a Rate (176) bill still being issued (see "Bill Issuance Validator" below)
 app/core/bulk_checker.py     Bulk Checker: pending bulk-account search + bill drill-down queries - ported from the standalone EWA Bulk Checker project (see "Bulk Checker" below)
 app/db/bulk_checker_db.py    Bulk Checker's local collaboration state: per-account notes, shared saved searches, Trend search history (all in the shared internal SQLite db)
 app/ui/*                     Tkinter desktop UI (legacy) - main window, Config dialog, Dashboard window, theme
@@ -1091,21 +1092,73 @@ description only, in the date only month and year should be pickable as its alwa
   billing cycle always starts on the 1st - `bcMonthToDate`/`bcDateToMonth`/`bcNextMonth` convert
   between the `"YYYY-MM"` picker value and the full `"YYYY-MM-01"` ISO date the backend expects.
 
-Not yet live-verified - written this round, awaiting the same restart as the Outstanding-KPI fix
-above (all static `index.html`/`app.js`/`styles.css` changes take effect on refresh; the
-`ID_SECTOR_SUPPLY` addition to `app/core/bulk_checker.py` needs the process restart).
+**Live-verified 2026-09-13** against the tunnel DB after a restart (PID 27780): Outstanding KPI now
+non-zero (6,926,433 for a real 248-row search - decimal fix confirmed), month pickers, billing-period
+dropdown (id + description, auto-fills dates), detail status KPI cards + click-to-filter, and CSV/
+Excel export all working as built.
 
-**Backend routes already built but with no frontend UI yet** (first-round scoping decision - the
-Search/Detail/Notes/Export core above is what's wired into the page; these were left for a
-follow-up round rather than risk shipping a sprawling, unverified feature in one pass):
+**Bug found and fixed during that same live-verify session: the Readings button opened the reading-
+history modal but nothing appeared on screen.** Root cause: `#hier-reading-modal-overlay` was still
+physically nested inside `<section class="page" id="page-hierarchy">` in `index.html` - fine when
+opened FROM the Hierarchy Analysis page (that section is the active one then), but Bulk Checker's
+Bills drill-down opens the exact same shared element from a DIFFERENT page. `.page:not(.is-active)`
+is `display:none`, and a `display:none` ancestor collapses a descendant to a 0×0 box no matter that
+the descendant itself is `position: fixed` with `inset: 0` - fixed positioning escapes the normal
+document flow, not the ancestor's own display. The API call and DOM update (title, 110+ reading rows)
+both worked correctly every time; only the paint was affected, which is why it wasn't obvious from
+the network tab. Fixed by moving the modal's markup out of `#page-hierarchy` to be a direct sibling
+of every `.page` section (just before `</main>`), so it renders regardless of which page opened it.
+Re-verified both call sites after the fix: Hierarchy Analysis's own Detail drill-down (still works,
+no regression) and Bulk Checker's Bills drill-down (now actually visible, 110-156 real reading rows
+confirmed in a live screenshot). This was a static-file-only fix - no Python changed, no restart
+needed, just a browser refresh.
+
+**Round 3 (2026-09-13)** - RJ pasted a large generic "bulk billing dashboard" feature roadmap and
+asked for (1) single-account analysis and (2) "implement" from that list. Most of the 25-item
+roadmap is written for a different kind of system (imports, multi-currency/branch, its own RBAC,
+notifications, scheduled reports, async job queues, dark mode, API versioning) that doesn't fit
+this tool - a read-only lookup against one SQL Server connection plus a small local SQLite
+collaboration db, already inside ScriptGen's own single RBAC. Confirmed the scope with RJ first;
+built the realistic subset instead of the full list:
+- **Analyze One Account** - a standalone lookup box (new card above Results) that opens the Bills
+  drill-down for one typed-in account number directly, without running the bulk search first. Reuses
+  the same cycle-date/billing-period fields; `bcRunSingleAccountLookup` in `app.js`.
+- **Interactive KPI cards.** The Results KPI row's Pending/Missing bill/In invoicing cards are now
+  click-to-filter (`kpi-card-clickable`/`is-active`, same pattern as the Bills-detail summary above
+  and Detect All's "Needs status advance" card) - click one to set that status filter and rerun,
+  click again to clear. Total/Outstanding have no matching single-status filter so stay plain.
+- **Sortable columns**, Results and Bills-detail tables both - click a header to sort, click again to
+  reverse, same `.stats-table-th-sortable`/`.stats-table-sort-arrow` CSS and comparator
+  (`_hierCompareValues`) Hierarchy Analysis already uses (task #153), just re-wired after every
+  render since these two tables rebuild their `<thead>` from dynamic SQL columns instead of using a
+  static one.
+- **Amount-range filter** (`bc-amount-min`/`bc-amount-max`) on the Results table, filtering the
+  already-loaded `pending_amount` column client-side, same as the existing text search box.
+- **Saved Searches wired to the UI.** The CRUD routes below existed since round 1 with no frontend -
+  now there's a "💾 Saved searches ▾" dropdown (load/delete) and a "💾 Save current as…" button in
+  the Search card.
+- **Trend / vs-previous-period context.** After a full (`status_filter=all`) search, a small line
+  under the KPI row compares this billing period's Total/Outstanding against the nearest lower
+  billing period ScriptGen has ever fully searched (`GET /api/bulk-checker/trend`, previously built
+  but unused). Deliberately NOT an "aging"/days-overdue metric - nothing in the analyst-supplied
+  queries defines a due date, so rather than invent one, this compares by billing period number and
+  says so in the label instead of implying a calendar guarantee.
+
+Explicitly out of scope, and why: RBAC/notifications/scheduled reports/async job queues/API
+versioning/dark mode/duplicate detection/data-quality dashboard don't fit a single-connection
+read-only internal tool with no import pipeline; bulk multi-select actions and an "aging" dashboard
+were skipped because there's no write-back workflow or due-date concept in the underlying analyst
+SQL to build them on honestly.
+
+**Backend routes now fully wired to the frontend** (built in round 1, left unwired until this round):
+- `GET/POST/DELETE /api/bulk-checker/saved-searches` - Saved Searches dropdown above.
+- `GET /api/bulk-checker/trend` - Trend context line above.
+
+**Still backend-only, no frontend UI** (out of scope for this round - no clear UI need identified
+yet):
 - `POST /api/bulk-checker/bulk-detail` - the same bill-detail query run once per selected account
   and concatenated, so several accounts can be exported together (`bulk_checker.MAX_BULK_ACCOUNTS`
   = 50 at a time).
-- `GET/POST/DELETE /api/bulk-checker/saved-searches` - shared, named cycles (dates + billing
-  period) any teammate can save and re-run.
-- `GET /api/bulk-checker/trend` - per-billing-period search history for a Trend chart. Snapshotted
-  automatically on every full (`status_filter=all`) search - see `bulk_checker_db.record_search`'s
-  docstring for why this is a history of searches actually run, not a live cross-period aggregate.
 
 **Not yet live-verified** against the tunnel DB - the query text was ported and unit-tested
 (`tests/test_bulk_checker.py`, SQL-text-only, no DB) but needs a real run through the UI once the
@@ -1115,7 +1168,156 @@ the static `index.html`/`app.js` changes don't).
 
 ## Performance notes
 
-Two things were fixed after early testing showed the app feeling laggy, both around loading
+### DIFF DATES Anomaly Batch: connection reuse + live progress/rate (2026-09-13)
+
+RJ reported the Batch/Multi-NISS page on the DIFF DATES Anomaly tab felt slow and asked for a
+different approach, plus a progress readout (processed/pending/percent/items-per-second).
+
+**Root cause.** Every NISS in a batch runs ~6 queries (detect, correct-date, item-to-bill, XML
+lookup, anomalous, item-status), and `app/db/mssql.py`'s `run_query`/`get_table_columns` opened
+and closed a brand-new SQL Server connection for *every single call*. That's the right default
+for every other page's one-off queries, but RJ connects through a local tunnel, so the connection
+**handshake** - not the query itself - dominates. A 50-NISS batch was paying that handshake cost
+roughly 300 times over.
+
+**Fix - share one connection per batch job.** `app/db/mssql.py` gained
+`reuse_connection(conn_cfg)`, a context manager (built on `threading.local()`, since each batch
+job runs on its own background thread) that opens one connection and makes every
+`run_query()`/`get_table_columns()` call on that thread transparently reuse it for the life of the
+`with` block - `web/batch_jobs.py`'s per-NISS query call sites needed zero changes. It self-heals
+too: if the tunnel drops mid-batch, a cheap `SELECT 1` health check tells a merely-slow connection
+from a genuinely dead one, and only a dead one triggers a single reconnect-and-retry instead of
+failing every remaining NISS in the batch. `web/batch_jobs.py`'s `_run_batch` now wraps the whole
+job (the up-front audit-column schema check plus the entire per-NISS loop) in
+`with mssql.reuse_connection(conn_cfg):`.
+
+**Progress + rate reporting.** `BatchJob` gained `started_at_utc`/`finished_at_utc` timestamps
+(set when the background thread actually starts running, and when it reaches a terminal status),
+both exposed through `to_public_dict()`. The frontend (`app.js`) computes elapsed time,
+processed/pending counts, percent complete, and items-per-second from those timestamps plus the
+existing `processed`/`niss_total` fields - no new server-side math needed. The Batch tab now shows
+a thin progress bar plus a 4-card KPI strip (Processed / Pending / Complete % / Rate) that appears
+once the job actually starts and updates on every poll.
+
+**Test coverage.** New `tests/test_mssql_reuse.py` (7 tests) covers `reuse_connection` in
+isolation: normal reuse across many queries, the self-healing reconnect-and-retry path, that a
+genuinely bad query on a healthy connection is *not* retried, and that the non-reused path is
+unchanged. `tests/test_batch_jobs.py` gained two tests for the new timestamp fields. Every
+existing batch integration test in `tests/test_web_api.py` fakes `mssql.run_query`/
+`get_table_columns` wholesale but never touched `mssql.reuse_connection` directly - since
+`_run_batch` now calls it directly, those tests needed a `reuse_connection` no-op stand-in
+(`_noop_reuse_connection`) added alongside each of the three batch-fixture monkeypatch sites, so
+they never attempt a real connection to the fake test config's `"localhost"`.
+
+**Live-verify this one after your next restart** - `app/db/mssql.py` and `web/batch_jobs.py` are
+Python files, so the connection-reuse speedup needs a fresh server process before it's testable
+against the real tunnel DB.
+
+### Detect All / Single NISS: clearer "Needs status advance" label, and a real removal-vs-reconnection breakdown for "All cycle" (2026-09-13)
+
+RJ flagged that "Needs status advance" wasn't clear, and asked whether the "All cycle" filter's
+"No" means only removal-type readings, or reconnection readings too - then asked for the actual
+breakdown to be implemented, in both Single NISS ("individual") and Detect All.
+
+**"Needs status advance" -> renamed and explained.** This flag means an item-to-bill's
+`GCCOM_ITEMS_TO_BILL.STATUS` is still `STTOBILL00` ("pending") and hasn't been advanced to
+`STTOBILL01` yet - Generate Cleanup Script performs that one-time move for whatever's checked. The
+column header, filter label, filter options, and the KPI card are all reworded to say this
+directly ("Status still pending (STTOBILL00)?" / "Billing status still pending?") instead of the
+unexplained "Needs status advance", with a full tooltip for anyone who wants the exact mechanics.
+
+**"All cycle" "No": confirmed live, not guessed.** Queried `OUC_COMMON_ADMIN.GCGT_RE_READING_TYPE`
+directly through the app's own Workspace query runner (server restarted and reachable by then) -
+the full table, all 16 rows:
+
+| Code | Meaning | | Code | Meaning |
+|---|---|---|---|---|
+| TIPTL00001 | Installation | | TIPTL00010 | Disconnection |
+| TIPTL00002 | **Removal** | | TIPTL00011 | **Reconnection** |
+| TIPTL00003 | Cycle | | TIPTL00012 | Prepayment |
+| TIPTL00004 | Control | | TIPTL00014 | Prepayment Control |
+| TIPTL00005 | Direct Connection | | TIPTL00015 | Net Adjustment |
+| TIPTL00006 | Out Of Cycle | | TIPTL00016 | Credit Adjustment |
+| TIPTL00007 | Usage Adjustment | | TIPTL00017 | Distribution |
+| TIPTL00009 | Off Season Adjustment | | TIPTL00018 | Sale of Water |
+
+`CYCLE_READING_TYPES` (what makes `ALL_CYCLE = 1`) is `TIPTL00003`/`TIPTL00005` - Cycle and Direct
+Connection only. So the answer to RJ's question: **"No" includes Reconnection (TIPTL00011) just as
+much as Removal (TIPTL00002)** - it's a catch-all across the other 14 codes above, never scoped to
+just one. Side-finding worth flagging: `READING_TYPE_ORPHAN_USAGE` (TIPTL00011), the code Part 6's
+own cleanup rule already singles out for special handling, turns out to actually be the
+**Reconnection** type by this lookup - its "orphan usage" name in the code was always just this
+module's own functional label for what Part 6 does with it, not its real business meaning.
+
+**The actual breakdown, implemented, both places RJ asked for it:**
+- *Single NISS* (`app/core/date_anomaly.py`'s `build_detect_query`) - each anomalous reading now
+  gets a `READING_TYPE_DESC` column via a `LEFT JOIN` to `GCGT_RE_READING_TYPE`, plus an
+  `IS_CYCLE_READING` bit. The Detect table's new "Reading Type" column shows the real word
+  ("Removal", "Reconnection", "Cycle", ...) per reading, with a non-cycle one visually flagged
+  (orange `.badge-noncycle` pill).
+- *Detect All* (`build_detect_all_anomalies_query`) - a new `NON_CYCLE_READING_TYPES` column, a
+  correlated subquery (`STUFF` + `FOR XML PATH` - the broadly-compatible SQL Server string-concat
+  idiom, not `STRING_AGG`, since the SQL Server version here isn't confirmed to be 2017+) that
+  lists the *actual* distinct non-cycle type name(s) linked to that item, comma-separated (e.g.
+  "Removal, Reconnection"), blank when All Cycle is Yes. Shown as a new "Non-cycle type(s)" table
+  column (same orange pill styling) and included in both the CSV and the server-built `.xlsx`
+  export.
+
+Server-side change this time (`app/core/date_anomaly.py`, `web/server.py`), not just static files -
+**needs a server restart** before the new columns are live-testable, same as the batch fix above.
+Tests: `tests/test_date_anomaly.py` gained coverage for both new query shapes; `tests/test_web_api.py`
+gained `test_date_anomaly_detect_includes_reading_type_description`,
+`test_date_anomaly_detect_all_returns_non_cycle_reading_types`, and a
+`..._blank_when_column_missing` degrade-gracefully counterpart, plus the existing xlsx-export
+shape tests were updated for the renamed/added columns.
+
+### DIFF DATES correction script: strip the removed reading's own `<reading>` block from XML (2026-09-13)
+
+RJ: "in the update of the xml for diff date, we need to remove the section of the non cycle that
+we are removing sample: `<reading><idReading>1045434621</idReading></reading>` but only for the
+idReading that we are deleting in reading item to bill."
+
+Part 6 of `build_correction_script` already `DELETE`s a non-cycle (Reconnection/`TIPTL00011`)
+reading's `GCCOM_READINGS_ITEMSTOBILL` link and resets the reading itself. What it didn't do until
+now: once that link is gone, the reading no longer belongs to the bill, but its own
+`<reading><idReading>...</idReading></reading>` block was still left sitting in
+`GCCOM_ITEMS_TO_BILL_XML.XML_TO_BILL` - the XML and the relational data would disagree about which
+readings the bill actually covers.
+
+**New:** `remove_reading_nodes(xml_text, id_readings)` in `app/core/date_anomaly.py` - parses the
+XML (same namespace-agnostic-by-local-name approach as `patch_xml_dates`), finds every `<reading>`
+element whose `<idReading>` child matches one of the given ids, and removes *only those* from the
+tree (every other `<reading>` block, including ones for readings that stay linked, is left
+untouched). Matches by string comparison (an id might come back from the DB driver as int, string,
+or Decimal - a strict type check would silently match nothing). Standard-library `ElementTree` has
+no `.getparent()` like lxml does, so a parent map is built up front to actually detach a matched
+element from its enclosing node.
+
+**Wired into Part 4, not a separate step:** `build_correction_script` now computes `orphan_ids`
+(Part 6's list) up front, maps each one to the item-to-bill/XML document(s) it's linked to (via the
+same pre-deletion `item_to_bill_map` Part 2 already uses - the `DELETE` hasn't run yet at
+script-generation time), and for any XML document affected, strips the matching `<reading>`
+block(s) on the *same* parsed tree `patch_xml_dates` already patched the dates on - so each
+`GCCOM_ITEMS_TO_BILL_XML` row still gets exactly one `UPDATE`, not two competing ones. The
+statement's own comment says what happened either way, e.g. `-- XML 500: updated node(s): initDate,
+readingFromDate; removed <reading> node(s) for id_reading [101]`. If an orphan reading's `<reading>`
+block isn't actually found in its XML (shouldn't normally happen, but data doesn't always agree
+with itself), that's surfaced as a warning rather than silently doing nothing.
+
+No caller changes needed - `web/server.py`, `web/batch_jobs.py`, and the desktop app's
+`app/ui/main_window.py` already pass `item_to_bill_map`/`orphan_usage_id_readings` into
+`build_correction_script` (see the earlier Part 6 round), so this activates automatically
+everywhere a correction script is generated: Single NISS, Batch, and Detect All's
+Generate-for-Selected (which delegates to Batch).
+
+Tests: `tests/test_date_anomaly.py` gained 8 unit tests for `remove_reading_nodes` in isolation
+(matching one/multiple ids, string-vs-type matching, unmatched ids left alone, malformed XML,
+namespaced XML, independence from `patch_xml_dates`) plus 3 integration tests through
+`build_correction_script` itself (the matching reading's block disappears while a sibling one
+survives; an orphan reading linked to a *different* item's XML doesn't touch this one; a missing
+expected `<reading>` block surfaces as a warning).
+
+Two more things were fixed after early testing showed the app feeling laggy, both around loading
 query results into the grid (and the freeze that caused right after):
 
 - **Column auto-sizing.** Every query run used to call tksheet's built-in "size columns to fit
@@ -1139,6 +1341,245 @@ to a temp folder on every launch (and antivirus tools often rescan that on-launc
 which can make startup noticeably slower with matplotlib/ttkbootstrap's larger payload; onedir
 trades "one .exe you can copy anywhere" for "a folder you copy as a whole" in exchange for
 skipping that per-launch extraction. Say the word and I'll make that switch.
+
+### DIFF DATES correction script: fixed a real bug - the XML UPDATE was targeting the wrong row (2026-09-13, same day)
+
+RJ caught this live: "you are updating using id_item_to_bill, you need to get first the id_xml
+from gccom_item_to_bill and update with that id." He was right, and it was a real, pre-existing
+bug, not just a wording issue.
+
+**What was wrong:** since the very first Diff Date Anomaly round, `date_anomaly.py` assumed
+`GCCOM_ITEMS_TO_BILL_XML.ID_XML` was the SAME value as `GCCOM_ITEMS_TO_BILL.ID_ITEM_TO_BILL` - the
+functional spec's original example query filtered `ID_XML` directly by a value already known to be
+an item-to-bill id, with no join shown, so that was the working assumption (flagged from day one as
+unverified). It was wrong. The real schema (confirmed in `docs/db_schema_reference.md`'s live FK
+list) has `GCCOM_ITEMS_TO_BILL.ID_XML -> GCCOM_ITEMS_TO_BILL_XML.ID_XML` - a real foreign-key column
+on `GCCOM_ITEMS_TO_BILL` that has to be looked up first. Every `UPDATE ... WHERE ID_XML = ...` this
+tool ever generated was targeting the wrong row (or no row at all) whenever an item's real `ID_XML`
+differs from its own `ID_ITEM_TO_BILL` - which, going by the item ids seen in testing so far, looks
+like the normal case, not an edge case.
+
+**Fix:** a new `build_item_xml_id_query(id_item_to_bills)` in `app/core/date_anomaly.py` runs
+FIRST - `SELECT ID_ITEM_TO_BILL, ID_XML FROM GCCOM_ITEMS_TO_BILL WHERE ID_ITEM_TO_BILL IN (...)` -
+and its result (`item_to_xml_map: dict[item_id] -> real id_xml`, skipping any NULL `ID_XML`) feeds
+`build_xml_lookup_query` instead of the item ids themselves. `build_correction_script` gained a new
+`item_to_xml_map` parameter and Part 4 now resolves each item-to-bill id's real `ID_XML` through it
+before touching `GCCOM_ITEMS_TO_BILL_XML` at all - an item with no `ID_XML` (NULL column) or whose
+`ID_XML` has no matching row gets a warning and no Part 4 statement, instead of a guess. Wired into
+all three surfaces that build a correction script: `web/server.py` (Single NISS resolve/generate),
+`web/batch_jobs.py` (Batch, and Detect All's Generate-for-Selected which delegates to it), and the
+desktop app's `app/ui/main_window.py`. 5 new tests in `tests/test_date_anomaly.py` (the new query
+builder, and a dedicated case proving the UPDATE targets the real `ID_XML` - 9001 - not the item id
+- 500 - plus the two "can't resolve" warning paths); `tests/test_web_api.py`'s Date Anomaly fixtures
+updated to answer the new lookup query (defaulting item id == id_xml so existing tests didn't need
+rewriting, since the fixture's whole point is to isolate what each test is actually checking).
+
+**Also added, same message:** a finer non-cycle breakdown filter on the Detect All page - "Cycle
+reads only" became "Cycle / non-cycle composition" with four new options (Removal only,
+Reconnection only, both, or neither) alongside the existing Cycle-only/any-non-cycle choices -
+substring-matched against the existing `non_cycle_reading_types` column text, no new query needed.
+
+### DIFF DATES correction script: fixed a second real bug - the "correct date" could be the wrong reading when two tie on billing period (2026-09-14)
+
+RJ caught this live too, on NISS `20022221-101`: "why detected the correct date as 2026-03-09
+00:00:00 where it should be 26/03/2026."
+
+**What was wrong:** `build_correct_date_query` picks the single reference date to apply to every
+anomalous reading via `SELECT TOP 1 ... ORDER BY r.ID_BILLING_PERIOD DESC` - but that `ORDER BY` has
+no tiebreaker. When more than one reading shares the same (highest) `ID_BILLING_PERIOD` and is also
+`READ_STATUS = 7000STSRED` (correctly billed), SQL Server's `TOP 1` can return *either* one - there's
+no guaranteed order for ties. Confirmed live: NISS `20022221-101`'s billing period `10000000232` had
+TWO correctly-billed readings - one Removal-type (`TIPTL00002`) dated 2026-03-09, and one Cycle-type
+(`TIPTL00003`) dated 2026-03-26 (the anomalous reading itself is also Cycle-type) - and the query was
+returning the earlier, wrong one.
+
+**Fix:** added `r.READING_DATE DESC, r.ID_READING DESC` as secondary/tertiary sort keys, so "the most
+recent correctly-billed reading" (the spec's own wording) means literally the reading with the latest
+`READING_DATE` among the tied rows, with `ID_READING` as a final purely-deterministic tiebreak if even
+the date ties. No caller changes needed - every surface (Single NISS, Batch, desktop) calls this one
+query builder. New test in `tests/test_date_anomaly.py` asserting the full `ORDER BY` clause.
+
+**Worth flagging:** this bug could have silently applied the wrong correct-date to any NISS whose
+correctly-billed history happens to have two readings tied on the same billing period - not just
+`20022221-101`. Any correction script generated before this fix, for a NISS where that's possible,
+is worth a second look.
+
+### DIFF DATES correction script: fixed a third real bug - billing-period-first sort skipped a later, correctly-billed removal reading (2026-09-15)
+
+RJ caught this live too, on NISS `10328684-101`: "we did not consider billed removal reading as
+correct previous billed reading, the correct date should be 30/07/2026."
+
+**What was wrong:** the 2026-09-14 fix above sorted `ORDER BY r.ID_BILLING_PERIOD DESC, r.READING_DATE
+DESC, r.ID_READING DESC` - billing period first, date only as a tiebreaker *within* the same period.
+That assumes `ID_BILLING_PERIOD` always increases with `READING_DATE`, which isn't true across a
+removal/reinstall: confirmed live, this NISS's billing period `10000000235` held a billed Removal
+reading dated **2026-07-30**, while the higher-numbered period `10000000236` held a billed Cycle
+reading dated only 2026-07-22. Sorting by billing period first picked period 236's earlier-dated
+reading over period 235's later, correctly-billed removal - the opposite of "most recent."
+
+**Fix:** flipped the sort priority to `ORDER BY r.READING_DATE DESC, r.ID_BILLING_PERIOD DESC,
+r.ID_READING DESC` - `READING_DATE` is now the primary key, matching "most recent correctly-billed
+reading" literally, with billing period and reading id kept only as tiebreakers for same-date ties
+(preserves the 2026-09-14 fix's own case). Verified live both ways: the old order returned
+2026-07-22 (wrong), the new order returns 2026-07-30 (RJ-confirmed correct). No caller changes
+needed - same shared query builder. Test updated in `tests/test_date_anomaly.py`.
+
+**Worth flagging:** same caveat as the 2026-09-14 fix - any correction script generated before this
+one, for a NISS whose recent billing periods aren't in strict date order (removals/reinstalls are
+the known trigger), is worth a second look.
+
+## Bill Issuance Validator (new, 2026-09-15)
+
+New top-level page (sidebar: **Bill Issuance Validator**, 🧾). Finds accounts whose next
+Electricity/Water bill is stuck behind a Rate bill still being put to collection - a real,
+recurring billing-pipeline bottleneck, not a data-quality bug like DIFF DATES Anomaly.
+
+**RJ's own starting query and rules** (verbatim, 2026-09-15):
+
+```sql
+select distinct pf.id_payment_form, pf.reference, nt.update_date
+from gccom_notice_tmp nt
+join gccom_bill b on b.id_bill = nt.id_bill
+join gccom_payment_form pf on pf.id_payment_form = b.id_payment_form
+where nt.cod_status = '5000NOTEMP'
+  and b.billing_status = 'ESTFAC0012'
+order by nt.update_date;
+```
+
+"base on this, I wan to get all records where it has only 1 recored for the billing period and the
+id_offered_service is 176, and using the same id_payment_form, check the table gccom_bill with
+id_offered_service = 1 or 19 and the billing_period is 1 more than our bill with 176 id_offered
+service, next the status of the bill on the + 1 id_billing_period should be ESTFAC0015."
+
+**What each code means**, confirmed live against `GCCOM_BILL_STATUS` and
+`GCCOM_COMPANY_OFFERED_SERVICE` before building anything: `ESTFAC0012` = "En proceso de puesta al
+cobro" (bill still being issued); `ESTFAC0015` = "En espera de otros servicios" (bill waiting on
+another service's bill) - literally the system's own "I'm stuck on a dependency" flag; offered
+service `176` = "Rate", `1` = "Electricity", `19` = "Water".
+
+**The full chain** (`app/core/bill_issuance_validator.build_stuck_bills_query`): start from RJ's own
+query (pending notice + bill still issuing), narrow to accounts whose billing period has **exactly
+one** `GCCOM_BILL` row and that row is the Rate (176) bill, then look up the SAME account's
+Electricity/Water bill for the **next** billing period (`+1`) and keep only the ones still sitting
+at `ESTFAC0015`.
+
+**No duplicates (RJ, 2026-09-15): "i dont want duplicates, if you find ele, stop otherwise if it is
+not found check water."** An account whose next period has BOTH Electricity and Water stuck used to
+surface as two rows; it now surfaces as exactly one, via `ROW_NUMBER() OVER (PARTITION BY account,
+period ORDER BY <Electricity first>)` keeping only rank 1 - Electricity wins whenever it's itself
+one of the stuck rows, Water only shows up when Electricity isn't.
+
+**Verified live:** of ~3,800 accounts matching RJ's own starting query, ~880 have exactly one bill
+in their period and it's a Rate bill, and (after the Electricity-first dedupe) ~593 rows - one per
+account, zero duplicates - match the full chain: 576 Electricity-preferred, 17 fell back to Water.
+Exact counts drift slightly run to run (live production data), the one-row-per-account shape is
+what's guaranteed.
+
+**Page:** a single **Scan for Stuck Bills** button runs the query system-wide (capped at 2,000 rows,
+`BILL_ISSUANCE_DEFAULT_LIMIT`), a KPI row summarizes accounts blocked / Electricity blocked / Water
+blocked (Electricity OK), the table is click-to-sort on every column (same convention as Hierarchy
+Analysis), and **Export CSV** downloads whatever's currently sorted/visible. No filters or drill-down
+yet - the flat result set already carries both the blocking (Rate) bill and the blocked (next-period)
+bill's ids - happy to add either if it turns out to be needed day-to-day.
+
+**API:** `POST /api/bill-issuance/detect` (stateless, same shape as `/api/hierarchy-analysis/detect`
+- no request body, re-runs the query fresh every call). Menu id `billissuance`, same per-role
+visibility control as every other page (Settings > Menu Access).
+
+**Restructured into an in-page sub-nav (2026-09-15):** the page now opens with a tab bar (same
+`.da-subnav` idiom as DIFF DATES Anomaly), with the feature above living under **Case 1 - Prev Month
+Rate Only**, to make room for further account-level "billing didn't complete cleanly" patterns.
+
+### Case 2 - Terminated Account Period Mismatch (new 2026-09-15, redesigned 2026-09-16/17)
+
+RJ's own follow-up request (verbatim): accounts where every `GCCOM_CONTRACTED_SERVICE` row is
+Terminated, but the account still has bills whose `ID_BILLING_PERIOD` doesn't agree with each other.
+RJ's own worked example, account `342702`: 3 such bills - 2 at period 236 (Water, Sanitary), 1 at
+period 237 (Electricity).
+
+**Redesign (2026-09-16/17), RJ's own words:** "mostly this will be the final bill for each service,
+so we need to be sure that all service has bills in invoicing status, having the same billing date as
+the termination date, or the bill is in status invoiced but also have the same termination date as
+the billing date of gccom_bill... I need a filter for this cases where the bill is already invoiced
+and having same termiantion date." Plus: "the idea is i only want to see the accounts, maybe its a
+drill down to show the bills... the filter is for me to know the cases where it is complete only that
+the other service bills are already invoiced." Three business-rule decisions confirmed with RJ:
+termination date = `GCCOM_CONTRACTED_SERVICE.END_DATE` (confirmed live - matches a real terminated
+service's bill `BILLING_DATE` exactly; `DROP_DATE` does not, it trails by ~1 day); target period =
+`MAX(ID_BILLING_PERIOD)` among the account's own matched final bills; and the UI groups by account
+(one row per account) with a drill-down for per-service detail and a Complete/Needs-action filter.
+
+**The query** (`app/core/bill_issuance_validator.build_terminated_period_mismatch_query`): for every
+Terminated service (optionally scoped to the last `days_back` days by `END_DATE` - 60 by default),
+find its own final bill - the `GCCOM_BILL` row for that same service (joined on
+`ID_CONTRACTED_SERVICE`, not `ID_PAYMENT_FORM`+`ID_OFFERED_SERVICE`) dated exactly its termination
+date and either invoicing (`ESTFAC0012`) or invoiced (`ESTFAC0005`). A service with no such bill at
+all is itself flagged `NEEDS_UPDATE` (nothing to align, but worth investigating). Target period is
+`MAX(ID_BILLING_PERIOD)` among an account's matched final bills; `ACCOUNT_HAS_ISSUE` rolls that up
+per account for the Complete filter. Only accounts where every service is Terminated are returned.
+`web/server.py` groups the per-service rows into one object per account for the UI.
+
+**Performance note - a real, significant bug found and fixed this round.** Every shape of this query
+(the original UNION/NOT EXISTS version, and two different rewrites of the 2026-09-17 redesign,
+including one already joining on the correctly-indexed `ID_CONTRACTED_SERVICE`) timed out at the
+app's 120s cap. The cause wasn't the query shape at all: `app/core/sql_format.py`'s
+`format_sql_literal` rendered every string literal as `N'...'` (nvarchar), but every status/code
+column this app filters on (`GCCOM_BILL.BILLING_STATUS`, `GCCOM_CONTRACTED_SERVICE.STATUS`, etc. -
+confirmed live via `sys.columns`) is plain `varchar`. Comparing a `varchar` column to an `N'...'`
+literal makes SQL Server implicitly `CONVERT()` the column to compare them, which silently disables
+index seeks on every index leading with that column - regardless of how well-designed the join
+otherwise is. Fixed by changing `format_sql_literal` to emit plain `'...'` (safe either way - it
+still matches correctly against genuinely `nvarchar` columns, it just doesn't force a conversion on
+the `varchar` ones this app actually has). This is a **project-wide fix**: every query builder that
+goes through `format_sql_literal` benefits, not just this one - it's the most likely real cause behind
+other slow/timing-out queries in this app (see the DIFF DATES Batch performance task). Live-confirmed
+before/after on the exact same query shape: `N'...'` literals - 120s timeout; plain `'...'` literals -
+~6-8s.
+
+**Verified live** (60-day default window, 2026-09-17): a 6-month window returned 94,218 terminated-
+service rows across 27,166 accounts, 16,138 of them needing action, in ~8s. The 60-day default keeps
+a normal scan well under the row cap so results aren't truncated mid-account; RJ can widen the lookback
+via the UI dropdown (14/30/60/180 days or All time) or the API's `days_back` param. Exact counts drift
+run to run since this is live production data.
+
+**Page (Case 2 tab):** **Scan for Mismatches** runs the query (capped at 2,000 rows,
+`TERMINATED_PERIOD_DEFAULT_LIMIT`), a KPI row summarizes accounts/bills involved and how many need an
+update, the table is click-to-sort with orange-highlighted rows for `NEEDS_UPDATE = Yes`, and
+**Export CSV** downloads whatever's currently sorted/visible. A **Generate Update Script** button
+(one `UPDATE GCCOM_BILL SET ID_BILLING_PERIOD = <target>` + audit-column statement per bill needing
+it, same header/footer/clean-script conventions as DIFF DATES Anomaly's correction scripts) re-runs
+the detection query fresh right before generating rather than trusting the last scan - checking
+specific rows in the table scopes the script to just those accounts; leaving nothing checked
+generates for every flagged account. Every generated script is recorded to Analysis History
+(`script_history.KIND_BILL_ISSUANCE`), same as every other script this app produces.
+
+**API:** `POST /api/bill-issuance/case2/detect` (stateless, no request body) and
+`POST /api/bill-issuance/case2/generate` (`id_payment_forms: string[]` to scope, empty = every
+flagged account; `program`, `clean` - Editor/Admin only, same `require_editor` gate as every other
+Generate route).
+
+## Real bug fixed: query timeouts crashed as a bare 500 (2026-09-16)
+
+RJ reported timeouts while scanning Bill Issuance Validator's Case 2 (a heavier query - UNION +
+window functions - over a tunneled connection). Root cause: `app/db/mssql.py`'s `run_query` /
+`get_primary_key_columns` / `get_table_columns` only caught `pytds.Error` around the actual
+EXECUTE/FETCH call. A query that times out mid-flight raises a plain `OSError`/`TimeoutError`
+instead (same class of exception `_connect` already handles at connect time) - not a `pytds.Error`
+- so it slipped past both that `except` clause AND `web/server.py`'s own `except mssql.
+ConnectionError_` handlers, and came back to the browser as a bare, detail-less 500 instead of a
+clear "query timed out" message.
+
+**Fix:** every EXECUTE/FETCH call site now catches `(pytds.Error, OSError)` (the same tuple
+`_connect` already used), via a new `_friendly_query_error()` helper that gives a specific
+"timed out after Ns - raise the connection Timeout in Settings > Connections, or narrow the
+query" message when the underlying error looks timeout-shaped. Also bumped the default
+`ConnectionConfig.timeout_seconds` for brand-new connections from 10 to 30 - existing saved
+connections keep whatever value they already have, so raise it yourself in Settings > Connections
+if a specific heavier query (Case 2, Hierarchy Analysis, Detect All) still needs more room.
+
+New `tests/test_mssql.py` (7 tests, monkeypatched fake connection/cursor - no real DB needed)
+locks in that a `TimeoutError`/plain `OSError` during query execution now wraps as
+`ConnectionError_` with a helpful message, same as a genuine `pytds.Error`.
 
 ## Security note on stored credentials
 

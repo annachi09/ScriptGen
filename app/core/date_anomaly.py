@@ -23,18 +23,22 @@ and passes plain dicts/values back in), builds the reviewable UPDATE
 script text. It never executes anything itself, same as
 script_generator.py.
 
-Known assumption, called out because it couldn't be verified against a
-live schema in this round (the connection tunnel only exists on the
-user's own machine): GCCOM_ITEMS_TO_BILL_XML.ID_XML is assumed to be
-the SAME value as GCCOM_ITEMS_TO_BILL.ID_ITEM_TO_BILL (a 1:1 "XML
-extension" table keyed by the same id) - the functional spec's example
-query filtered ID_XML directly by a value that was already known to be
-an item-to-bill id, with no join shown. If that turns out to be wrong
-when run for real, the "Resolve Bill Links" step in the UI will come
-back with zero XML rows for a real item-to-bill id, which is the
-signal to fix XML_ID_COLUMN_MATCHES_ITEM_ID below (or wire in the
-correct join) rather than silently generating a script against the
-wrong rows.
+CONFIRMED WRONG, fixed 2026-09-13: an earlier round assumed GCCOM_
+ITEMS_TO_BILL_XML.ID_XML was the SAME value as GCCOM_ITEMS_TO_BILL.
+ID_ITEM_TO_BILL (a guessed 1:1 "XML extension" table keyed by the same
+id, since the functional spec's example query filtered ID_XML directly
+by a value already known to be an item-to-bill id, with no join
+shown). RJ confirmed live this is wrong and flagged it as a "major
+issue": GCCOM_ITEMS_TO_BILL has its OWN ID_XML column (confirmed via
+docs/db_schema_reference.md's live-queried FK list: GCCOM_ITEMS_TO_
+BILL.ID_XML -> GCCOM_ITEMS_TO_BILL_XML.ID_XML) that must be looked up
+FIRST, via build_item_xml_id_query(), before GCCOM_ITEMS_TO_BILL_XML
+can be queried or updated - see that function and build_correction_
+script's Part 4 for the fix. Every UPDATE ... WHERE ID_XML = ... this
+module ever generated before this fix was almost certainly targeting
+the WRONG row (or no row at all) whenever an item-to-bill's real
+ID_XML differs from its own ID_ITEM_TO_BILL, which live data suggests
+is the normal case, not an edge case.
 """
 from __future__ import annotations
 
@@ -62,8 +66,13 @@ ITEMS_TO_BILL_TABLE = "GCCOM_ITEMS_TO_BILL"
 ITEMS_TO_BILL_XML_TABLE = "GCCOM_ITEMS_TO_BILL_XML"
 ANOMALOUS_TABLE = "GCCOM_ANOMALOUS"
 
-# See the module docstring's "Known assumption" paragraph.
-XML_ID_COLUMN_MATCHES_ITEM_ID = True
+# See the module docstring's "CONFIRMED WRONG" paragraph - this
+# assumption drove the pre-2026-09-13 XML lookup/UPDATE logic and was
+# real-world wrong. Left here (set to False, unused by any logic now)
+# purely as a historical marker so a future reader searching for why
+# ID_XML handling changed can find this comment; the actual fix is
+# build_item_xml_id_query() + build_correction_script's Part 4.
+XML_ID_COLUMN_MATCHES_ITEM_ID = False
 
 READING_PREV_DATE_COLUMN = "READING_PREV_DATE"
 # NOT "INIT_DATE" - confirmed against the real schema, no T. Easy to get
@@ -77,6 +86,18 @@ XML_TO_BILL_COLUMN = "XML_TO_BILL"
 # tuple (not hardcoded inline) so a future round can extend it without
 # touching patch_xml_dates' logic.
 XML_DATE_NODE_NAMES = ("initDate", "readingFromDate")
+
+# RJ, 2026-09-13: "in the update of the xml for diff date, we need to
+# remove the section of the non cycle that we are removing sample:
+# <reading><idReading>1045434621</idReading></reading> but only for the
+# idReading that we are deleting in reading item to bill" - once Part 6
+# DELETEs a non-cycle (Reconnection/TIPTL00011) reading's
+# GCCOM_READINGS_ITEMSTOBILL link, that reading no longer belongs to the
+# bill, so its own <reading> block in XML_TO_BILL should go too - see
+# remove_reading_nodes below. Node names, not hardcoded inline, same
+# convention as XML_DATE_NODE_NAMES above.
+XML_READING_NODE_NAME = "reading"
+XML_READING_ID_NODE_NAME = "idReading"
 
 # --- GCCOM_ANOMALOUS cancellation (Part 4) --------------------------------
 # Open/active anomaly statuses that a date-anomaly correction should
@@ -227,6 +248,37 @@ SECTOR_SUPPLY_NISS_COLUMN = "NISS"
 CYCLE_READING_TYPES = ("TIPTL00003", "TIPTL00005")
 READING_TYPE_COLUMN = "READING_TYPE"
 
+# --- Reading type lookup (human-readable descriptions) --------------------
+# RJ, 2026-09-13: "if not all cycle, i need to know if it contains removal
+# or not" - confirmed live against OUC_COMMON_ADMIN.GCGT_RE_READING_TYPE,
+# the FULL table (16 rows, none unused):
+#   TIPTL00001 Installation       TIPTL00002 Removal
+#   TIPTL00003 Cycle              TIPTL00004 Control
+#   TIPTL00005 Direct Connection  TIPTL00006 Out Of Cycle
+#   TIPTL00007 Usage Adjustment   TIPTL00009 Off Season Adjustment
+#   TIPTL00010 Disconnection      TIPTL00011 Reconnection
+#   TIPTL00012 Prepayment         TIPTL00014 Prepayment Control
+#   TIPTL00015 Net Adjustment     TIPTL00016 Credit Adjustment
+#   TIPTL00017 Distribution       TIPTL00018 Sale of Water
+# So ALL_CYCLE = 0 ("not all cycle") is a catch-all across the other 14
+# codes above - Removal (TIPTL00002) and Reconnection (TIPTL00011) both
+# included, same as every other non-cycle type - never scoped to just one
+# of them. Notable side-finding: READING_TYPE_ORPHAN_USAGE (TIPTL00011,
+# Part 6's own cleanup rule further below) is actually this lookup's
+# "Reconnection" type - the ORPHAN_USAGE name is this module's own
+# functional label for what Part 6 does with it (see that constant's own
+# comment), not its real-world business meaning; worth knowing if Part 6
+# ever needs explaining to an analyst by its real name.
+#
+# Joined into build_detect_query (READING_TYPE_DESC/IS_CYCLE_READING, one
+# row per reading - the Single NISS page) and build_detect_all_anomalies_
+# query (NON_CYCLE_READING_TYPES, one row per item-to-bill - the Detect
+# All page) so an analyst sees the actual word ("Removal", "Reconnection",
+# etc.) instead of a bare TIPTL code or an unexplained yes/no.
+READING_TYPE_LOOKUP_TABLE = "GCGT_RE_READING_TYPE"
+READING_TYPE_LOOKUP_KEY_COLUMN = "COD_DEVELOP"
+READING_TYPE_LOOKUP_DESC_COLUMN = "DESCRIPTION"
+
 # --- "Detect all" multi-billing-period flag (BILLING_PERIOD_COUNT column) --
 # Analyst request, own words: "make the rows orange in case more than 1
 # billing period of re_reading is detected for the NISS" - read as: among
@@ -351,12 +403,26 @@ def build_detect_query(niss: str, threshold: int, sector_supply_table: str = SEC
     spec's original SSMS query) purely to avoid a duplicate
     ID_BILLING_PERIOD column name in the result set - same columns
     either way, ID_BILLING_PERIOD is already in r.*.
+
+    Also LEFT JOINs GCGT_RE_READING_TYPE (RJ, 2026-09-13: "if not all
+    cycle, i need to know if it contains removal or not") for a
+    READING_TYPE_DESC column - the confirmed-live human-readable name
+    ("Removal", "Reconnection", "Installation", "Cycle", etc. - see
+    READING_TYPE_LOOKUP_TABLE's own comment for the full 16-code table)
+    for each anomalous reading's raw READING_TYPE code, plus an
+    IS_CYCLE_READING bit (1/0) using the same CYCLE_READING_TYPES check
+    the Detect All ALL_CYCLE flag uses - so each individual reading's
+    exact type is visible per row here, not just a rolled-up yes/no.
     """
     reading_tbl = _qualified(READING_SCHEMA, READING_TABLE)
+    reading_type_lookup = _qualified(READING_SCHEMA, READING_TYPE_LOOKUP_TABLE)
+    cycle_type_list = ", ".join(format_sql_literal(t) for t in CYCLE_READING_TYPES)
     return (
-        f"SELECT r.*\n"
+        f"SELECT r.*, rt.{READING_TYPE_LOOKUP_DESC_COLUMN} AS READING_TYPE_DESC,\n"
+        f"  CASE WHEN r.{READING_TYPE_COLUMN} IN ({cycle_type_list}) THEN 1 ELSE 0 END AS IS_CYCLE_READING\n"
         f"FROM {reading_tbl} r\n"
         f"JOIN {sector_supply_table} ss ON ss.ID_SECTOR_SUPPLY = r.ID_SECTOR_SUPPLY\n"
+        f"LEFT JOIN {reading_type_lookup} rt ON rt.{READING_TYPE_LOOKUP_KEY_COLUMN} = r.{READING_TYPE_COLUMN}\n"
         f"WHERE ss.NISS = {format_sql_literal(niss)}\n"
         f"  AND r.ID_BILLING_PERIOD > {format_sql_literal(threshold)}\n"
         f"  AND r.READING_TYPE <> {format_sql_literal(READING_TYPE_EXCLUDED)}\n"
@@ -373,6 +439,40 @@ def build_correct_date_query(niss: str, threshold: int, sector_supply_table: str
     back alongside READING_DATE purely so the UI can show which reading
     the "correct" date actually came from, for review before generating
     anything.
+
+    RJ, 2026-09-14, real bug found live (NISS 20022221-101): the original
+    `ORDER BY r.ID_BILLING_PERIOD DESC` alone has no tiebreaker, so when
+    MORE THAN ONE reading shares the same (max) ID_BILLING_PERIOD and is
+    also READ_STATUS 7000STSRED - which happens, e.g. a Removal-type
+    reading and a Cycle-type reading both correctly-billed in the same
+    period - SQL Server's `TOP 1` picks whichever row it feels like
+    (no guaranteed order for ties), not necessarily the actually-most-
+    recent one. Confirmed live: period 10000000232 had reading 1040586186
+    (Removal, dated 2026-03-09) and 1040922934 (Cycle, dated 2026-03-26)
+    both at 7000STSRED - the old query could return either one, and
+    returned the wrong (earlier) one; the analyst confirmed 2026-03-26
+    (the later READING_DATE) was correct. First fixed (2026-09-14) by
+    adding READING_DATE DESC as a SECONDARY sort key after ID_BILLING_
+    PERIOD DESC.
+
+    RJ, 2026-09-15, second real bug found live, this time in the sort
+    PRIORITY itself (NISS 10328684-101): ID_BILLING_PERIOD is not always
+    monotonic with READING_DATE for a given NISS - a removal/reinstall can
+    leave a LOWER billing period holding a LATER reading date than a
+    HIGHER billing period. Confirmed live: period 10000000235 had reading
+    1045746369 (Removal, dated 2026-07-30, 7000STSRED) while period
+    10000000236 (a higher id) had reading 1045264932 (Cycle, dated
+    2026-07-22, 7000STSRED) - sorting by ID_BILLING_PERIOD DESC first
+    picked period 236's 07-22 reading, silently skipping the actually
+    more recent 07-30 removal reading in the lower-numbered period; RJ
+    confirmed 2026-07-30 was the correct date ("we did not consider
+    billed removal reading as correct previous billed reading"). Fixed by
+    making READING_DATE DESC the PRIMARY sort key instead - "most recent
+    correctly-billed reading" (the spec's own wording) means most recent
+    by actual reading date, not by billing-period id. ID_BILLING_PERIOD
+    DESC and ID_READING DESC remain as secondary/tertiary tiebreakers for
+    the (now confirmed real, 2026-09-14) case of two readings sharing the
+    exact same date.
     """
     reading_tbl = _qualified(READING_SCHEMA, READING_TABLE)
     return (
@@ -383,7 +483,7 @@ def build_correct_date_query(niss: str, threshold: int, sector_supply_table: str
         f"  AND r.ID_BILLING_PERIOD > {format_sql_literal(threshold)}\n"
         f"  AND r.READING_TYPE <> {format_sql_literal(READING_TYPE_EXCLUDED)}\n"
         f"  AND r.READ_STATUS = {format_sql_literal(READ_STATUS_BILLED)}\n"
-        f"ORDER BY r.ID_BILLING_PERIOD DESC;"
+        f"ORDER BY r.READING_DATE DESC, r.ID_BILLING_PERIOD DESC, r.ID_READING DESC;"
     )
 
 
@@ -403,11 +503,42 @@ def build_item_to_bill_query(id_readings: Iterable[Any]) -> Optional[str]:
     )
 
 
-def build_xml_lookup_query(id_item_to_bills: Iterable[Any]) -> Optional[str]:
-    """Pulls XML_TO_BILL for the item-to-bill ids found above. See the
-    module docstring for the ID_XML == ID_ITEM_TO_BILL assumption this
-    relies on."""
+def build_item_xml_id_query(id_item_to_bills: Iterable[Any]) -> Optional[str]:
+    """
+    RJ, 2026-09-13 ("you are updating using id_item_to_bill, you need to
+    get first the id_xml from gccom_item_to_bill and update with that
+    id"): the REQUIRED first step before build_xml_lookup_query can run
+    - GCCOM_ITEMS_TO_BILL.ID_XML is the real FK into GCCOM_ITEMS_TO_
+    BILL_XML.ID_XML (confirmed via docs/db_schema_reference.md's live
+    schema dump), and it is NOT the same value as ID_ITEM_TO_BILL - the
+    module docstring's "CONFIRMED WRONG" paragraph has the history.
+
+    Caller should build a dict[ID_ITEM_TO_BILL] -> ID_XML from the
+    result (skipping rows where ID_XML is NULL - not every item-to-bill
+    necessarily has an XML row), then pass the DISTINCT non-null ID_XML
+    values to build_xml_lookup_query to actually fetch XML_TO_BILL.
+    Returns None if id_item_to_bills is empty.
+    """
     ids = list(id_item_to_bills)
+    if not ids:
+        return None
+    tbl = _qualified(ADMIN_SCHEMA, ITEMS_TO_BILL_TABLE)
+    id_list = ", ".join(format_sql_literal(i) for i in ids)
+    return (
+        f"SELECT GITB.ID_ITEM_TO_BILL, GITB.ID_XML\n"
+        f"FROM {tbl} GITB\n"
+        f"WHERE GITB.ID_ITEM_TO_BILL IN ({id_list});"
+    )
+
+
+def build_xml_lookup_query(id_xmls: Iterable[Any]) -> Optional[str]:
+    """
+    Pulls XML_TO_BILL for the real GCCOM_ITEMS_TO_BILL_XML.ID_XML
+    values found via build_item_xml_id_query - id_xmls here must
+    already be actual ID_XML values, NOT item-to-bill ids (that used to
+    be the assumption; see the module docstring for why it was wrong).
+    """
+    ids = list(id_xmls)
     if not ids:
         return None
     tbl = _qualified(ADMIN_SCHEMA, ITEMS_TO_BILL_XML_TABLE)
@@ -553,6 +684,15 @@ def build_detect_all_anomalies_query(
     its own, so the reading link goes through GCCOM_READINGS_ITEMSTOBILL,
     same as build_item_to_bill_query elsewhere in this module).
 
+    Alongside ALL_CYCLE, a NON_CYCLE_READING_TYPES column (RJ, 2026-09-13:
+    "if not all cycle, i need to know if it contains removal or not")
+    spells out WHICH non-cycle type(s), by their actual confirmed-live
+    name(s) - "Removal", "Reconnection", etc., comma-separated if more
+    than one - rather than leaving ALL_CYCLE = 0 as an unexplained
+    catch-all. See READING_TYPE_LOOKUP_TABLE's own comment for the full
+    code table. NULL/empty when ALL_CYCLE = 1 (nothing non-cycle to
+    list).
+
     And a BILLING_PERIOD_COUNT integer column via a correlated scalar
     subquery: COUNT(DISTINCT ID_BILLING_PERIOD) across the same linked
     readings - more than 1 means this anomaly's readings span more than
@@ -579,6 +719,7 @@ def build_detect_all_anomalies_query(
     item_tbl = _qualified(ADMIN_SCHEMA, ITEMS_TO_BILL_TABLE)
     reading_tbl = _qualified(READING_SCHEMA, READING_TABLE)
     ri_tbl = _qualified(ADMIN_SCHEMA, READINGS_ITEMSTOBILL_TABLE)
+    reading_type_lookup = _qualified(READING_SCHEMA, READING_TYPE_LOOKUP_TABLE)
     type_list = ", ".join(format_sql_literal(t) for t in type_ids)
     status_list = ", ".join(format_sql_literal(s) for s in open_statuses)
     cycle_type_list = ", ".join(format_sql_literal(t) for t in CYCLE_READING_TYPES)
@@ -604,6 +745,26 @@ def build_detect_all_anomalies_query(
         f"    JOIN {reading_tbl} GR2 ON GR2.ID_READING = GRI2.ID_READING\n"
         f"    WHERE GRI2.ID_ITEM_TO_BILL = GA.ID_ITEM_TO_BILL) AS BILLING_PERIOD_COUNT"
     )
+    # STUFF + FOR XML PATH, not STRING_AGG - the broadly-compatible SQL
+    # Server string-concatenation idiom (works on versions predating
+    # STRING_AGG's 2017 introduction). TYPE + .value(...) avoids XML-
+    # entity-escaping a description that happens to contain &, <, or >
+    # (plain FOR XML PATH('') without TYPE would render "Sale & Water" as
+    # "Sale &amp; Water"). DISTINCT + a correlated subquery here for the
+    # same row-multiplication reason ALL_CYCLE/BILLING_PERIOD_COUNT above
+    # both use one - never a JOIN against the multi-row reading link.
+    non_cycle_types_expr = (
+        f"(SELECT STUFF((\n"
+        f"    SELECT DISTINCT ', ' + COALESCE(RT3.{READING_TYPE_LOOKUP_DESC_COLUMN}, GR3.{READING_TYPE_COLUMN})\n"
+        f"    FROM {ri_tbl} GRI3\n"
+        f"    JOIN {reading_tbl} GR3 ON GR3.ID_READING = GRI3.ID_READING\n"
+        f"    LEFT JOIN {reading_type_lookup} RT3 ON RT3.{READING_TYPE_LOOKUP_KEY_COLUMN} = GR3.{READING_TYPE_COLUMN}\n"
+        f"    WHERE GRI3.ID_ITEM_TO_BILL = GA.ID_ITEM_TO_BILL\n"
+        f"      AND GR3.{READING_TYPE_COLUMN} NOT IN ({cycle_type_list})\n"
+        f"    FOR XML PATH(''), TYPE\n"
+        f"  ).value('.', 'NVARCHAR(MAX)'), 1, 2, '')\n"
+        f") AS NON_CYCLE_READING_TYPES"
+    )
     return (
         f"SELECT {top_clause}GA.ID_ITEM_TO_BILL, GA.{ANOMALOUS_STATUS_COLUMN}, "
         f"GAS.{ANOMALOUS_STATUS_DESC_COLUMN} AS ANOMALOUS_STATUS_DESC, "
@@ -615,7 +776,8 @@ def build_detect_all_anomalies_query(
         f"CS.{CONTRACTED_SERVICE_STATUS_COLUMN} AS CONTRACT_STATUS, "
         f"GA.{ANOMALOUS_DETECTION_DATE_COLUMN} AS DETECTION_DATE, "
         f"{all_cycle_expr},\n"
-        f"{billing_period_count_expr}\n"
+        f"{billing_period_count_expr},\n"
+        f"{non_cycle_types_expr}\n"
         f"FROM {anomalous_tbl} GA\n"
         f"LEFT JOIN {item_tbl} GITB ON GITB.ID_ITEM_TO_BILL = GA.ID_ITEM_TO_BILL\n"
         f"LEFT JOIN {ANOMALOUS_STATUS_LOOKUP_TABLE} GAS "
@@ -703,6 +865,72 @@ def patch_xml_dates(
             changed.append(_local_name(elem.tag))
     patched = ET.tostring(root, encoding="unicode")
     return patched, changed
+
+
+def remove_reading_nodes(
+    xml_text: str,
+    id_readings: Iterable[Any],
+    node_name: str = XML_READING_NODE_NAME,
+    id_node_name: str = XML_READING_ID_NODE_NAME,
+) -> tuple[str, list[Any]]:
+    """
+    Parses xml_text and removes every element (anywhere in the tree,
+    namespace-agnostic by local name - same convention as
+    patch_xml_dates) whose local name is node_name ("reading") AND has a
+    direct child of local name id_node_name ("idReading") whose text
+    matches one of id_readings - RJ, 2026-09-13: "we need to remove the
+    section of the non cycle that we are removing ... but only for the
+    idReading that we are deleting in reading item to bill". Used for
+    Part 6's orphan-usage (Reconnection/TIPTL00011) readings: once that
+    reading's GCCOM_READINGS_ITEMSTOBILL link is DELETEd, it no longer
+    belongs to this bill, so its <reading> block in XML_TO_BILL
+    shouldn't either - every OTHER <reading> node (including ones for
+    readings that stay linked) is left untouched.
+
+    Matches by STRING comparison of idReading's text against str(id) for
+    each id in id_readings - XML text is always a string, but the ids
+    passed in may be int/Decimal/str depending on what the DB driver
+    handed back, so a strict type comparison would silently match
+    nothing.
+
+    Standard-library ElementTree has no .getparent(), unlike lxml - a
+    parent map (`{child: parent for parent in root.iter() for child in
+    parent}`) is built up front so a matched <reading> element can
+    actually be detached from its enclosing element. Iterates over
+    list(root.iter()) (a snapshot), not root.iter() itself, since
+    mutating the tree (removing an element) while still walking it via
+    the live iterator is undefined behavior in ElementTree.
+
+    Returns (patched_xml_text, removed_ids) - removed_ids lists which of
+    id_readings were actually found (as their ORIGINAL values from
+    id_readings, not the stringified XML text), so the caller can warn
+    when an expected removal didn't happen (e.g. this particular XML
+    document simply has no <reading> block for that id).
+
+    Raises ET.ParseError on malformed XML, same as patch_xml_dates - the
+    caller should catch it the same way.
+    """
+    root = ET.fromstring(xml_text)
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    target_strs = {str(i) for i in id_readings}
+    removed: list[Any] = []
+    for elem in list(root.iter()):
+        if _local_name(elem.tag) != node_name:
+            continue
+        id_elem = next((c for c in elem if _local_name(c.tag) == id_node_name), None)
+        if id_elem is None:
+            continue
+        text = (id_elem.text or "").strip()
+        if text not in target_strs:
+            continue
+        parent = parent_map.get(elem)
+        if parent is None:
+            continue
+        parent.remove(elem)
+        matched_id = next((i for i in id_readings if str(i) == text), text)
+        removed.append(matched_id)
+    patched = ET.tostring(root, encoding="unicode")
+    return patched, removed
 
 
 # ---------------------------------------------------------------------
@@ -891,6 +1119,7 @@ def build_correction_script(
     anomaly_id_readings: Iterable[Any],
     item_to_bill_map: dict[Any, list[Any]],
     xml_rows: dict[Any, str],
+    item_to_xml_map: Optional[dict[Any, Any]] = None,
     anomalous_item_ids: Iterable[Any] = (),
     item_status_ids: Iterable[Any] = (),
     orphan_usage_id_readings: Iterable[Any] = (),
@@ -936,11 +1165,19 @@ def build_correction_script(
          seen_items, same defensive-scope reasoning as Part 5 below. An
          item-to-bill not still at STTOBILL00 simply gets no Part 3
          statement - that's the normal case, not a warning.
-      4. GCCOM_ITEMS_TO_BILL_XML.XML_TO_BILL, one UPDATE per xml_rows
-         entry, with initDate/readingFromDate patched via
+      4. GCCOM_ITEMS_TO_BILL_XML.XML_TO_BILL, one UPDATE per seen_items
+         entry that resolves to a real ID_XML via item_to_xml_map (see
+         that param's own doc below and build_item_xml_id_query - RJ,
+         2026-09-13: "you are updating using id_item_to_bill, you need
+         to get first the id_xml from gccom_item_to_bill and update
+         with that id"), with initDate/readingFromDate patched via
          patch_xml_dates and the WHOLE resulting document written back
          (see that function's docstring for why, over a targeted
-         .modify()).
+         .modify()). ALSO strips, from that same document, any
+         <reading><idReading>X</idReading></reading> block for X in
+         Part 6's orphan_usage_id_readings (RJ, 2026-09-13) via
+         remove_reading_nodes - see that function's own docstring, and
+         Part 6 below.
       5. GCCOM_ANOMALOUS.STATUS, one UPDATE per item-to-bill id in
          anomalous_item_ids (already filtered by the caller's
          build_anomalous_query to only OPEN anomalies - STATUS
@@ -963,12 +1200,31 @@ def build_correction_script(
          orphan id, not one statement per id like Parts 1-5, since these
          two statements don't need a distinct WHERE per row (no per-row
          date/value to embed). Empty (the common case) produces neither
-         statement.
+         statement. Each orphan reading's own <reading> block is ALSO
+         stripped from whichever Part 4 XML document(s) reference it (RJ,
+         2026-09-13: "we need to remove the section of the non cycle that
+         we are removing ... but only for the idReading that we are
+         deleting in reading item to bill") - see Part 4's own note above
+         and remove_reading_nodes' docstring; this keeps XML_TO_BILL from
+         still listing a reading whose GCCOM_READINGS_ITEMSTOBILL link no
+         longer exists.
 
-    anomaly_id_readings / item_to_bill_map / xml_rows / anomalous_item_ids /
-    item_status_ids / orphan_usage_id_readings are plain data the caller
-    already fetched from the DB (app/ui/main_window.py or web/server.py,
-    via app/db/mssql.run_query) - this function does no DB access itself.
+    anomaly_id_readings / item_to_bill_map / xml_rows / item_to_xml_map /
+    anomalous_item_ids / item_status_ids / orphan_usage_id_readings are
+    plain data the caller already fetched from the DB (app/ui/
+    main_window.py or web/server.py, via app/db/mssql.run_query) - this
+    function does no DB access itself.
+
+    item_to_xml_map is dict[ID_ITEM_TO_BILL] -> real ID_XML, built by
+    the caller from build_item_xml_id_query's result (only items whose
+    GCCOM_ITEMS_TO_BILL.ID_XML was non-NULL should be present - see that
+    function's docstring). xml_rows must then be keyed by those SAME
+    real ID_XML values (from running build_xml_lookup_query against
+    them), not by item id. An item-to-bill id with no entry in
+    item_to_xml_map (NULL ID_XML on its own row) or whose id_xml isn't
+    in xml_rows (looked up but no matching GCCOM_ITEMS_TO_BILL_XML row)
+    gets no Part 4 statement and a warning instead - same "warn, don't
+    guess" stance as every other unmapped-id case in this function.
 
     billing_period_count is purely informational, passed straight through
     to CorrectionScript/the header comment/the case explanation - the
@@ -1006,6 +1262,16 @@ def build_correction_script(
     id_readings = list(anomaly_id_readings)
     warnings: list[str] = []
     date_lit = format_sql_literal(correct_date)
+    item_to_xml_map = item_to_xml_map or {}
+
+    # Computed up front (not down in Part 6 where it conceptually lives)
+    # because Part 4's XML step below needs it too - see that section's
+    # own comment for why. Deduped, order-preserving, same as every
+    # other id list in this function.
+    orphan_ids: list[Any] = []
+    for id_reading in orphan_usage_id_readings:
+        if id_reading not in orphan_ids:
+            orphan_ids.append(id_reading)
 
     reading_tbl = _qualified(READING_SCHEMA, READING_TABLE)
     item_tbl = _qualified(ADMIN_SCHEMA, ITEMS_TO_BILL_TABLE)
@@ -1077,31 +1343,104 @@ def build_correction_script(
             )
 
     # --- Part 4: XML -----------------------------------------------------
+    # Keyed by the REAL ID_XML (via item_to_xml_map, looked up from
+    # GCCOM_ITEMS_TO_BILL.ID_XML by the caller) - NOT by item id, which
+    # was the confirmed-wrong assumption before 2026-09-13 (see module
+    # docstring). Also strips any <reading><idReading>X</idReading>
+    # </reading> block for X in orphan_ids from the SAME XML document,
+    # in the SAME UPDATE - RJ, 2026-09-13: "we need to remove the
+    # section of the non cycle that we are removing ... but only for
+    # the idReading that we are deleting in reading item to bill". Once
+    # Part 6 DELETEs that reading's GCCOM_READINGS_ITEMSTOBILL link
+    # below, the reading no longer belongs to this bill, so its XML
+    # block shouldn't either - only for readings actually being removed
+    # there, every other <reading> node is left untouched.
+    # orphan_ids_by_xml maps each affected REAL id_xml to the orphan
+    # reading id(s) whose <reading> block needs stripping from THAT
+    # document - built by translating item_to_bill_map's pre-deletion
+    # reading->item linkage through item_to_xml_map (item->real id_xml),
+    # since by the time this script runs the DELETE hasn't happened yet.
+    orphan_ids_by_xml: dict[Any, list[Any]] = {}
+    for id_reading in orphan_ids:
+        for item_id in item_to_bill_map.get(id_reading) or []:
+            id_xml_for_item = item_to_xml_map.get(item_id)
+            if id_xml_for_item is not None:
+                orphan_ids_by_xml.setdefault(id_xml_for_item, []).append(id_reading)
+
     xml_stmts: list[str] = []
-    missing_xml = [item_id for item_id in seen_items if item_id not in xml_rows]
-    if missing_xml:
-        warnings.append(
-            f"{len(missing_xml)} item-to-bill id(s) had no matching GCCOM_ITEMS_TO_BILL_XML row "
-            f"(see the module docstring's ID_XML assumption if this is unexpected): {missing_xml}"
-        )
-    for id_xml, xml_text in xml_rows.items():
+    missing_xml: list[Any] = []
+    processed_xml_ids: set[Any] = set()
+    for item_id in seen_items:
+        id_xml = item_to_xml_map.get(item_id)
+        if id_xml is None:
+            # No ID_XML at all on this item-to-bill row (NULL column) -
+            # nothing to look up, let alone update.
+            missing_xml.append(item_id)
+            continue
+        if id_xml in processed_xml_ids:
+            # Two item-to-bill ids sharing the same ID_XML - shouldn't
+            # normally happen (1:1 per the schema reference) but this
+            # avoids emitting a duplicate UPDATE for the same row if it
+            # ever does.
+            continue
+        xml_text = xml_rows.get(id_xml)
+        if xml_text is None:
+            # Had a real ID_XML value, but no matching row came back
+            # from GCCOM_ITEMS_TO_BILL_XML for it (orphaned FK, or the
+            # caller didn't fetch it) - distinct from the NULL-ID_XML
+            # case above, but the same "can't proceed" outcome.
+            missing_xml.append(item_id)
+            continue
+        processed_xml_ids.add(id_xml)
+
         try:
             patched, changed_nodes = patch_xml_dates(xml_text, correct_date)
         except ET.ParseError as exc:
-            warnings.append(f"XML for ID_XML={id_xml} did not parse ({exc}) - skipped, needs manual review.")
+            warnings.append(f"XML for ID_XML={id_xml} (item {item_id}) did not parse ({exc}) - skipped, needs manual review.")
             continue
-        if not changed_nodes:
+
+        removed_reading_ids: list[Any] = []
+        reading_ids_to_strip = orphan_ids_by_xml.get(id_xml)
+        if reading_ids_to_strip:
+            try:
+                patched, removed_reading_ids = remove_reading_nodes(patched, reading_ids_to_strip)
+            except ET.ParseError as exc:
+                warnings.append(
+                    f"Could not strip <reading> node(s) {reading_ids_to_strip} from XML for ID_XML={id_xml} "
+                    f"({exc}) - XML left with dates patched only, needs manual review."
+                )
+                reading_ids_to_strip = []
+            missing_removals = [r for r in reading_ids_to_strip if r not in removed_reading_ids]
+            if missing_removals:
+                warnings.append(
+                    f"No <reading> node found for id_reading {missing_removals} in XML for ID_XML={id_xml} - "
+                    f"nothing removed for those, needs manual review."
+                )
+
+        if not changed_nodes and not removed_reading_ids:
             warnings.append(
                 f"No {'/'.join(XML_DATE_NODE_NAMES)} node found in XML for ID_XML={id_xml} - "
                 f"nothing changed, needs manual review."
             )
             continue
-        comment = f"-- XML {id_xml}: updated node(s): {', '.join(changed_nodes)}"
+
+        comment_bits = []
+        if changed_nodes:
+            comment_bits.append(f"updated node(s): {', '.join(changed_nodes)}")
+        if removed_reading_ids:
+            comment_bits.append(f"removed <reading> node(s) for id_reading {removed_reading_ids}")
+        comment = f"-- XML {id_xml} (item {item_id}): " + "; ".join(comment_bits)
         xml_stmts.append(
             f"{comment}\n"
             f"UPDATE {xml_tbl}\n"
             f"SET {quote_ident(XML_TO_BILL_COLUMN)} = {format_sql_literal(patched)}\n"
             f"WHERE ID_XML = {format_sql_literal(id_xml)};"
+        )
+
+    if missing_xml:
+        warnings.append(
+            f"{len(missing_xml)} item-to-bill id(s) had no resolvable GCCOM_ITEMS_TO_BILL_XML row "
+            f"(either GCCOM_ITEMS_TO_BILL.ID_XML was NULL, or that ID_XML had no matching row): {missing_xml}"
         )
 
     # --- Part 5: cancel open GCCOM_ANOMALOUS records ---------------------
@@ -1125,13 +1464,9 @@ def build_correction_script(
             )
 
     # --- Part 6: non-cycle "orphan usage" reading cleanup (TIPTL00011) ---
-    # See READING_TYPE_ORPHAN_USAGE's comment block for the rule. Deduped,
-    # order-preserving, same as every other id list in this function.
-    orphan_ids: list[Any] = []
-    for id_reading in orphan_usage_id_readings:
-        if id_reading not in orphan_ids:
-            orphan_ids.append(id_reading)
-
+    # See READING_TYPE_ORPHAN_USAGE's comment block for the rule.
+    # orphan_ids itself was computed up front, before Part 4 - see that
+    # computation's own comment for why.
     orphan_stmts: list[str] = []
     if orphan_ids:
         ri_tbl = _qualified(ADMIN_SCHEMA, READINGS_ITEMSTOBILL_TABLE)

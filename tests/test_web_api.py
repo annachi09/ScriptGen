@@ -17,6 +17,7 @@ name elsewhere - see the client() fixture below) - and importing
 web.server itself only AFTER those patches are in place, since it reads
 the session secret at module import time.
 """
+import contextlib
 import sys
 from pathlib import Path
 
@@ -246,7 +247,7 @@ def test_generate_update_script_includes_where_guard(client, monkeypatch):
     body = resp.json()
     assert body["statement_count"] == 1
     assert "WHERE id = 1 AND amount = 10;" in body["sql_text"]
-    assert "update_program = N'JIRA-1'" in body["sql_text"]
+    assert "update_program = 'JIRA-1'" in body["sql_text"]
 
 
 def test_generate_rollback_script(client, monkeypatch):
@@ -771,8 +772,8 @@ def test_ai_review_endpoint(client, monkeypatch):
 # inspecting which query text came in.
 
 def _da_fake_run_query(
-    monkeypatch, *, anomaly_rows=None, correct_row=None, item_rows=None, xml_rows=None, anomalous_rows=None,
-    item_status_rows=None, account_rows=None,
+    monkeypatch, *, anomaly_rows=None, correct_row=None, item_rows=None, item_xml_id_rows=None, xml_rows=None,
+    anomalous_rows=None, item_status_rows=None, account_rows=None,
 ):
     """Wires server_mod.mssql.run_query to answer each of the Date
     Anomaly workflow's distinct queries based on substrings only that
@@ -799,7 +800,16 @@ def _da_fake_run_query(
     route's own comment - so every Date Anomaly test using this fixture
     needs a branch for it or the fake dispatcher's fallback
     AssertionError fires on every single Detect call); pass [] to test
-    the "no resolving contracted-service row" / account-is-None case."""
+    the "no resolving contracted-service row" / account-is-None case.
+
+    item_xml_id_rows answers build_item_xml_id_query (RJ, 2026-09-13:
+    "you are updating using id_item_to_bill, you need to get first the
+    id_xml from gccom_item_to_bill and update with that id") - the
+    REQUIRED first lookup before xml_rows is even queried. Defaults to
+    item 500 -> id_xml 500 (same value) so existing tests written before
+    this fix don't need touching; pass a row where the two differ (or
+    override xml_rows to be keyed by the real id_xml) to exercise the
+    real fix end to end."""
     import datetime as _datetime
 
     import web.server as server_mod
@@ -809,13 +819,20 @@ def _da_fake_run_query(
     # (SELECT r.* - always includes it) - defaults to a plain cycle-type
     # code so existing tests never accidentally trigger Part 6's orphan
     # cleanup; pass a row ending in date_anomaly.READING_TYPE_ORPHAN_USAGE
-    # to test that path.
+    # to test that path. 6th/7th columns (READING_TYPE_DESC,
+    # IS_CYCLE_READING) mirror the LEFT JOIN + CASE build_detect_query
+    # added 2026-09-13 (RJ: "if not all cycle, i need to know if it
+    # contains removal or not") - default row uses TIPTL00001
+    # ("Installation" per the live GCGT_RE_READING_TYPE lookup), which is
+    # non-cycle (IS_CYCLE_READING 0), same as every other type here except
+    # TIPTL00003/TIPTL00005.
     anomaly_rows = (
         anomaly_rows if anomaly_rows is not None
-        else [[101, 10000000231, "2024-01-01", "6000STSRED", "TIPTL00001"]]
+        else [[101, 10000000231, "2024-01-01", "6000STSRED", "TIPTL00001", "Installation", 0]]
     )
     correct_row = correct_row if correct_row is not None else [[999, 10000000240, _datetime.date(2024, 3, 1)]]
     item_rows = item_rows if item_rows is not None else [[101, 500]]
+    item_xml_id_rows = item_xml_id_rows if item_xml_id_rows is not None else [[500, 500]]
     xml_rows = xml_rows if xml_rows is not None else [
         [500, "<Root><initDate>2024-01-01</initDate><readingFromDate>2024-01-01</readingFromDate></Root>"]
     ]
@@ -828,12 +845,15 @@ def _da_fake_run_query(
             return QueryResult(
                 columns=["ACCOUNT", "OFFERED_SERVICE", "CONTRACT_STATUS"], rows=account_rows, elapsed_ms=1.0,
             )
-        if "READ_STATUS = N'6000STSRED'" in sql:
+        if "READ_STATUS = '6000STSRED'" in sql:
             return QueryResult(
-                columns=["ID_READING", "ID_BILLING_PERIOD", "READING_DATE", "READ_STATUS", "READING_TYPE"],
+                columns=[
+                    "ID_READING", "ID_BILLING_PERIOD", "READING_DATE", "READ_STATUS", "READING_TYPE",
+                    "READING_TYPE_DESC", "IS_CYCLE_READING",
+                ],
                 rows=anomaly_rows, elapsed_ms=1.0,
             )
-        if "READ_STATUS = N'7000STSRED'" in sql:
+        if "READ_STATUS = '7000STSRED'" in sql:
             return QueryResult(
                 columns=["ID_READING", "ID_BILLING_PERIOD", "READING_DATE"],
                 rows=correct_row, elapsed_ms=1.0,
@@ -842,6 +862,12 @@ def _da_fake_run_query(
             return QueryResult(columns=["ID_READING", "ID_ITEM_TO_BILL"], rows=item_rows, elapsed_ms=1.0)
         if "GCCOM_ITEMS_TO_BILL_XML" in sql:
             return QueryResult(columns=["ID_XML", "XML_TO_BILL"], rows=xml_rows, elapsed_ms=1.0)
+        # GITB.ID_XML is unique to build_item_xml_id_query (the REQUIRED
+        # first lookup, against GCCOM_ITEMS_TO_BILL itself - GITB alias,
+        # no _XML suffix - NOT GCCOM_ITEMS_TO_BILL_XML/GITBX, matched
+        # above). RJ, 2026-09-13 fix - see this fixture's own docstring.
+        if "GITB.ID_XML" in sql:
+            return QueryResult(columns=["ID_ITEM_TO_BILL", "ID_XML"], rows=item_xml_id_rows, elapsed_ms=1.0)
         if "GCCOM_ANOMALOUS" in sql:
             return QueryResult(columns=["ID_ITEM_TO_BILL", "ANOMALOUS_STATUS"], rows=anomalous_rows, elapsed_ms=1.0)
         # STTOBILL00 is unique to build_item_status_query's WHERE clause -
@@ -852,6 +878,23 @@ def _da_fake_run_query(
 
     monkeypatch.setattr(server_mod.mssql, "run_query", fake_run_query)
     monkeypatch.setattr(server_mod.mssql, "get_table_columns", lambda conn, schema, table: {"ID_READING": "int"})
+
+
+def test_date_anomaly_detect_includes_reading_type_description(client, monkeypatch):
+    # RJ, 2026-09-13: "if not all cycle, i need to know if it contains
+    # removal or not" - Detect's rows now carry the actual reading type
+    # name (not just the bare TIPTL code) plus an is_cycle_reading flag.
+    _login(client)
+    _da_fake_run_query(
+        monkeypatch,
+        anomaly_rows=[[101, 10000000231, "2024-01-01", "6000STSRED", "TIPTL00002", "Removal", 0]],
+    )
+    resp = client.post("/api/date-anomaly/detect", json={"niss": "10450618-301", "threshold": 10000000230})
+    assert resp.status_code == 200
+    row = resp.json()["rows"][0]
+    assert row["reading_type"] == "TIPTL00002"
+    assert row["reading_type_desc"] == "Removal"
+    assert row["is_cycle_reading"] is False
 
 
 def test_date_anomaly_detect_requires_niss(client):
@@ -1573,6 +1616,50 @@ def test_date_anomaly_detect_all_all_cycle_none_when_column_missing(client, monk
     assert all(r["all_cycle"] is None for r in rows)
 
 
+def test_date_anomaly_detect_all_returns_non_cycle_reading_types(client, monkeypatch):
+    # RJ, 2026-09-13: "if not all cycle, i need to know if it contains
+    # removal or not" - NON_CYCLE_READING_TYPES comes back from SQL as a
+    # comma-separated string (STUFF + FOR XML PATH), possibly NULL when
+    # ALL_CYCLE is true. The route surfaces it as "" (not None) either
+    # way - a blank cell, not a null placeholder, since "" already reads
+    # naturally as "nothing non-cycle to show" in this table column.
+    import web.server as server_mod
+    from app.db.mssql import QueryResult
+
+    _login(client)
+
+    def fake_run_query(conn, sql):
+        return QueryResult(
+            columns=["ID_ITEM_TO_BILL", "ANOMALOUS_STATUS", "ITEM_STATUS", "ALL_CYCLE", "NON_CYCLE_READING_TYPES"],
+            rows=[
+                [500, "ESTAN00009", "STTOBILL00", 0, "Removal, Reconnection"],
+                [501, "ESTAN00001", "STTOBILL01", 1, None],
+            ],
+            elapsed_ms=1.0,
+        )
+
+    monkeypatch.setattr(server_mod.mssql, "run_query", fake_run_query)
+    monkeypatch.setattr(
+        server_mod.mssql, "get_table_columns", lambda conn, schema, table: {"ID_PRINCIPAL_ANOMALY": "int"},
+    )
+    resp = client.post("/api/date-anomaly/detect-all")
+    assert resp.status_code == 200
+    rows = resp.json()["rows"]
+    assert rows[0]["non_cycle_reading_types"] == "Removal, Reconnection"
+    assert rows[1]["non_cycle_reading_types"] == ""
+
+
+def test_date_anomaly_detect_all_non_cycle_reading_types_blank_when_column_missing(client, monkeypatch):
+    # Same "predates this feature" fixture as the all_cycle-missing test
+    # above - must degrade to "" rather than raising.
+    _login(client)
+    _da_fake_detect_all_run_query(monkeypatch)
+    resp = client.post("/api/date-anomaly/detect-all")
+    assert resp.status_code == 200
+    rows = resp.json()["rows"]
+    assert all(r["non_cycle_reading_types"] == "" for r in rows)
+
+
 def test_date_anomaly_detect_all_returns_billing_period_count(client, monkeypatch):
     # BILLING_PERIOD_COUNT comes back from SQL as a real int (COUNT(...)),
     # never NULL for a matched row - the route surfaces it as-is (not
@@ -1643,6 +1730,7 @@ def test_date_anomaly_detect_all_export_xlsx_returns_workbook(client):
                     "item_status": "STTOBILL00",
                     "needs_status_advance": True,
                     "all_cycle": True,
+                    "non_cycle_reading_types": "",
                     "billing_period_count": 2,
                 },
             ]
@@ -1657,16 +1745,19 @@ def test_date_anomaly_detect_all_export_xlsx_returns_workbook(client):
     wb = openpyxl.load_workbook(BytesIO(resp.content))
     ws = wb.active
     header = [c.value for c in ws[1]]
+    # "Needs Status Advance" -> "Status Still Pending (STTOBILL00)" and a
+    # new "Non-Cycle Type(s)" column, both RJ 2026-09-13 (see this round's
+    # README section on clearer Detect All labels).
     assert header == [
         "ID Item To Bill", "Account", "Supply (NISS)", "Offered Service", "Contract Status",
-        "Anomaly Type", "Anomaly Status", "Item Status", "Needs Status Advance", "All Cycle",
-        "Billing Periods",
+        "Anomaly Type", "Anomaly Status", "Item Status", "Status Still Pending (STTOBILL00)", "All Cycle",
+        "Non-Cycle Type(s)", "Billing Periods",
     ]
     row = [c.value for c in ws[2]]
     assert row == [
         "500", "ACC-1", "10450618-301", "19", "ESTSC00002",
         "DIFFDATES — BILLING DATES AND READING DATES ARE DIFFERENT", "Pendiente (tras batch)",
-        "STTOBILL00", "Yes", "Yes", 2,
+        "STTOBILL00", "Yes", "Yes", "", 2,
     ]
 
 
@@ -1683,12 +1774,14 @@ def test_date_anomaly_detect_all_export_xlsx_handles_unknown_all_cycle_and_billi
     assert resp.status_code == 200
     wb = openpyxl.load_workbook(BytesIO(resp.content))
     row = [c.value for c in wb.active[2]]
-    # needs_status_advance/all_cycle/billing_period_count all blank/None when
-    # not supplied - mirrors the CSV export's own "" for unknown values.
+    # needs_status_advance/all_cycle/non_cycle_reading_types/
+    # billing_period_count all blank/None when not supplied - mirrors the
+    # CSV export's own "" for unknown values.
     assert row[0] == "500"
-    assert not row[8]  # Needs Status Advance - written as "", falsy either way it round-trips
+    assert not row[8]  # Status Still Pending (STTOBILL00) - written as "", falsy either way it round-trips
     assert not row[9]  # All Cycle
-    assert not row[10]  # Billing Periods
+    assert not row[10]  # Non-Cycle Type(s)
+    assert not row[11]  # Billing Periods
 
 
 def test_date_anomaly_detect_all_explain_requires_ai_configuration(client):
@@ -1728,9 +1821,23 @@ def test_date_anomaly_detect_all_explain_returns_ai_text(client, monkeypatch):
     assert "Yes" in captured["row_context"]  # needs_status_advance rendered as Yes/No
 
 
+@contextlib.contextmanager
+def _noop_reuse_connection(conn_cfg):
+    """Stand-in for mssql.reuse_connection (added 2026-09-13 so
+    web/batch_jobs.py's per-NISS queries share one connection instead of
+    opening a fresh one every call - see that function's own docstring).
+    Every batch test here fakes mssql.run_query/get_table_columns
+    directly and never wants a REAL connection attempted - the real
+    reuse_connection calls the real pytds.connect(), which would try to
+    dial the fake test ConnectionConfig's "localhost" for real and fail
+    the whole job before a single NISS ran. This makes the `with
+    mssql.reuse_connection(conn_cfg):` in _run_batch a no-op instead."""
+    yield None
+
+
 def _da_batch_fake_run_query(monkeypatch):
     """Fake mssql.run_query for the batch route: distinguishes NISS by
-    the N'<niss>' literal in the detect/correct-date queries (item/xml
+    the '<niss>' literal in the detect/correct-date queries (item/xml
     lookups are keyed by ID_READING/ID_ITEM_TO_BILL instead, so a single
     shared fake table covers all NISS as long as their reading/item ids
     don't collide).
@@ -1749,36 +1856,42 @@ def _da_batch_fake_run_query(monkeypatch):
     from app.db.mssql import QueryResult
 
     def fake_run_query(conn, sql):
-        if "READ_STATUS = N'6000STSRED'" in sql:
+        if "READ_STATUS = '6000STSRED'" in sql:
             # 5th column, READING_TYPE, mirrors real build_detect_query
             # output (SELECT r.* - always includes it); only N4 below sets
             # it to the non-cycle TIPTL00011 type, to exercise Part 6.
             cols = ["ID_READING", "ID_BILLING_PERIOD", "READING_DATE", "READ_STATUS", "READING_TYPE"]
-            if "N'N1'" in sql:
+            if "'N1'" in sql:
                 return QueryResult(
                     columns=cols, rows=[[201, 10000000231, "2024-01-01", "6000STSRED", "TIPTL00001"]], elapsed_ms=1.0,
                 )
-            if "N'N2'" in sql:
+            if "'N2'" in sql:
                 return QueryResult(columns=cols, rows=[], elapsed_ms=1.0)
-            if "N'N3'" in sql:
+            if "'N3'" in sql:
                 return QueryResult(
                     columns=cols, rows=[[901, 10000000231, "2024-01-01", "6000STSRED", "TIPTL00001"]], elapsed_ms=1.0,
                 )
-            if "N'N4'" in sql:
+            if "'N4'" in sql:
                 return QueryResult(
                     columns=cols, rows=[[401, 10000000231, "2024-01-01", "6000STSRED", "TIPTL00011"]], elapsed_ms=1.0,
                 )
             raise AssertionError(f"Unexpected NISS in detect query: {sql}")
-        if "READ_STATUS = N'7000STSRED'" in sql:
+        if "READ_STATUS = '7000STSRED'" in sql:
             cols = ["ID_READING", "ID_BILLING_PERIOD", "READING_DATE"]
-            if "N'N1'" in sql:
+            if "'N1'" in sql:
                 return QueryResult(columns=cols, rows=[[999, 10000000240, _datetime.date(2024, 3, 1)]], elapsed_ms=1.0)
-            if "N'N4'" in sql:
+            if "'N4'" in sql:
                 return QueryResult(columns=cols, rows=[[998, 10000000240, _datetime.date(2024, 3, 1)]], elapsed_ms=1.0)
             # N3 (and anything else) - no correctly-billed reading found.
             return QueryResult(columns=cols, rows=[], elapsed_ms=1.0)
         if "GCCOM_READINGS_ITEMSTOBILL" in sql:
             return QueryResult(columns=["ID_READING", "ID_ITEM_TO_BILL"], rows=[[201, 301], [201, 302]], elapsed_ms=1.0)
+        # GITB.ID_XML is unique to build_item_xml_id_query (RJ, 2026-09-13
+        # fix - see _da_fake_run_query's own docstring for the full
+        # explanation). Items map to themselves here (301->301, 302->302)
+        # purely so this fixture's existing XML rows below stay valid.
+        if "GITB.ID_XML" in sql:
+            return QueryResult(columns=["ID_ITEM_TO_BILL", "ID_XML"], rows=[[301, 301], [302, 302]], elapsed_ms=1.0)
         if "GCCOM_ITEMS_TO_BILL_XML" in sql:
             return QueryResult(
                 columns=["ID_XML", "XML_TO_BILL"],
@@ -1801,6 +1914,7 @@ def _da_batch_fake_run_query(monkeypatch):
 
     monkeypatch.setattr(server_mod.mssql, "run_query", fake_run_query)
     monkeypatch.setattr(server_mod.mssql, "get_table_columns", lambda conn, schema, table: {"ID_READING": "int"})
+    monkeypatch.setattr(server_mod.mssql, "reuse_connection", _noop_reuse_connection)
 
 
 def _da_wait_for_batch_job(client, job_id, timeout=5.0):
@@ -2051,7 +2165,7 @@ def test_date_anomaly_batch_billing_period_count_multiple_periods(client, monkey
     _login(client)
 
     def fake_run_query(conn, sql):
-        if "READ_STATUS = N'6000STSRED'" in sql:
+        if "READ_STATUS = '6000STSRED'" in sql:
             cols = ["ID_READING", "ID_BILLING_PERIOD", "READING_DATE", "READ_STATUS", "READING_TYPE"]
             return QueryResult(
                 columns=cols,
@@ -2061,13 +2175,15 @@ def test_date_anomaly_batch_billing_period_count_multiple_periods(client, monkey
                 ],
                 elapsed_ms=1.0,
             )
-        if "READ_STATUS = N'7000STSRED'" in sql:
+        if "READ_STATUS = '7000STSRED'" in sql:
             cols = ["ID_READING", "ID_BILLING_PERIOD", "READING_DATE"]
             return QueryResult(columns=cols, rows=[[999, 10000000240, _datetime.date(2024, 3, 1)]], elapsed_ms=1.0)
         if "GCCOM_READINGS_ITEMSTOBILL" in sql:
             return QueryResult(
                 columns=["ID_READING", "ID_ITEM_TO_BILL"], rows=[[601, 701], [602, 701]], elapsed_ms=1.0,
             )
+        if "GITB.ID_XML" in sql:
+            return QueryResult(columns=["ID_ITEM_TO_BILL", "ID_XML"], rows=[[701, 701]], elapsed_ms=1.0)
         if "GCCOM_ITEMS_TO_BILL_XML" in sql:
             return QueryResult(
                 columns=["ID_XML", "XML_TO_BILL"],
@@ -2082,6 +2198,7 @@ def test_date_anomaly_batch_billing_period_count_multiple_periods(client, monkey
 
     monkeypatch.setattr(server_mod.mssql, "run_query", fake_run_query)
     monkeypatch.setattr(server_mod.mssql, "get_table_columns", lambda conn, schema, table: {"ID_READING": "int"})
+    monkeypatch.setattr(server_mod.mssql, "reuse_connection", _noop_reuse_connection)
 
     start_resp = client.post(
         "/api/date-anomaly/batch/start", json={"niss_list": ["N5"], "threshold": 10000000230, "program": "JIRA-1"},
@@ -2105,7 +2222,7 @@ def test_date_anomaly_batch_lowest_billing_period_only(client, monkeypatch):
     _login(client)
 
     def fake_run_query(conn, sql):
-        if "READ_STATUS = N'6000STSRED'" in sql:
+        if "READ_STATUS = '6000STSRED'" in sql:
             cols = ["ID_READING", "ID_BILLING_PERIOD", "READING_DATE", "READ_STATUS", "READING_TYPE"]
             return QueryResult(
                 columns=cols,
@@ -2115,13 +2232,15 @@ def test_date_anomaly_batch_lowest_billing_period_only(client, monkeypatch):
                 ],
                 elapsed_ms=1.0,
             )
-        if "READ_STATUS = N'7000STSRED'" in sql:
+        if "READ_STATUS = '7000STSRED'" in sql:
             cols = ["ID_READING", "ID_BILLING_PERIOD", "READING_DATE"]
             return QueryResult(columns=cols, rows=[[999, 10000000240, _datetime.date(2024, 3, 1)]], elapsed_ms=1.0)
         if "GCCOM_READINGS_ITEMSTOBILL" in sql:
             return QueryResult(
                 columns=["ID_READING", "ID_ITEM_TO_BILL"], rows=[[601, 701], [602, 701]], elapsed_ms=1.0,
             )
+        if "GITB.ID_XML" in sql:
+            return QueryResult(columns=["ID_ITEM_TO_BILL", "ID_XML"], rows=[[701, 701]], elapsed_ms=1.0)
         if "GCCOM_ITEMS_TO_BILL_XML" in sql:
             return QueryResult(
                 columns=["ID_XML", "XML_TO_BILL"],
@@ -2136,6 +2255,7 @@ def test_date_anomaly_batch_lowest_billing_period_only(client, monkeypatch):
 
     monkeypatch.setattr(server_mod.mssql, "run_query", fake_run_query)
     monkeypatch.setattr(server_mod.mssql, "get_table_columns", lambda conn, schema, table: {"ID_READING": "int"})
+    monkeypatch.setattr(server_mod.mssql, "reuse_connection", _noop_reuse_connection)
 
     start_resp = client.post(
         "/api/date-anomaly/batch/start",
@@ -2364,7 +2484,7 @@ def test_hierarchy_analysis_detect_secondaries_not_sent_count_sql_shape(client, 
     # Not-yet-sent status branch - the narrower set (excludes 6000STSRED
     # Sent to Bill, unlike PENDING_READ_STATUSES).
     for status in hierarchy_analysis.SECONDARY_NOT_SENT_STATUSES:
-        assert f"N'{status}'" in sql
+        assert f"'{status}'" in sql
     # No-reading-at-all fallback branch.
     assert "NOT EXISTS" in sql
     assert f"r3.ID_BILLING_PERIOD > {hierarchy_analysis.MIN_BILLING_PERIOD}" in sql
@@ -2581,10 +2701,11 @@ def test_hierarchy_analysis_reading_history_applies_floor_and_exclusion(client, 
     assert resp.status_code == 200
     sql = captured_sql["sql"]
     assert f"r.ID_BILLING_PERIOD > {hierarchy_analysis.READING_HISTORY_MIN_BILLING_PERIOD}" in sql
-    # format_sql_literal renders plain strings with an N'...' (nvarchar)
-    # prefix - see app/core/sql_format.py - so the exclusion clause reads
-    # <> N'TIPTL00004', not <> 'TIPTL00004'.
-    assert f"r.READING_TYPE <> N'{hierarchy_analysis.READING_HISTORY_EXCLUDED_READING_TYPE}'" in sql
+    # format_sql_literal renders plain strings as plain '...' (no N prefix -
+    # see app/core/sql_format.py's 2026-09-17 comment on why: an N'...'
+    # literal against these varchar status/code columns silently defeats
+    # index seeks), so the exclusion clause reads <> 'TIPTL00004'.
+    assert f"r.READING_TYPE <> '{hierarchy_analysis.READING_HISTORY_EXCLUDED_READING_TYPE}'" in sql
     assert "ORDER BY r.ID_BILLING_PERIOD DESC" in sql
 
 
@@ -2650,6 +2771,327 @@ def test_hierarchy_analysis_export_xlsx_returns_workbook(client):
     # Bolded in the data rows too (not just the header) - the analyst's
     # own most-important field on this page should stand out here.
     assert wb.active.cell(row=2, column=17).font.bold is True
+
+
+# ---------------- Bill Issuance Validator ----------------
+
+_BILLISS_COLS = [
+    "ID_PAYMENT_FORM", "REFERENCE", "NOTICE_UPDATE_DATE", "ID_BILL_RATE", "PERIOD_RATE",
+    "ID_BILL_NEXT", "OFFERED_SERVICE_NEXT", "OFFERED_SERVICE_NEXT_DESC", "PERIOD_NEXT",
+    "STATUS_NEXT", "STATUS_NEXT_DESC",
+]
+_BILLISS_ROW = [
+    110301288, "1103012884", "2026-08-24 11:28:48", 1073519772, 10000000236,
+    1073720257, 1, "Electricity", 10000000237, "ESTFAC0015", "En espera de otros servicios",
+]
+
+
+def test_bill_issuance_detect_requires_login(client):
+    resp = client.post("/api/bill-issuance/detect")
+    assert resp.status_code == 401
+
+
+def test_bill_issuance_detect_returns_rows(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BILLISS_COLS, rows=[_BILLISS_ROW], elapsed_ms=1.0),
+    )
+    resp = client.post("/api/bill-issuance/detect")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["rows"]) == 1
+    row = body["rows"][0]
+    assert row["id_payment_form"] == "110301288"
+    assert row["reference"] == "1103012884"
+    assert row["id_bill_rate"] == "1073519772"
+    assert row["period_rate"] == "10000000236"
+    assert row["id_bill_next"] == "1073720257"
+    assert row["offered_service_next"] == "1"
+    assert row["offered_service_next_desc"] == "Electricity"
+    assert row["period_next"] == "10000000237"
+    assert row["status_next"] == "ESTFAC0015"
+    assert row["status_next_desc"] == "En espera de otros servicios"
+    assert body["possibly_truncated"] is False
+
+
+def test_bill_issuance_detect_requires_connection(client, monkeypatch):
+    import web.server as server_mod
+    from app.config import AppConfig, AIConfig
+
+    _login(client)
+    empty_config = AppConfig(connections={}, active_connection="default", ai=AIConfig())
+    monkeypatch.setattr(server_mod, "load_config", lambda: empty_config)
+    resp = client.post("/api/bill-issuance/detect")
+    assert resp.status_code == 400
+
+
+def test_bill_issuance_detect_flags_possible_truncation(client, monkeypatch):
+    import web.server as server_mod
+    from app.core import bill_issuance_validator
+
+    _login(client)
+    rows = [_BILLISS_ROW for _ in range(bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT)]
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BILLISS_COLS, rows=rows, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/bill-issuance/detect")
+    assert resp.json()["possibly_truncated"] is True
+
+
+# ---------------- Bill Issuance Validator: Case 2 (terminated account, ----
+# billing-period mismatch) ----------------
+# RJ, 2026-09-15, redesigned 2026-09-16/17 - see app/core/bill_issuance_
+# validator.py's Case 2 comment block for the full business-rule
+# narrative, RJ's own 342702 example, and the account-grouped/drill-down
+# redesign. Fixture below mirrors that example: account 342702 has four
+# terminated services - Water and Sanitary stuck at period 236 needing to
+# move to target 237, Electricity already correct at 237, and Rate with
+# NO matching final bill at all (the NEEDS_UPDATE-but-id_bill-is-None
+# case); account 555555 is a separate mismatched account, kept apart to
+# test the id_payment_forms scoping on /generate. Columns match build_
+# terminated_period_mismatch_query's 2026-09-17 shape: END_DATE not
+# BILLING_DATE, ACCOUNT_HAS_ISSUE added, no *_DESC lookup columns
+# (server.py maps offered-service names itself via _OFFERED_SERVICE_NAMES).
+_BISS2_COLS = [
+    "ID_PAYMENT_FORM", "REFERENCE", "ID_OFFERED_SERVICE", "END_DATE", "ID_BILL",
+    "ID_BILLING_PERIOD", "BILLING_STATUS", "TARGET_PERIOD", "NEEDS_UPDATE", "ACCOUNT_HAS_ISSUE",
+]
+_BISS2_ROW_WATER = [
+    342702, "3427021", 19, "2026-07-01", 1001,
+    10000000236, "ESTFAC0012", 10000000237, 1, 1,
+]
+_BISS2_ROW_SANITARY = [
+    342702, "3427021", 190, "2026-07-01", 1002,
+    10000000236, "ESTFAC0012", 10000000237, 1, 1,
+]
+_BISS2_ROW_ELECTRICITY_OK = [
+    342702, "3427021", 1, "2026-07-01", 1003,
+    10000000237, "ESTFAC0012", 10000000237, 0, 1,
+]
+_BISS2_ROW_RATE_NO_BILL = [
+    342702, "3427021", 176, "2026-07-01", None,
+    None, None, 10000000237, 1, 1,
+]
+_BISS2_ROW_OTHER_ACCOUNT = [
+    555555, "5555551", 19, "2026-06-01", 2001,
+    10000000100, "ESTFAC0012", 10000000105, 1, 1,
+]
+_BISS2_ALL_ROWS = [
+    _BISS2_ROW_WATER, _BISS2_ROW_SANITARY, _BISS2_ROW_ELECTRICITY_OK,
+    _BISS2_ROW_RATE_NO_BILL, _BISS2_ROW_OTHER_ACCOUNT,
+]
+
+
+def test_bill_issuance_case2_detect_requires_login(client):
+    resp = client.post("/api/bill-issuance/case2/detect")
+    assert resp.status_code == 401
+
+
+def test_bill_issuance_case2_detect_returns_account_grouped_rows(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BISS2_COLS, rows=_BISS2_ALL_ROWS, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/bill-issuance/case2/detect")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["account_count"] == 2
+    acct = next(a for a in body["accounts"] if a["id_payment_form"] == "342702")
+    assert acct["reference"] == "3427021"
+    assert acct["target_period"] == "10000000237"
+    assert acct["service_count"] == 4
+    assert acct["needs_update_count"] == 3  # Water, Sanitary, Rate (no bill) - Electricity is OK
+    assert acct["complete"] is False
+    water = next(s for s in acct["services"] if s["id_bill"] == "1001")
+    assert water["needs_update"] is True
+    assert water["id_billing_period"] == "10000000236"
+    rate = next(s for s in acct["services"] if s["id_offered_service"] == "176")
+    assert rate["id_bill"] == ""  # no matching final bill at all
+    assert rate["needs_update"] is True
+    assert body["accounts_needing_action"] == 2
+    assert body["possibly_truncated"] is False
+
+
+def test_bill_issuance_case2_detect_complete_account_flagged(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    # An account whose only service is already fully aligned - ACCOUNT_
+    # HAS_ISSUE = 0 - should come back complete=True.
+    complete_row = [
+        900001, "9000011", 1, "2026-05-01", 8001,
+        10000000230, "ESTFAC0005", 10000000230, 0, 0,
+    ]
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BISS2_COLS, rows=[complete_row], elapsed_ms=1.0),
+    )
+    resp = client.post("/api/bill-issuance/case2/detect")
+    body = resp.json()
+    assert body["accounts"][0]["complete"] is True
+    assert body["accounts_needing_action"] == 0
+
+
+def test_bill_issuance_case2_detect_days_back_query_param_overrides_default(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    captured = {}
+
+    def fake_run_query(conn, sql):
+        captured["sql"] = sql
+        return QueryResult(columns=_BISS2_COLS, rows=[], elapsed_ms=1.0)
+
+    monkeypatch.setattr(server_mod.mssql, "run_query", fake_run_query)
+    resp = client.post("/api/bill-issuance/case2/detect?days_back=14")
+    assert resp.status_code == 200
+    assert resp.json()["days_back"] == 14
+    assert "DATEADD(DAY, -14, CAST(GETDATE() AS DATE))" in captured["sql"]
+
+
+def test_bill_issuance_case2_detect_days_back_zero_means_all_time(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    captured = {}
+
+    def fake_run_query(conn, sql):
+        captured["sql"] = sql
+        return QueryResult(columns=_BISS2_COLS, rows=[], elapsed_ms=1.0)
+
+    monkeypatch.setattr(server_mod.mssql, "run_query", fake_run_query)
+    resp = client.post("/api/bill-issuance/case2/detect?days_back=0")
+    assert resp.status_code == 200
+    assert resp.json()["days_back"] is None
+    assert "DATEADD(DAY" not in captured["sql"]
+
+
+def test_bill_issuance_case2_detect_requires_connection(client, monkeypatch):
+    import web.server as server_mod
+    from app.config import AppConfig, AIConfig
+
+    _login(client)
+    empty_config = AppConfig(connections={}, active_connection="default", ai=AIConfig())
+    monkeypatch.setattr(server_mod, "load_config", lambda: empty_config)
+    resp = client.post("/api/bill-issuance/case2/detect")
+    assert resp.status_code == 400
+
+
+def test_bill_issuance_case2_detect_flags_possible_truncation(client, monkeypatch):
+    import web.server as server_mod
+    from app.core import bill_issuance_validator
+
+    _login(client)
+    rows = [_BISS2_ROW_WATER for _ in range(bill_issuance_validator.TERMINATED_PERIOD_DEFAULT_LIMIT)]
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BISS2_COLS, rows=rows, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/bill-issuance/case2/detect")
+    assert resp.json()["possibly_truncated"] is True
+
+
+def test_bill_issuance_case2_generate_produces_update_script_for_all_flagged(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BISS2_COLS, rows=_BISS2_ALL_ROWS, elapsed_ms=1.0),
+    )
+    resp = client.post(
+        "/api/bill-issuance/case2/generate",
+        json={"id_payment_forms": [], "program": "JIRA-9999"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # 3 flagged rows have a real bill to move (1001, 1002, 2001); the Rate
+    # row (no id_bill) is skipped with a warning, not emitted as an
+    # UPDATE - 1003 is already at its target period so it's excluded too.
+    assert body["update_count"] == 3
+    assert "WHERE ID_BILL = 1001" in body["sql_text"]
+    assert "WHERE ID_BILL = 1002" in body["sql_text"]
+    assert "WHERE ID_BILL = 2001" in body["sql_text"]
+    assert "SET ID_BILLING_PERIOD = 10000000237" in body["sql_text"]
+    assert "JIRA-9999" in body["sql_text"]
+    assert any("no bill matching" in w for w in body["warnings"])
+
+    history = client.get("/api/history").json()["entries"]
+    assert any("Bill Issuance Case 2" in e["table_name"] for e in history)
+
+
+def test_bill_issuance_case2_generate_scopes_to_selected_accounts(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BISS2_COLS, rows=_BISS2_ALL_ROWS, elapsed_ms=1.0),
+    )
+    resp = client.post(
+        "/api/bill-issuance/case2/generate",
+        json={"id_payment_forms": ["342702"], "program": "JIRA-1"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["update_count"] == 2
+    assert "WHERE ID_BILL = 1001" in body["sql_text"]
+    assert "WHERE ID_BILL = 1002" in body["sql_text"]
+    assert "WHERE ID_BILL = 2001" not in body["sql_text"]
+
+
+def test_bill_issuance_case2_generate_no_rows_needing_update_errors(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BISS2_COLS, rows=[_BISS2_ROW_ELECTRICITY_OK], elapsed_ms=1.0),
+    )
+    resp = client.post(
+        "/api/bill-issuance/case2/generate",
+        json={"id_payment_forms": [], "program": "JIRA-1"},
+    )
+    assert resp.status_code == 400
+
+
+def test_bill_issuance_case2_generate_clean_strips_comments(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BISS2_COLS, rows=_BISS2_ALL_ROWS, elapsed_ms=1.0),
+    )
+    resp = client.post(
+        "/api/bill-issuance/case2/generate",
+        json={"id_payment_forms": [], "program": "JIRA-1", "clean": True},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert not any(line.strip().startswith("--") for line in body["sql_text"].split("\n"))
+
+
+def test_bill_issuance_case2_generate_requires_editor_role(client, monkeypatch):
+    import web.server as server_mod
+
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BISS2_COLS, rows=_BISS2_ALL_ROWS, elapsed_ms=1.0),
+    )
+    _create_and_login_as(client, "viewer3", "viewer")
+    resp = client.post(
+        "/api/bill-issuance/case2/generate",
+        json={"id_payment_forms": [], "program": "JIRA-1"},
+    )
+    assert resp.status_code == 403
 
 
 # ---------------- Dashboard ----------------

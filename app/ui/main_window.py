@@ -2180,6 +2180,7 @@ class MainWindow:
         self._da_correct_date_reading = None
         self._da_item_to_bill_map: dict = {}
         self._da_xml_rows: dict = {}
+        self._da_item_to_xml_map: dict = {}
         self._da_anomalous_item_ids: list = []
         self._da_item_status_ids: list = []
         self._da_history_id = None
@@ -2214,6 +2215,7 @@ class MainWindow:
         self._da_correct_date_reading = None
         self._da_item_to_bill_map = {}
         self._da_xml_rows = {}
+        self._da_item_to_xml_map = {}
         self._da_anomalous_item_ids = []
         self._da_item_status_ids = []
         self._da_history_id = None
@@ -2353,8 +2355,24 @@ class MainWindow:
                             item_map[reading_id].append(item_id)
 
                 item_ids = sorted({v for ids in item_map.values() for v in ids}, key=str)
+                # RJ, 2026-09-13: "you are updating using id_item_to_bill,
+                # you need to get first the id_xml from gccom_item_to_bill
+                # and update with that id" - GCCOM_ITEMS_TO_BILL.ID_XML is
+                # the real FK, not the same value as ID_ITEM_TO_BILL (see
+                # date_anomaly module docstring). Look it up first.
+                item_to_xml_map: dict = {}
+                item_xml_id_sql = date_anomaly.build_item_xml_id_query(item_ids)
+                if item_xml_id_sql:
+                    item_xml_id_result = mssql.run_query(conn, item_xml_id_sql)
+                    for r in item_xml_id_result.rows:
+                        row = dict(zip(item_xml_id_result.columns, r))
+                        id_xml_val = _da_col(row, "ID_XML")
+                        if id_xml_val is not None:
+                            item_to_xml_map[_da_col(row, "ID_ITEM_TO_BILL")] = id_xml_val
+
                 xml_rows: dict = {}
-                xml_sql = date_anomaly.build_xml_lookup_query(item_ids)
+                real_id_xmls = sorted({v for v in item_to_xml_map.values()}, key=str)
+                xml_sql = date_anomaly.build_xml_lookup_query(real_id_xmls)
                 if xml_sql:
                     xml_result = mssql.run_query(conn, xml_sql)
                     for r in xml_result.rows:
@@ -2399,7 +2417,8 @@ class MainWindow:
             self.root.after(
                 0,
                 lambda: self._da_on_resolve_success(
-                    item_map, xml_rows, anomalous_item_ids, item_status_ids, reading_has_audit, item_has_audit
+                    item_map, xml_rows, item_to_xml_map, anomalous_item_ids, item_status_ids,
+                    reading_has_audit, item_has_audit
                 ),
             )
 
@@ -2411,11 +2430,13 @@ class MainWindow:
         messagebox.showerror("Resolve failed", message)
 
     def _da_on_resolve_success(
-        self, item_map, xml_rows, anomalous_item_ids, item_status_ids, reading_has_audit, item_has_audit
+        self, item_map, xml_rows, item_to_xml_map, anomalous_item_ids, item_status_ids,
+        reading_has_audit, item_has_audit
     ):
         self.da_resolve_btn.configure(state="normal")
         self._da_item_to_bill_map = item_map
         self._da_xml_rows = xml_rows
+        self._da_item_to_xml_map = item_to_xml_map
         self._da_anomalous_item_ids = anomalous_item_ids
         self._da_item_status_ids = item_status_ids
         self._da_reading_has_audit = reading_has_audit
@@ -2483,6 +2504,7 @@ class MainWindow:
             anomaly_id_readings=id_readings,
             item_to_bill_map=self._da_item_to_bill_map,
             xml_rows=self._da_xml_rows,
+            item_to_xml_map=self._da_item_to_xml_map,
             anomalous_item_ids=self._da_anomalous_item_ids,
             item_status_ids=self._da_item_status_ids,
             orphan_usage_id_readings=orphan_usage_ids,

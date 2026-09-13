@@ -84,6 +84,9 @@
         <button class="nav-item" data-page="hierarchy" title="Hierarchy Analysis">
           <span class="nav-icon">🗂️</span><span class="nav-label">Hierarchy Analysis</span>
         </button>
+        <button class="nav-item" data-page="billissuance" title="Bill Issuance Validator">
+          <span class="nav-icon">🧾</span><span class="nav-label">Bill Issuance Validator</span>
+        </button>
         <button class="nav-item" data-page="bulkchecker" title="Bulk Checker">
           <span class="nav-icon">📋</span><span class="nav-label">Bulk Checker</span>
         </button>
@@ -411,7 +414,7 @@
           <div class="hint-text" id="da-summary"></div>
           <div class="grid-wrap">
             <table class="data-grid" id="da-anomaly-table">
-              <thead><tr><th>ID_READING</th><th>Billing Period</th><th>Reading Date</th><th>Read Status</th></tr></thead>
+              <thead><tr><th>ID_READING</th><th>Billing Period</th><th>Reading Date</th><th>Read Status</th><th title="The actual reading type name, straight from GCGT_RE_READING_TYPE - e.g. Removal, Reconnection, Cycle, Direct Connection. A non-cycle type (anything but Cycle/Direct Connection) is highlighted.">Reading Type</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -493,6 +496,10 @@
             <button type="button" class="btn btn-secondary" id="da-batch-cancel-btn" hidden>✋ Cancel</button>
           </div>
           <div class="hint-text" id="da-batch-summary"></div>
+          <div class="da-batch-progress-track" id="da-batch-progress-track" hidden>
+            <div class="da-batch-progress-fill" id="da-batch-progress-fill"></div>
+          </div>
+          <div class="kpi-row kpi-row-compact" id="da-batch-progress-kpi-row" hidden></div>
           <div class="grid-wrap">
             <table class="data-grid" id="da-batch-table">
               <thead><tr><th>NISS</th><th>Status</th><th>Readings</th><th>Items</th><th>Status advanced</th><th>XML</th><th>Anomalies cancelled</th><th title="Non-cycle (TIPTL00011) readings reset to 1000STSRED">Non-cycle reset</th><th title="Distinct GCGT_RE_READING.ID_BILLING_PERIOD values among this NISS's anomalous readings. More than 1 highlights the row orange.">Billing periods</th><th>Warnings</th></tr></thead>
@@ -523,7 +530,7 @@
           <p class="hint-text">Every NISS run through Detect, on this page or in a batch - including ones that never made it to Generate. Click a row to see its full case explanation.</p>
           <div class="grid-wrap">
             <table class="data-grid" id="da-history-table">
-              <thead><tr><th>When (UTC)</th><th>NISS</th><th>User</th><th>Source</th><th>Anomalies</th><th>Items</th><th>Status adv.</th><th>XML</th><th>Anomalies cancelled</th><th>Generated?</th></tr></thead>
+              <thead><tr><th>When (UTC)</th><th>NISS</th><th>User</th><th>Source</th><th>Anomalies</th><th>Items</th><th title="Item-to-bill rows whose GCCOM_ITEMS_TO_BILL.STATUS was advanced from STTOBILL00 (pending) to STTOBILL01 by this run's script.">Status adv.</th><th>XML</th><th>Anomalies cancelled</th><th>Generated?</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -554,17 +561,21 @@
             <select id="da-cleanup-filter-service" class="text-input text-input-sm"><option value="">All</option></select>
             <label class="field-label">Anomaly type</label>
             <select id="da-cleanup-filter-type" class="text-input text-input-sm"><option value="">All</option></select>
-            <label class="field-label">Needs status advance</label>
+            <label class="field-label" title="Whether this item's GCCOM_ITEMS_TO_BILL.STATUS is still STTOBILL00 (&quot;pending&quot;) and hasn't yet been advanced to STTOBILL01. Generate Cleanup Script performs that advance for whatever you check below.">Billing status still pending?</label>
             <select id="da-cleanup-filter-advance" class="text-input text-input-sm">
               <option value="">All</option>
-              <option value="yes">Yes only</option>
-              <option value="no">No only</option>
+              <option value="yes">Still pending (STTOBILL00) only</option>
+              <option value="no">Already advanced only</option>
             </select>
-            <label class="field-label">All cycle</label>
+            <label class="field-label" title="Whether every reading linked to this item is a cycle-type reading (TIPTL00003 Cycle / TIPTL00005 Direct Connection), and if not, exactly which non-cycle type(s) it contains - see the Non-cycle type(s) column for the full text.">Cycle / non-cycle composition</label>
             <select id="da-cleanup-filter-cycle" class="text-input text-input-sm">
               <option value="">All</option>
-              <option value="yes">Yes only</option>
-              <option value="no">No only</option>
+              <option value="yes">Cycle reads only (no removal/reconnection/other)</option>
+              <option value="no">Includes any non-cycle read</option>
+              <option value="removal">Non-cycle: Removal only (no Reconnection)</option>
+              <option value="reconnection">Non-cycle: Reconnection only (no Removal)</option>
+              <option value="both">Non-cycle: Removal + Reconnection (both)</option>
+              <option value="other">Non-cycle: neither Removal nor Reconnection</option>
             </select>
             <label class="field-label" title="Distinct GCGT_RE_READING.ID_BILLING_PERIOD values across this item's linked readings - more than 1 highlights the row orange.">Multi billing period</label>
             <select id="da-cleanup-filter-multiperiod" class="text-input text-input-sm">
@@ -601,8 +612,9 @@
                 <th>Anomaly type</th>
                 <th>Anomaly status</th>
                 <th>Item status</th>
-                <th>Needs status advance?</th>
-                <th title="Yes = every reading linked to this item is a cycle-type reading. No = at least one linked reading isn't.">All cycle?</th>
+                <th title="Yes = this item's GCCOM_ITEMS_TO_BILL.STATUS is still STTOBILL00 (&quot;pending&quot;) and hasn't been advanced to STTOBILL01 yet. Generate Cleanup Script performs that one-time advance for whatever's checked.">Status still pending (STTOBILL00)?</th>
+                <th title="Yes = every reading linked to this item is a cycle-type reading (TIPTL00003 Cycle / TIPTL00005 Direct Connection). No = at least one linked reading is a different type - see the Non-cycle type(s) column for exactly which.">All cycle?</th>
+                <th title="The actual reading type name(s) (from GCGT_RE_READING_TYPE) for whichever linked reading(s) made All Cycle = No - e.g. Removal, Reconnection, Distribution. Blank when All Cycle = Yes.">Non-cycle type(s)</th>
                 <th title="Distinct GCGT_RE_READING.ID_BILLING_PERIOD values across this item's linked readings. More than 1 highlights the row orange.">Billing periods</th>
               </tr></thead>
               <tbody></tbody>
@@ -752,32 +764,137 @@
         </div>
 
         <!-- Reading-history popup (task #143) - opened via the "Readings"
-             link on a Hierarchy Detail row. Shows every reading for that
-             row's supply (ID_SECTOR_SUPPLY), with the billing period the
-             row itself was reviewed at highlighted (analyst's own ask:
-             "highlight the reading in the pop up window when we click it
-             from the details"). -->
-        <div class="hier-reading-modal-overlay" id="hier-reading-modal-overlay" hidden>
-          <div class="hier-reading-modal">
-            <div class="card-header">
-              <h2>Reading History <span id="hier-reading-modal-title" class="hint-text"></span></h2>
-              <div class="card-header-actions">
-                <button type="button" class="btn btn-pill-sm" id="hier-reading-modal-close-btn">✕ Close</button>
-              </div>
-            </div>
-            <p class="hint-text">Every reading for this supply (ID_SECTOR_SUPPLY), newest billing period first. <span class="row-checking-swatch">■</span> = the billing period being reviewed on the row you opened this from.</p>
-            <div class="grid-wrap">
-              <table class="data-grid" id="hier-reading-modal-table">
-                <thead><tr>
-                  <th>Billing Period</th><th>ID Reading</th><th>Reading Type</th><th>Usage Type</th>
-                  <th>Read Status</th><th>Prev Date</th><th>Reading Date</th><th>Prev Value</th>
-                  <th>Value</th><th>Reading Usage</th><th>★ Ready Usage</th><th>Est.</th>
-                </tr></thead>
-                <tbody></tbody>
-              </table>
+             link on a Hierarchy Detail row. Moved out of this section
+             (2026-09-13) to be a direct sibling of every `.page` instead
+             of nested inside this one - Bulk Checker's Bills drill-down
+             also opens this same modal (RJ: "same as the hierarchy
+             checker"), and a `.page` that isn't the active one is
+             `display:none`, which collapses this modal's own `position:
+             fixed` box to nothing even while its own `hidden` attribute
+             is correctly cleared. See the modal's new location, just
+             before </main>, for the actual markup. -->
+      </section>
+
+      <!-- ===== Bill Issuance Validator page ===== -->
+      <section class="page" id="page-billissuance">
+        <header class="page-header">
+          <h1>Bill Issuance Validator</h1>
+          <p class="page-subtitle">Finds different patterns of accounts whose billing didn't complete cleanly, and generates the correction script for each.</p>
+        </header>
+
+        <nav class="da-subnav" aria-label="Bill Issuance Validator functions">
+          <button type="button" class="da-subnav-btn is-active" data-biss-sub="case1">Case 1 - Prev Month Rate Only</button>
+          <button type="button" class="da-subnav-btn" data-biss-sub="case2">Case 2 - Terminated Account Period Mismatch</button>
+        </nav>
+
+        <div class="da-subpage is-active" data-biss-sub="case1">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Finds accounts whose next Electricity/Water bill is stuck "waiting for other services" (ESTFAC0015) behind a Rate bill (ID_OFFERED_SERVICE 176) that's still being put to collection.</p>
+
+        <div class="warning-banner">
+          ℹ️ <strong>How this works.</strong> Starts from every account with a pending notice (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP) on a bill still "En proceso de puesta al cobro" (ESTFAC0012), narrows to the ones where that billing period's <strong>only</strong> bill is a Rate (176) bill, then checks the SAME account's Electricity/Water (1 or 19) bill for the <strong>next</strong> billing period. A row here means that next bill is sitting at ESTFAC0015 ("En espera de otros servicios") — blocked behind the Rate bill above it.
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Stuck Bills</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="billiss-detect-btn">🔍 Scan for Stuck Bills</button>
+              <button type="button" class="btn btn-pill" id="billiss-export-csv-btn" hidden>⬇ Export CSV</button>
             </div>
           </div>
+          <p class="hint-text">One row per account, no duplicates — Electricity takes priority when it's stuck; Water only shows up when Electricity isn't.</p>
+          <div class="hint-text" id="billiss-summary"></div>
+
+          <div class="kpi-row" id="billiss-kpi-row" style="margin:18px 0 4px;"></div>
+
+          <div class="grid-wrap" style="margin-top:18px;">
+            <table class="data-grid" id="billiss-table">
+              <thead><tr>
+                <th class="stats-table-th-sortable" data-sort="reference">Account</th>
+                <th class="stats-table-th-sortable" data-sort="notice_update_date">Notice Updated</th>
+                <th class="stats-table-th-sortable" data-sort="id_bill_rate">Rate Bill</th>
+                <th class="stats-table-th-sortable" data-sort="period_rate">Rate Period</th>
+                <th class="stats-table-th-sortable" data-sort="id_bill_next">Next Bill</th>
+                <th class="stats-table-th-sortable" data-sort="offered_service_next_desc">Service</th>
+                <th class="stats-table-th-sortable" data-sort="period_next">Next Period</th>
+                <th class="stats-table-th-sortable" data-sort="status_next_desc">Status</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
+        </div><!-- /biss-subpage: case1 -->
+
+        <div class="da-subpage" data-biss-sub="case2">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Finds accounts whose services are all Terminated, checks each service's own final bill (the one dated its termination date), and flags accounts where those final bills don't all share the same billing period.</p>
+
+        <div class="warning-banner">
+          ℹ️ <strong>How this works.</strong> For each Terminated service (GCCOM_CONTRACTED_SERVICE.STATUS = ESTSC00004), finds its own final bill — the GCCOM_BILL row dated exactly that service's termination date and either "En proceso de puesta al cobro" (invoicing, ESTFAC0012) or "Puesta al cobro" (invoiced, ESTFAC0005). Only accounts where <strong>every</strong> service is Terminated are shown. An account is <strong>Complete</strong> when every service's final bill already exists and already shares the account's target period (the <strong>latest</strong> billing period among its matched final bills); otherwise it <strong>Needs action</strong> — either a service's final bill period needs realigning, or a service has no matching final bill at all and needs investigating.
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Terminated Accounts</h2>
+            <div class="card-header-actions">
+              <label class="field-label" style="display:flex;align-items:center;gap:6px;">
+                Look back
+                <select id="biss2-days-back" class="text-input text-input-sm" style="width:110px;">
+                  <option value="14">14 days</option>
+                  <option value="30">30 days</option>
+                  <option value="60" selected>60 days</option>
+                  <option value="180">6 months</option>
+                  <option value="0">All time</option>
+                </select>
+              </label>
+              <button type="button" class="btn btn-pill" id="biss2-detect-btn">🔍 Scan Terminated Accounts</button>
+              <button type="button" class="btn btn-pill" id="biss2-export-csv-btn" hidden>⬇ Export CSV</button>
+            </div>
+          </div>
+          <p class="hint-text">Click an account row to expand its services. Rows highlighted orange are accounts that need action.</p>
+          <div class="hint-text" id="biss2-summary"></div>
+
+          <div class="kpi-row" id="biss2-kpi-row" style="margin:18px 0 4px;"></div>
+
+          <div class="key-panel-row" style="margin:10px 0 0;">
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input type="checkbox" id="biss2-show-complete" /> Show Complete accounts too (hidden by default)
+            </label>
+          </div>
+
+          <div class="grid-wrap" style="margin-top:12px;">
+            <table class="data-grid" id="biss2-table">
+              <thead><tr>
+                <th><input type="checkbox" id="biss2-select-all" title="Select all visible accounts needing action" /></th>
+                <th></th>
+                <th class="stats-table-th-sortable" data-sort="reference">Account</th>
+                <th class="stats-table-th-sortable" data-sort="service_count">Services</th>
+                <th class="stats-table-th-sortable" data-sort="needs_update_count">Need Update</th>
+                <th class="stats-table-th-sortable" data-sort="target_period">Target Period</th>
+                <th class="stats-table-th-sortable" data-sort="complete">Status</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>Generate Update Script</h2></div>
+          <p class="hint-text">Generates one <code>UPDATE GCCOM_BILL SET ID_BILLING_PERIOD = ...</code> statement per service that needs an update, for every checked account (re-verifies against the live database right before generating). Leave nothing checked to generate for <strong>every</strong> flagged account. A service with no final bill at all is skipped (nothing to update) and listed as a warning instead.</p>
+          <div class="key-panel-row" style="margin:10px 0;">
+            <label class="field-label">Jira / Program #</label>
+            <input id="biss2-program" class="text-input text-input-sm" value="JIRAXXXX" style="width:160px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;" title="Strips every comment line - leaves just the bare UPDATE statements.">
+              <input type="checkbox" id="biss2-clean-toggle" /> Clean script (no comments)
+            </label>
+            <button type="button" class="btn btn-primary" id="biss2-generate-btn">📝 Generate Update Script</button>
+          </div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" id="biss2-copy-btn">📋 Copy</button>
+            <button type="button" class="btn btn-pill" id="biss2-download-btn">⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" id="biss2-output">No update script generated yet — Scan Terminated Accounts, then Generate.</pre>
+        </div>
+        </div><!-- /biss-subpage: case2 -->
       </section>
 
       <!-- ===== Bulk Checker page ===== -->
@@ -803,7 +920,24 @@
             </div>
             <button type="button" class="btn btn-primary" id="bc-search-btn">▶ Search</button>
           </div>
+          <div class="key-panel-row">
+            <div class="dropdown" id="bc-saved-dropdown">
+              <button type="button" class="btn btn-pill-sm" id="bc-saved-btn">💾 Saved searches ▾</button>
+              <div class="dropdown-menu" id="bc-saved-menu" hidden></div>
+            </div>
+            <button type="button" class="btn btn-pill-sm" id="bc-save-search-btn">💾 Save current as…</button>
+          </div>
           <div class="editor-status" id="bc-search-status">No search run yet.</div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>Analyze One Account</h2></div>
+          <p class="hint-text">Look up a single bulk account's bills directly, without running the search above first — uses the same cycle dates and billing period fields above.</p>
+          <div class="key-panel-row">
+            <label class="field-label">Account number</label>
+            <input id="bc-single-account" class="text-input text-input-sm" placeholder="e.g. ACC-12345" style="width:220px;" />
+            <button type="button" class="btn btn-pill" id="bc-single-account-btn">🔎 Analyze Account</button>
+          </div>
         </div>
 
         <div class="card" id="bc-results-card" hidden>
@@ -815,6 +949,7 @@
             </div>
           </div>
           <div class="kpi-row" id="bc-kpi-row"></div>
+          <div class="hint-text" id="bc-trend-hint" hidden></div>
           <div class="key-panel-row">
             <label class="field-label">Status</label>
             <select id="bc-status-filter" class="text-input text-input-sm">
@@ -824,9 +959,14 @@
               <option value="missing_bill">Missing bill</option>
               <option value="in_invoicing">In invoicing</option>
             </select>
+            <label class="field-label">Amount</label>
+            <input id="bc-amount-min" class="text-input text-input-sm" type="number" placeholder="Min" style="width:90px;" />
+            <span class="field-hint">to</span>
+            <input id="bc-amount-max" class="text-input text-input-sm" type="number" placeholder="Max" style="width:90px;" />
             <label class="field-label">Search</label>
             <input id="bc-search-box" class="text-input text-input-sm" placeholder="Search all columns…" style="width:220px;" />
           </div>
+          <p class="hint-text">Click a column header to sort. Click a KPI card above to filter to that status.</p>
           <div class="hint-text" id="bc-results-hint">Click a row to see its bills. Click 📝 to flag an account with a note for teammates. <span class="row-not-billed-swatch">■</span> = no file generated yet.</div>
           <div class="grid-wrap">
             <table class="data-grid" id="bc-results-table">
@@ -1050,7 +1190,7 @@
               <div><label class="field-label">Database (blank = default)</label><input id="conn-database" class="text-input" /></div>
               <div><label class="field-label">Username</label><input id="conn-username" class="text-input" /></div>
               <div><label class="field-label">Password</label><input id="conn-password" class="text-input" type="password" placeholder="(leave blank to keep existing)" /></div>
-              <div><label class="field-label">Timeout (seconds)</label><input id="conn-timeout" class="text-input" type="number" value="10" /></div>
+              <div><label class="field-label">Timeout (seconds)</label><input id="conn-timeout" class="text-input" type="number" value="30" /></div>
               <div class="form-grid-wide"><label class="field-label">Notes</label><input id="conn-notes" class="text-input" /></div>
             </div>
             <div class="generate-row">
@@ -1080,6 +1220,40 @@
 
         </div><!-- /#admin-settings-section -->
       </section>
+
+      <!-- Reading-history popup (task #143), shared by Hierarchy Analysis's
+           Detail drill-down and Bulk Checker's Bills drill-down (RJ:
+           "add a link again to open readings same as the hierarchy
+           checker"). Lives here as a direct child of <main>, a sibling
+           of every `.page` section, rather than nested inside any one
+           page - `position: fixed` doesn't rescue an element from a
+           `display:none` ancestor, so nesting it inside one page made it
+           silently render as a 0x0 box whenever a DIFFERENT page was
+           active (found live, 2026-09-13: the Bulk Checker Readings
+           button's own API call and DOM update both worked, the popup
+           was just invisible because #page-hierarchy wasn't the active
+           page). -->
+      <div class="hier-reading-modal-overlay" id="hier-reading-modal-overlay" hidden>
+        <div class="hier-reading-modal">
+          <div class="card-header">
+            <h2>Reading History <span id="hier-reading-modal-title" class="hint-text"></span></h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill-sm" id="hier-reading-modal-close-btn">✕ Close</button>
+            </div>
+          </div>
+          <p class="hint-text">Every reading for this supply (ID_SECTOR_SUPPLY), newest billing period first. <span class="row-checking-swatch">■</span> = the billing period being reviewed on the row you opened this from.</p>
+          <div class="grid-wrap">
+            <table class="data-grid" id="hier-reading-modal-table">
+              <thead><tr>
+                <th>Billing Period</th><th>ID Reading</th><th>Reading Type</th><th>Usage Type</th>
+                <th>Read Status</th><th>Prev Date</th><th>Reading Date</th><th>Prev Value</th>
+                <th>Value</th><th>Reading Usage</th><th>★ Ready Usage</th><th>Est.</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
 
     </main>
   </div>

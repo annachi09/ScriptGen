@@ -35,6 +35,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import load_config, save_config, ConnectionConfig
 from app.core import ai_assist, diff_engine, schema_check, script_generator, sql_pretty, date_anomaly
 from app.core import hierarchy_analysis
+from app.core import bill_issuance_validator
 from app.core import bulk_checker
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -1307,6 +1308,15 @@ def date_anomaly_detect(
                 "id_billing_period": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
                 "reading_date": diff_engine.cell_display(_da_col(r, "READING_DATE")),
                 "read_status": diff_engine.cell_display(_da_col(r, "READ_STATUS")),
+                # RJ, 2026-09-13: "if not all cycle, i need to know if it
+                # contains removal or not" - the actual reading type name
+                # (e.g. "Removal", "Reconnection") straight from
+                # GCGT_RE_READING_TYPE, not a guess. Falls back to the raw
+                # TIPTL code if this reading's type isn't in that lookup.
+                "reading_type": diff_engine.cell_display(_da_col(r, "READING_TYPE")),
+                "reading_type_desc": diff_engine.cell_display(_da_col(r, "READING_TYPE_DESC"))
+                if _da_col(r, "READING_TYPE_DESC") is not None else None,
+                "is_cycle_reading": bool(_da_col(r, "IS_CYCLE_READING")),
             }
             for r in rows
         ],
@@ -1353,8 +1363,24 @@ def date_anomaly_resolve(user: str = Depends(require_login), sid: str = Depends(
                     item_map[reading_id].append(item_id)
 
         item_ids = sorted({v for ids in item_map.values() for v in ids}, key=str)
+        # RJ, 2026-09-13: "you are updating using id_item_to_bill, you
+        # need to get first the id_xml from gccom_item_to_bill and
+        # update with that id" - GCCOM_ITEMS_TO_BILL.ID_XML is the real
+        # FK, confirmed wrong to assume it equals ID_ITEM_TO_BILL (see
+        # date_anomaly module docstring). Must look this up FIRST.
+        item_to_xml_map: dict = {}
+        item_xml_id_sql = date_anomaly.build_item_xml_id_query(item_ids)
+        if item_xml_id_sql:
+            item_xml_id_result = mssql.run_query(conn, item_xml_id_sql)
+            for r in item_xml_id_result.rows:
+                row = dict(zip(item_xml_id_result.columns, r))
+                id_xml_val = _da_col(row, "ID_XML")
+                if id_xml_val is not None:
+                    item_to_xml_map[_da_col(row, "ID_ITEM_TO_BILL")] = id_xml_val
+
         xml_rows: dict = {}
-        xml_sql = date_anomaly.build_xml_lookup_query(item_ids)
+        real_id_xmls = sorted({v for v in item_to_xml_map.values()}, key=str)
+        xml_sql = date_anomaly.build_xml_lookup_query(real_id_xmls)
         if xml_sql:
             xml_result = mssql.run_query(conn, xml_sql)
             for r in xml_result.rows:
@@ -1402,6 +1428,7 @@ def date_anomaly_resolve(user: str = Depends(require_login), sid: str = Depends(
 
     da_state.item_to_bill_map = item_map
     da_state.xml_rows = xml_rows
+    da_state.item_to_xml_map = item_to_xml_map
     da_state.anomalous_item_ids = anomalous_item_ids
     da_state.item_status_ids = item_status_ids
     da_state.reading_has_audit = reading_has_audit
@@ -1496,6 +1523,7 @@ def date_anomaly_generate(
         anomaly_id_readings=id_readings,
         item_to_bill_map=da_state.item_to_bill_map,
         xml_rows=da_state.xml_rows,
+        item_to_xml_map=da_state.item_to_xml_map,
         anomalous_item_ids=da_state.anomalous_item_ids,
         item_status_ids=da_state.item_status_ids,
         orphan_usage_id_readings=orphan_usage_ids,
@@ -1688,7 +1716,10 @@ def date_anomaly_detect_all(user: str = Depends(require_login)):
     see that function's docstring for the join chain and its "unverified
     against the live schema" caveat. Also carries all_cycle (bool) -
     whether every reading linked to the item is a "cycle" reading type,
-    per date_anomaly.CYCLE_READING_TYPES.
+    per date_anomaly.CYCLE_READING_TYPES - and non_cycle_reading_types
+    (str, RJ 2026-09-13), the actual confirmed-live name(s) of whichever
+    reading type(s) made all_cycle false (e.g. "Removal", "Reconnection"),
+    not just the bare yes/no.
     """
     config = load_config()
     conn = config.get_active_connection()
@@ -1752,6 +1783,15 @@ def date_anomaly_detect_all(user: str = Depends(require_login)):
                     int(_da_col(r, "BILLING_PERIOD_COUNT"))
                     if _da_col(r, "BILLING_PERIOD_COUNT") is not None else None
                 ),
+                # RJ, 2026-09-13: "if not all cycle, i need to know if it
+                # contains removal or not" - comma-separated actual type
+                # name(s) (e.g. "Removal", "Reconnection, Distribution")
+                # for whichever readings made ALL_CYCLE false on this row.
+                # Empty string (not None) when ALL_CYCLE is true - nothing
+                # non-cycle to list, same "don't leave a blank you can't
+                # tell apart from unknown" reasoning as all_cycle above,
+                # but "" reads more naturally than null in this table cell.
+                "non_cycle_reading_types": diff_engine.cell_display(_da_col(r, "NON_CYCLE_READING_TYPES")) or "",
             }
             for r in rows
         ],
@@ -1783,6 +1823,7 @@ class DetectAllExportRow(BaseModel):
     needs_status_advance: bool = False
     all_cycle: Optional[bool] = None
     billing_period_count: Optional[int] = None
+    non_cycle_reading_types: str = ""
 
 
 class DetectAllExportXlsxRequest(BaseModel):
@@ -1810,8 +1851,8 @@ def date_anomaly_detect_all_export_xlsx(body: DetectAllExportXlsxRequest, user: 
     ws.title = "Detect All"
     headers = [
         "ID Item To Bill", "Account", "Supply (NISS)", "Offered Service", "Contract Status",
-        "Anomaly Type", "Anomaly Status", "Item Status", "Needs Status Advance", "All Cycle",
-        "Billing Periods",
+        "Anomaly Type", "Anomaly Status", "Item Status", "Status Still Pending (STTOBILL00)", "All Cycle",
+        "Non-Cycle Type(s)", "Billing Periods",
     ]
     ws.append(headers)
     for cell in ws[1]:
@@ -1822,9 +1863,10 @@ def date_anomaly_detect_all_export_xlsx(body: DetectAllExportXlsxRequest, user: 
             r.anomalous_type, r.anomalous_status, r.item_status,
             "Yes" if r.needs_status_advance else "",
             "Yes" if r.all_cycle is True else ("No" if r.all_cycle is False else ""),
+            r.non_cycle_reading_types,
             r.billing_period_count if r.billing_period_count is not None else "",
         ])
-    widths = [16, 14, 16, 18, 14, 45, 30, 14, 18, 10, 16]
+    widths = [16, 14, 16, 18, 14, 45, 30, 14, 24, 10, 26, 16]
     for i, width in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
     ws.freeze_panes = "A2"
@@ -2381,6 +2423,261 @@ def hierarchy_analysis_export_xlsx(body: HierarchyExportXlsxRequest, user: str =
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="hierarchy_analysis.xlsx"'},
     )
+
+
+# ---------------------------------------------------------------------
+# Bill Issuance Validator - system-wide scan for accounts whose next
+# Electricity/Water bill is stuck (BILLING_STATUS = ESTFAC0015, "waiting
+# for other services") behind a Rate (ID_OFFERED_SERVICE 176) bill that's
+# still being put to collection. See app/core/bill_issuance_validator.py's
+# module docstring for the full background (RJ's own query + rules,
+# 2026-09-15) - every code/id this route touches was confirmed live
+# against the tunnel DB before this route was written. Stateless, same as
+# Hierarchy Analysis - every call re-runs the query fresh.
+# ---------------------------------------------------------------------
+@app.post("/api/bill-issuance/detect")
+def bill_issuance_detect(user: str = Depends(require_login)):
+    """
+    bill_issuance_validator.build_stuck_bills_query - see that function's
+    own docstring for the full CTE chain. One row per account (RJ,
+    2026-09-15: "i dont want duplicates") - an account with BOTH its
+    Electricity and Water bills stuck for the same period surfaces once,
+    preferring Electricity; Water only shows up when Electricity itself
+    isn't one of the stuck bills.
+    """
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+
+    limit = bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT
+    try:
+        result = mssql.run_query(conn, bill_issuance_validator.build_stuck_bills_query(limit=limit))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    rows = [dict(zip(result.columns, r)) for r in result.rows]
+    return {
+        "rows": [
+            {
+                "id_payment_form": diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM")),
+                "reference": diff_engine.cell_display(_da_col(r, "REFERENCE")),
+                "notice_update_date": diff_engine.cell_display(_da_col(r, "NOTICE_UPDATE_DATE")),
+                "id_bill_rate": diff_engine.cell_display(_da_col(r, "ID_BILL_RATE")),
+                "period_rate": diff_engine.cell_display(_da_col(r, "PERIOD_RATE")),
+                "id_bill_next": diff_engine.cell_display(_da_col(r, "ID_BILL_NEXT")),
+                "offered_service_next": diff_engine.cell_display(_da_col(r, "OFFERED_SERVICE_NEXT")),
+                "offered_service_next_desc": diff_engine.cell_display(_da_col(r, "OFFERED_SERVICE_NEXT_DESC")),
+                "period_next": diff_engine.cell_display(_da_col(r, "PERIOD_NEXT")),
+                "status_next": diff_engine.cell_display(_da_col(r, "STATUS_NEXT")),
+                "status_next_desc": diff_engine.cell_display(_da_col(r, "STATUS_NEXT_DESC")),
+            }
+            for r in rows
+        ],
+        "possibly_truncated": len(rows) >= limit,
+        "limit": limit,
+    }
+
+
+# Case 2 (RJ, 2026-09-15, redesigned 2026-09-16/17) - terminated-account
+# billing-period mismatch. See app/core/bill_issuance_validator.py's
+# Case 2 comment block (above CONTRACTED_SERVICE_TABLE) for the full
+# business-rule narrative, RJ's own 342702 example, and the redesign's
+# account-grouped/drill-down/Complete-filter UI decisions.
+_OFFERED_SERVICE_NAMES = {1: "Electricity", 19: "Water", 176: "Rate"}
+
+
+def _case2_group_rows_by_account(rows: list[dict]) -> list[dict]:
+    """
+    Groups build_terminated_period_mismatch_query's per-service rows into
+    one object per account (ID_PAYMENT_FORM) - RJ's own words: "the idea
+    is i only want to see the accounts, maybe its a drill down to show
+    the bills". Each account object carries REFERENCE, TARGET_PERIOD, an
+    ACCOUNT_HAS_ISSUE-derived `complete` flag (true only when every one
+    of its services already needed no update - RJ's own "Complete"
+    filter case), summary counts for the account-level table, and a
+    `services` list (one entry per terminated service) for the drill-
+    down. Row order from the query is already ID_PAYMENT_FORM, ID_
+    OFFERED_SERVICE - dict insertion order preserves that grouping
+    without needing a second sort here.
+    """
+    accounts: dict[str, dict] = {}
+    for r in rows:
+        pf = diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM"))
+        acct = accounts.get(pf)
+        if acct is None:
+            acct = {
+                "id_payment_form": pf,
+                "reference": diff_engine.cell_display(_da_col(r, "REFERENCE")),
+                "target_period": diff_engine.cell_display(_da_col(r, "TARGET_PERIOD")),
+                "complete": not bool(_da_col(r, "ACCOUNT_HAS_ISSUE")),
+                "service_count": 0,
+                "needs_update_count": 0,
+                "services": [],
+            }
+            accounts[pf] = acct
+        offered_service_id = _da_col(r, "ID_OFFERED_SERVICE")
+        needs_update = bool(_da_col(r, "NEEDS_UPDATE"))
+        acct["service_count"] += 1
+        if needs_update:
+            acct["needs_update_count"] += 1
+        acct["services"].append({
+            "id_offered_service": diff_engine.cell_display(offered_service_id),
+            "offered_service_desc": _OFFERED_SERVICE_NAMES.get(offered_service_id, ""),
+            "end_date": diff_engine.cell_display(_da_col(r, "END_DATE")),
+            "id_bill": diff_engine.cell_display(_da_col(r, "ID_BILL")),
+            "id_billing_period": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
+            "billing_status": diff_engine.cell_display(_da_col(r, "BILLING_STATUS")),
+            "needs_update": needs_update,
+        })
+    return list(accounts.values())
+
+
+@app.post("/api/bill-issuance/case2/detect")
+def bill_issuance_case2_detect(days_back: int | None = None, user: str = Depends(require_login)):
+    """
+    bill_issuance_validator.build_terminated_period_mismatch_query - see
+    that function's own docstring for the full CTE chain and the
+    2026-09-17 performance finding (index seeks defeated by N'...'
+    literals against varchar columns - see app/core/sql_format.py).
+    Stateless, same as Case 1 - every call re-runs the query fresh.
+
+    Returns account-grouped rows (see _case2_group_rows_by_account) -
+    the UI's primary table is one row per account with a drill-down for
+    per-service detail, plus a `complete` flag per account so the
+    frontend can filter Complete (every service's final bill already
+    aligned) vs. Needs-action, per RJ's own redesign request.
+
+    `days_back` (query param) overrides TERMINATED_PERIOD_LOOKBACK_DAYS_
+    DEFAULT - pass 0 (falsy) to scan every Terminated service regardless
+    of age (slower - see the query builder's own docstring for real
+    scan-size numbers at no filter vs. a date-scoped one).
+    """
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+
+    limit = bill_issuance_validator.TERMINATED_PERIOD_DEFAULT_LIMIT
+    effective_days_back = days_back if days_back is not None else bill_issuance_validator.TERMINATED_PERIOD_LOOKBACK_DAYS_DEFAULT
+    try:
+        result = mssql.run_query(
+            conn,
+            bill_issuance_validator.build_terminated_period_mismatch_query(
+                limit=limit, days_back=effective_days_back or None,
+            ),
+        )
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    rows = [dict(zip(result.columns, r)) for r in result.rows]
+    accounts = _case2_group_rows_by_account(rows)
+    return {
+        "accounts": accounts,
+        "account_count": len(accounts),
+        "accounts_needing_action": sum(1 for a in accounts if not a["complete"]),
+        "possibly_truncated": len(rows) >= limit,
+        "limit": limit,
+        "days_back": effective_days_back or None,
+    }
+
+
+class BillIssuanceCase2GenerateRequest(BaseModel):
+    # Optional subset of ID_PAYMENT_FORM (as display strings, same
+    # round-tripped-through-the-browser convention as DateAnomalyCleanup
+    # GenerateRequest.item_ids) the analyst checked on the Case 2 table -
+    # empty means "every flagged account", same "no selection = act on
+    # everything detected" default the Detect All -> bulk cleanup flow
+    # uses when nothing's checked.
+    id_payment_forms: list[str] = []
+    program: str = script_generator.DEFAULT_AUDIT_PROGRAM
+    clean: bool = False
+    days_back: int | None = None
+
+
+@app.post("/api/bill-issuance/case2/generate")
+def bill_issuance_case2_generate(
+    body: BillIssuanceCase2GenerateRequest, user: str = Depends(require_editor),
+):
+    """
+    Generates the Case 2 UPDATE script (bill_issuance_validator.build_
+    terminated_period_fix_script) - RJ's own words: "an update on the
+    bill with different id_billing_period, but having same billing date
+    should be created, the new billing_period will be the latest
+    id_billing_period among the bills that are in pending validation in
+    NOTICE_TMP or status invoicing in GCCOM_BILL... so you will add a
+    button form me to generate the update script".
+
+    Re-runs build_terminated_period_mismatch_query fresh right before
+    generating - the same "re-verify at generate time" pattern every
+    other Generate route in this app uses (date_anomaly's detect-all
+    cleanup, batch, etc) - rather than trusting whatever the analyst's
+    browser last rendered, since the detect snapshot may be stale by the
+    time Generate is clicked. Keeps only NEEDS_UPDATE rows, optionally
+    scoped to id_payment_forms.
+    """
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    program = body.program.strip()
+    if not program:
+        raise HTTPException(status_code=400, detail="Jira / Program # is required.")
+
+    scope = None
+    if body.id_payment_forms:
+        scope = {str(x).strip() for x in body.id_payment_forms if str(x).strip()}
+
+    limit = bill_issuance_validator.TERMINATED_PERIOD_DEFAULT_LIMIT
+    effective_days_back = body.days_back if body.days_back is not None else bill_issuance_validator.TERMINATED_PERIOD_LOOKBACK_DAYS_DEFAULT
+    try:
+        result = mssql.run_query(
+            conn,
+            bill_issuance_validator.build_terminated_period_mismatch_query(
+                limit=limit, days_back=effective_days_back or None,
+            ),
+        )
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    rows = [dict(zip(result.columns, r)) for r in result.rows]
+    updates = []
+    for r in rows:
+        if not _da_col(r, "NEEDS_UPDATE"):
+            continue
+        pf = _da_col(r, "ID_PAYMENT_FORM")
+        if scope is not None and str(pf) not in scope:
+            continue
+        updates.append((_da_col(r, "ID_BILL"), _da_col(r, "TARGET_PERIOD")))
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No bills need a billing-period update.")
+
+    fix_result = bill_issuance_validator.build_terminated_period_fix_script(
+        updates, program=program, clean=body.clean,
+    )
+
+    try:
+        script_history.record_script(
+            config.internal_db_path,
+            username=user,
+            kind=script_history.KIND_BILL_ISSUANCE,
+            schema_name="",
+            table_name=f"Bill Issuance Case 2 ({len(updates)} bill(s))",
+            program=program,
+            statement_count=fix_result.statement_count,
+            warning_count=fix_result.warning_count,
+            sql_text=fix_result.sql_text,
+            source=script_history.SOURCE_WEB,
+        )
+    except Exception:
+        pass
+
+    return {
+        "sql_text": fix_result.sql_text,
+        "update_count": fix_result.update_count,
+        "warnings": fix_result.warnings,
+    }
 
 
 # ---------------------------------------------------------------------

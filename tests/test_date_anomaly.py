@@ -26,7 +26,7 @@ def test_build_detect_query_contains_expected_filters():
     sql = da.build_detect_query("10450618-301", 10000000230)
     assert "GCGT_RE_READING" in sql
     assert "GCCOM_SECTOR_SUPPLY" in sql
-    assert "N'10450618-301'" in sql
+    assert "'10450618-301'" in sql
     assert "10000000230" in sql
     assert da.READ_STATUS_ANOMALY in sql
     assert da.READING_TYPE_EXCLUDED in sql
@@ -38,7 +38,20 @@ def test_build_detect_query_escapes_quotes_in_niss():
     sql = da.build_detect_query("abc'--", 0)
     # format_sql_literal doubles embedded single quotes - a raw f-string
     # interpolation would have let this break out of the literal instead.
-    assert "N'abc''--'" in sql
+    assert "'abc''--'" in sql
+
+
+def test_build_detect_query_joins_reading_type_lookup():
+    # RJ, 2026-09-13: "if not all cycle, i need to know if it contains
+    # removal or not" - each anomalous reading now carries its actual
+    # GCGT_RE_READING_TYPE.DESCRIPTION (e.g. "Removal", "Reconnection"),
+    # not just the bare TIPTL code.
+    sql = da.build_detect_query("10450618-301", 10000000230)
+    assert "GCGT_RE_READING_TYPE" in sql
+    assert "READING_TYPE_DESC" in sql
+    assert "IS_CYCLE_READING" in sql
+    for t in da.CYCLE_READING_TYPES:
+        assert t in sql
 
 
 def test_build_correct_date_query_uses_billed_status_and_top_1():
@@ -46,6 +59,27 @@ def test_build_correct_date_query_uses_billed_status_and_top_1():
     assert "TOP 1" in sql
     assert da.READ_STATUS_BILLED in sql
     assert da.READ_STATUS_ANOMALY not in sql
+
+
+def test_build_correct_date_query_orders_by_reading_date_first():
+    # RJ, 2026-09-14, real bug found live for NISS 20022221-101:
+    # `ORDER BY ID_BILLING_PERIOD DESC` alone has no tiebreaker, so SQL
+    # Server's TOP 1 can return EITHER row when two readings share the
+    # same (max) billing period and are both READ_STATUS 7000STSRED -
+    # it returned the wrong (earlier) one live.
+    #
+    # RJ, 2026-09-15, second real bug found live for NISS 10328684-101:
+    # ID_BILLING_PERIOD DESC as the PRIMARY sort key is itself wrong -
+    # billing period ids aren't always monotonic with READING_DATE (a
+    # removal/reinstall can leave a lower period holding a later date
+    # than a higher period). A billed Removal reading dated 2026-07-30 in
+    # period 235 was skipped in favor of a Cycle reading dated 2026-07-22
+    # in period 236, because 236 > 235. Fixed by making READING_DATE DESC
+    # the PRIMARY key - "most recent correctly-billed reading" means most
+    # recent by actual date - with ID_BILLING_PERIOD DESC/ID_READING DESC
+    # kept as secondary/tertiary tiebreakers for same-date ties.
+    sql = da.build_correct_date_query("10450618-301", 10000000230)
+    assert "ORDER BY r.READING_DATE DESC, r.ID_BILLING_PERIOD DESC, r.ID_READING DESC" in sql
 
 
 def test_build_item_to_bill_query_empty_returns_none():
@@ -59,11 +93,32 @@ def test_build_item_to_bill_query_lists_ids():
     assert "1044166373" in sql
 
 
+def test_build_item_xml_id_query_empty_returns_none():
+    assert da.build_item_xml_id_query([]) is None
+
+
+def test_build_item_xml_id_query_lists_ids():
+    # RJ, 2026-09-13: "you are updating using id_item_to_bill, you need
+    # to get first the id_xml from gccom_item_to_bill and update with
+    # that id" - this is the required first lookup, against
+    # GCCOM_ITEMS_TO_BILL itself (NOT GCCOM_ITEMS_TO_BILL_XML), to find
+    # the real ID_XML for each item-to-bill id.
+    sql = da.build_item_xml_id_query([1044166372, 1044166373])
+    assert "GCCOM_ITEMS_TO_BILL" in sql
+    assert "GCCOM_ITEMS_TO_BILL_XML" not in sql
+    assert "ID_XML" in sql
+    assert "1044166372" in sql
+    assert "1044166373" in sql
+
+
 def test_build_xml_lookup_query_empty_returns_none():
     assert da.build_xml_lookup_query([]) is None
 
 
 def test_build_xml_lookup_query_lists_ids():
+    # Note: the id passed here must already be a REAL ID_XML value (from
+    # build_item_xml_id_query's result), not an item-to-bill id - see
+    # that function's docstring for why (RJ, 2026-09-13 correction).
     sql = da.build_xml_lookup_query([1034594394])
     assert "GCCOM_ITEMS_TO_BILL_XML" in sql
     assert "1034594394" in sql
@@ -113,6 +168,96 @@ def test_patch_xml_dates_malformed_raises_parse_error():
 
 
 # ---------------------------------------------------------------------
+# XML <reading> node removal (RJ, 2026-09-13: "we need to remove the
+# section of the non cycle that we are removing ... but only for the
+# idReading that we are deleting in reading item to bill")
+# ---------------------------------------------------------------------
+
+def test_remove_reading_nodes_removes_only_the_matching_reading():
+    xml_text = (
+        "<Root>"
+        "<reading><idReading>101</idReading><value>5</value></reading>"
+        "<reading><idReading>102</idReading><value>7</value></reading>"
+        "</Root>"
+    )
+    patched, removed = da.remove_reading_nodes(xml_text, [101])
+    assert removed == [101]
+    root = ET.fromstring(patched)
+    ids = [r.find("idReading").text for r in root.findall("reading")]
+    assert ids == ["102"]
+
+
+def test_remove_reading_nodes_removes_multiple_ids():
+    xml_text = (
+        "<Root>"
+        "<reading><idReading>101</idReading></reading>"
+        "<reading><idReading>102</idReading></reading>"
+        "<reading><idReading>103</idReading></reading>"
+        "</Root>"
+    )
+    patched, removed = da.remove_reading_nodes(xml_text, [101, 103])
+    assert set(removed) == {101, 103}
+    root = ET.fromstring(patched)
+    ids = [r.find("idReading").text for r in root.findall("reading")]
+    assert ids == ["102"]
+
+
+def test_remove_reading_nodes_matches_by_string_not_strict_type():
+    # DB drivers can hand back int/Decimal/str for the same id depending
+    # on the column type - matching must be string-based, not `in` on the
+    # raw id_readings list, or a Decimal(101) vs int 101 mismatch would
+    # silently remove nothing.
+    xml_text = "<Root><reading><idReading>101</idReading></reading></Root>"
+    patched, removed = da.remove_reading_nodes(xml_text, ["101"])
+    assert removed == ["101"]
+    assert ET.fromstring(patched).find("reading") is None
+
+
+def test_remove_reading_nodes_leaves_unmatched_ids_untouched():
+    xml_text = "<Root><reading><idReading>999</idReading></reading></Root>"
+    patched, removed = da.remove_reading_nodes(xml_text, [101])
+    assert removed == []
+    assert ET.fromstring(patched).find("reading") is not None
+
+
+def test_remove_reading_nodes_ignores_reading_elements_with_no_id_reading_child():
+    xml_text = "<Root><reading><value>5</value></reading></Root>"
+    patched, removed = da.remove_reading_nodes(xml_text, [101])
+    assert removed == []
+    assert ET.fromstring(patched).find("reading") is not None
+
+
+def test_remove_reading_nodes_works_through_a_default_namespace():
+    xml_text = (
+        '<Root xmlns="urn:example:bill">'
+        "<reading><idReading>101</idReading></reading>"
+        "<reading><idReading>102</idReading></reading>"
+        "</Root>"
+    )
+    patched, removed = da.remove_reading_nodes(xml_text, [101])
+    assert removed == [101]
+    assert "101" not in patched
+    assert "102" in patched
+
+
+def test_remove_reading_nodes_malformed_raises_parse_error():
+    with pytest.raises(ET.ParseError):
+        da.remove_reading_nodes("<Root><reading>", [101])
+
+
+def test_remove_reading_nodes_does_not_touch_date_nodes():
+    # Sanity check that the two XML-mutation helpers are independent -
+    # remove_reading_nodes only ever touches <reading> elements.
+    xml_text = (
+        "<Root><initDate>2024-01-15</initDate>"
+        "<reading><idReading>101</idReading></reading></Root>"
+    )
+    patched, removed = da.remove_reading_nodes(xml_text, [101])
+    assert removed == [101]
+    assert ET.fromstring(patched).find("initDate").text == "2024-01-15"
+
+
+# ---------------------------------------------------------------------
 # Correction script assembly
 # ---------------------------------------------------------------------
 
@@ -124,6 +269,13 @@ def _base_kwargs(**overrides):
         correct_date_source_reading=999,
         anomaly_id_readings=[101, 102],
         item_to_bill_map={101: [500], 102: [500]},  # both readings roll up to the same bill item
+        # item_to_xml_map maps item 500 to itself as id_xml 500 purely so
+        # most of these tests (which predate the RJ 2026-09-13 "you need
+        # to get the id_xml from gccom_item_to_bill first" fix) don't all
+        # need updating - see test_build_correction_script_xml_uses_real_
+        # id_xml_not_item_id below for a test where they deliberately
+        # differ, proving the real fix.
+        item_to_xml_map={500: 500},
         xml_rows={500: "<Root><initDate>2024-01-01</initDate><readingFromDate>2024-01-01</readingFromDate></Root>"},
     )
     kwargs.update(overrides)
@@ -192,6 +344,7 @@ def test_build_correction_script_one_reading_maps_to_multiple_items():
         **_base_kwargs(
             anomaly_id_readings=[101],
             item_to_bill_map={101: [500, 501]},
+            item_to_xml_map={500: 500, 501: 501},
             xml_rows={
                 500: "<Root><initDate>2024-01-01</initDate></Root>",
                 501: "<Root><initDate>2024-01-01</initDate></Root>",
@@ -206,6 +359,47 @@ def test_build_correction_script_one_reading_maps_to_multiple_items():
     assert "WHERE ID_XML = 500" in result.sql_text
     assert "WHERE ID_XML = 501" in result.sql_text
     assert result.warning_count == 0
+
+
+def test_build_correction_script_xml_uses_real_id_xml_not_item_id():
+    # RJ, 2026-09-13: "you are updating using id_item_to_bill, you need
+    # to get first the id_xml from gccom_item_to_bill and update with
+    # that id" - the real bug this fixes. Item 500's real ID_XML is
+    # 9001, NOT 500 - the generated UPDATE must target ID_XML = 9001,
+    # never ID_XML = 500 (the old, confirmed-wrong assumption).
+    result = da.build_correction_script(
+        **_base_kwargs(
+            item_to_xml_map={500: 9001},
+            xml_rows={9001: "<Root><initDate>2024-01-01</initDate></Root>"},
+        )
+    )
+    assert result.xml_count == 1
+    assert result.warning_count == 0
+    assert "WHERE ID_XML = 9001" in result.sql_text
+    assert "WHERE ID_XML = 500" not in result.sql_text
+    assert "-- XML 9001 (item 500)" in result.sql_text
+
+
+def test_build_correction_script_item_with_no_id_xml_warns_and_skips():
+    # Item 500 has NO entry in item_to_xml_map at all - i.e.
+    # GCCOM_ITEMS_TO_BILL.ID_XML was NULL for it - must warn and skip
+    # Part 4 for it, never fall back to guessing ID_XML == item id.
+    result = da.build_correction_script(**_base_kwargs(item_to_xml_map={}))
+    assert result.xml_count == 0
+    assert any("GCCOM_ITEMS_TO_BILL_XML row" in w for w in result.warnings)
+    assert "WHERE ID_XML = 500" not in result.sql_text
+
+
+def test_build_correction_script_id_xml_with_no_matching_row_warns_and_skips():
+    # Item 500 DOES have a real ID_XML (9001), but xml_rows has no entry
+    # for 9001 (e.g. the row vanished, or the caller's lookup missed it)
+    # - distinct failure mode from the NULL-ID_XML case above, same
+    # "warn, don't guess" outcome.
+    result = da.build_correction_script(
+        **_base_kwargs(item_to_xml_map={500: 9001}, xml_rows={})
+    )
+    assert result.xml_count == 0
+    assert any("GCCOM_ITEMS_TO_BILL_XML row" in w for w in result.warnings)
 
 
 def test_build_correction_script_flags_missing_xml_row():
@@ -239,7 +433,7 @@ def test_build_correction_script_cancels_open_anomalies_for_touched_items():
     assert result.statement_count == 5  # 2 reading + 1 item + 1 xml + 1 anomalous
     assert "GCCOM_ANOMALOUS" in result.sql_text
     assert "WHERE ID_ITEM_TO_BILL = 500" in result.sql_text
-    assert "ANOMALOUS_STATUS = N'ESTAN00005'" in result.sql_text  # format_sql_literal prefixes string literals with N
+    assert "ANOMALOUS_STATUS = 'ESTAN00005'" in result.sql_text  # format_sql_literal - plain '...', no N prefix (varchar columns, see sql_format.py comment)
     assert "ESTAN00009" in result.sql_text and "ESTAN00001" in result.sql_text
 
 
@@ -269,6 +463,7 @@ def test_build_correction_script_multiple_items_each_get_own_anomalous_statement
         **_base_kwargs(
             anomaly_id_readings=[101],
             item_to_bill_map={101: [500, 501]},
+            item_to_xml_map={500: 500, 501: 501},
             xml_rows={
                 500: "<Root><initDate>2024-01-01</initDate></Root>",
                 501: "<Root><initDate>2024-01-01</initDate></Root>",
@@ -279,7 +474,7 @@ def test_build_correction_script_multiple_items_each_get_own_anomalous_statement
     assert result.anomalous_count == 2
     assert "WHERE ID_ITEM_TO_BILL = 500" in result.sql_text
     assert "WHERE ID_ITEM_TO_BILL = 501" in result.sql_text
-    assert result.sql_text.count("ANOMALOUS_STATUS = N'ESTAN00005'") == 2
+    assert result.sql_text.count("ANOMALOUS_STATUS = 'ESTAN00005'") == 2
 
 
 def test_build_correction_script_flags_xml_with_no_date_nodes():
@@ -321,7 +516,7 @@ def test_build_correction_script_orphan_ids_emit_delete_and_update():
     assert "DELETE FROM" in result.sql_text
     assert da._qualified(da.ADMIN_SCHEMA, da.READINGS_ITEMSTOBILL_TABLE) in result.sql_text
     assert "WHERE ID_READING IN (101)" in result.sql_text
-    assert "READ_STATUS = N'1000STSRED'" in result.sql_text
+    assert "READ_STATUS = '1000STSRED'" in result.sql_text
     assert "IND_USAGE_TO_CAL = 0" in result.sql_text
     assert "=== Part 6" in result.sql_text
 
@@ -359,6 +554,69 @@ def test_build_correction_script_orphan_ids_include_audit_columns_when_present()
     )
     assert result.sql_text.count("update_program") == 2
     assert "JIRA-1234" in result.sql_text
+
+
+def test_build_correction_script_orphan_ids_strip_matching_reading_node_from_xml():
+    # RJ, 2026-09-13: "we need to remove the section of the non cycle
+    # that we are removing ... but only for the idReading that we are
+    # deleting in reading item to bill" - end-to-end through
+    # build_correction_script (not just remove_reading_nodes in
+    # isolation): reading 101 is an orphan (Part 6), reading 102 is a
+    # normal anomalous reading staying linked - only 101's <reading>
+    # block should disappear from item 500's XML, 102's must survive.
+    result = da.build_correction_script(
+        **_base_kwargs(
+            orphan_usage_id_readings=[101],
+            xml_rows={
+                500: (
+                    "<Root><initDate>2024-01-01</initDate><readingFromDate>2024-01-01</readingFromDate>"
+                    "<reading><idReading>101</idReading></reading>"
+                    "<reading><idReading>102</idReading></reading>"
+                    "</Root>"
+                )
+            },
+        )
+    )
+    assert "removed <reading> node(s) for id_reading [101]" in result.sql_text
+    assert "<idReading>101</idReading>" not in result.sql_text
+    assert "<idReading>102</idReading>" in result.sql_text
+    assert result.warning_count == 0
+
+
+def test_build_correction_script_orphan_id_not_linked_to_this_xml_leaves_it_untouched():
+    # Reading 101 (orphan) maps to item 500 only - item 501's XML has no
+    # relationship to it at all, so it must come through completely
+    # unaffected by Part 6, same as any other unrelated item.
+    result = da.build_correction_script(
+        **_base_kwargs(
+            anomaly_id_readings=[101, 102],
+            item_to_bill_map={101: [500], 102: [501]},
+            item_to_xml_map={500: 500, 501: 501},
+            orphan_usage_id_readings=[101],
+            xml_rows={
+                500: (
+                    "<Root><initDate>2024-01-01</initDate>"
+                    "<reading><idReading>101</idReading></reading></Root>"
+                ),
+                501: (
+                    "<Root><initDate>2024-01-01</initDate>"
+                    "<reading><idReading>102</idReading></reading></Root>"
+                ),
+            },
+        )
+    )
+    assert "<idReading>101</idReading>" not in result.sql_text
+    assert "<idReading>102</idReading>" in result.sql_text
+    assert "removed <reading> node(s)" in result.sql_text
+    assert result.sql_text.count("removed <reading> node(s)") == 1  # only item 500's UPDATE mentions it
+
+
+def test_build_correction_script_warns_when_expected_reading_node_missing():
+    # _base_kwargs' default XML has no <reading> element at all - Part 6
+    # still expects to find (and strip) one for orphan reading 101, so
+    # this should surface as a warning rather than fail silently.
+    result = da.build_correction_script(**_base_kwargs(orphan_usage_id_readings=[101]))
+    assert any("No <reading> node found for id_reading [101]" in w for w in result.warnings)
 
 
 def test_build_case_explanation_mentions_orphan_readings_when_present():
@@ -403,7 +661,7 @@ def test_build_correction_script_advances_status_for_touched_items():
     assert result.item_status_count == 1
     assert result.statement_count == 5  # 2 reading + 1 item + 1 status + 1 xml
     assert "WHERE ID_ITEM_TO_BILL = 500" in result.sql_text
-    assert "STATUS = N'STTOBILL01'" in result.sql_text
+    assert "STATUS = 'STTOBILL01'" in result.sql_text
     assert "STTOBILL00" in result.sql_text  # the defensive WHERE ... AND STATUS = 'STTOBILL00'
 
 
@@ -582,14 +840,17 @@ def test_build_detect_all_anomalies_query_includes_all_cycle_column():
     assert "GCCOM_READINGS_ITEMSTOBILL" in sql
     assert "GCGT_RE_READING" in sql
     assert "GRI.ID_ITEM_TO_BILL = GA.ID_ITEM_TO_BILL" in sql
-    assert "GR.READING_TYPE NOT IN (N'TIPTL00003', N'TIPTL00005')" in sql
+    assert "GR.READING_TYPE NOT IN ('TIPTL00003', 'TIPTL00005')" in sql
     # A correlated EXISTS, not a JOIN in the main FROM chain - must not
-    # multiply anomaly rows by however many readings each item has (the
-    # reading table should appear exactly once, inside the EXISTS -
-    # BILLING_PERIOD_COUNT's own correlated subquery below is the ONLY
-    # other place GCGT_RE_READING is allowed to appear, hence 2 not 1).
+    # multiply anomaly rows by however many readings each item has. The
+    # substring "GCGT_RE_READING" now appears 4 times, not 2: once each in
+    # ALL_CYCLE's and BILLING_PERIOD_COUNT's own correlated subqueries
+    # (unchanged), plus twice more inside NON_CYCLE_READING_TYPES' own
+    # correlated subquery - once for the reading table itself, once for
+    # GCGT_RE_READING_TYPE (whose name also starts with "GCGT_RE_READING",
+    # so it matches this substring check too).
     assert "CASE WHEN EXISTS (" in sql
-    assert sql.count("GCGT_RE_READING") == 2
+    assert sql.count("GCGT_RE_READING") == 4
 
 
 def test_build_detect_all_anomalies_query_all_cycle_uses_custom_reading_types():
@@ -597,6 +858,20 @@ def test_build_detect_all_anomalies_query_all_cycle_uses_custom_reading_types():
     # just pins the literal values so a future change to that constant is
     # a deliberate, visible diff here rather than a silent behavior change.
     assert da.CYCLE_READING_TYPES == ("TIPTL00003", "TIPTL00005")
+
+
+def test_build_detect_all_anomalies_query_includes_non_cycle_reading_types_column():
+    # RJ, 2026-09-13: "if not all cycle, i need to know if it contains
+    # removal or not" - a comma-separated list of the ACTUAL non-cycle
+    # reading type name(s) (e.g. "Removal", "Reconnection"), not just the
+    # ALL_CYCLE yes/no.
+    sql = da.build_detect_all_anomalies_query()
+    assert "AS NON_CYCLE_READING_TYPES" in sql
+    assert "GCGT_RE_READING_TYPE" in sql
+    assert "STUFF((" in sql
+    assert "FOR XML PATH(''), TYPE" in sql
+    assert "GRI3.ID_ITEM_TO_BILL = GA.ID_ITEM_TO_BILL" in sql
+    assert "GR3.READING_TYPE NOT IN ('TIPTL00003', 'TIPTL00005')" in sql
 
 
 def test_build_detect_all_anomalies_query_includes_billing_period_count_column():
@@ -622,8 +897,8 @@ def test_build_cleanup_script_advances_status_and_cancels_anomaly():
     assert result.anomalous_count == 2
     assert result.statement_count == 3
     assert "WHERE ID_ITEM_TO_BILL = 500" in result.sql_text
-    assert "STATUS = N'STTOBILL01'" in result.sql_text
-    assert "ANOMALOUS_STATUS = N'ESTAN00005'" in result.sql_text
+    assert "STATUS = 'STTOBILL01'" in result.sql_text
+    assert "ANOMALOUS_STATUS = 'ESTAN00005'" in result.sql_text
     # Item 501 has no status-advance statement (not in item_status_ids)
     # but still gets an anomaly-cancel statement.
     assert result.sql_text.count("UPDATE OUC_ADMIN.GCCOM_ITEMS_TO_BILL\n") == 1

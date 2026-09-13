@@ -675,6 +675,20 @@ button { font-family: inherit; }
 .kpi-row-compact .kpi-value { font-size: 18px; }
 .kpi-row-compact .kpi-label { font-size: 10.5px; }
 
+/* DIFF DATES Anomaly Batch page's running-job progress bar (RJ,
+   2026-09-13: "show how many processed and how many pending and
+   percentage, with item per second processed"). Plain CSS width
+   transition, no library - same minimal-dependency spirit as the rest
+   of this app's UI. */
+.da-batch-progress-track {
+  width: 100%; height: 6px; border-radius: var(--radius-pill);
+  background: var(--card-border); overflow: hidden; margin: 6px 0 10px;
+}
+.da-batch-progress-fill {
+  height: 100%; background: var(--accent); border-radius: var(--radius-pill);
+  transition: width 0.4s ease; width: 0%;
+}
+
 .kpi-card-clickable {
   cursor: pointer;
   transition: border-color 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
@@ -912,6 +926,20 @@ button { font-family: inherit; }
   color: #047857;
 }
 
+/* Non-cycle reading type flag (RJ, 2026-09-13: "if not all cycle, i need
+   to know if it contains removal or not") - same orange family as
+   .row-multi-period, since both mean "this reading needs a second look",
+   just at different scopes (one reading here vs. a whole NISS there). */
+.badge-noncycle {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: #ffe4c2;
+  color: #92400e;
+}
+
 /* ---------------- Dark content theme ---------------- */
 :root[data-theme="dark"] {
   --content-bg: #14151f;
@@ -951,6 +979,7 @@ button { font-family: inherit; }
 :root[data-theme="dark"] .warning-banner code { background: rgba(255, 255, 255, 0.1); }
 :root[data-theme="dark"] .dropdown-menu { background: #1b1d29; }
 :root[data-theme="dark"] .badge { background: #052e22; color: #34d399; }
+:root[data-theme="dark"] .badge-noncycle { background: #4a2f0f; color: #fb923c; }
 :root[data-theme="dark"] .quality-flag { background: #1a1c29; }
 :root[data-theme="dark"] .quality-flag[data-kind="likely_key"] { border-color: #383f78; background: #1e2352; color: #a5b4fc; }
 :root[data-theme="dark"] .quality-flag[data-kind="constant"] { background: #21232f; color: var(--text-secondary); }

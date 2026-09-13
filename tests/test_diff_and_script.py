@@ -38,7 +38,7 @@ def test_format_sql_literal_numbers():
 
 
 def test_format_sql_literal_string_escapes_quotes():
-    assert format_sql_literal("O'Brien") == "N'O''Brien'"
+    assert format_sql_literal("O'Brien") == "'O''Brien'"
 
 
 def test_format_sql_literal_datetime():
@@ -217,7 +217,7 @@ def test_generate_update_script_basic():
     assert result.statement_count == 1
     assert result.warning_count == 0
     assert "UPDATE dbo.Users" in result.sql_text
-    assert "SET name = N'Alicia'" in result.sql_text
+    assert "SET name = 'Alicia'" in result.sql_text
     assert "WHERE id = 1" in result.sql_text
     assert "BEGIN TRANSACTION" in result.sql_text
     assert "ROLLBACK TRANSACTION" in result.sql_text
@@ -268,7 +268,7 @@ def test_rollback_script_restores_original_values():
     result = generate_rollback_script("dbo", "Users", changes)
 
     assert result.statement_count == 1
-    assert "SET name = N'Alice'" in result.sql_text     # restores the OLD value
+    assert "SET name = 'Alice'" in result.sql_text     # restores the OLD value
     assert "WHERE id = 1" in result.sql_text             # id itself never changed
     assert "Rollback for Row 1: restoring column(s): name" in result.sql_text
 
@@ -300,7 +300,7 @@ def test_forward_script_where_includes_original_value_of_changed_column():
     edited = [["1", "Alicia"]]
     changes = compute_row_changes(columns, original, edited, key_columns=["id"])
     result = generate_update_script("dbo", "Users", changes)
-    assert "WHERE id = 1 AND name = N'Alice';" in result.sql_text
+    assert "WHERE id = 1 AND name = 'Alice';" in result.sql_text
 
 
 def test_forward_script_where_original_value_guard_handles_null():
@@ -318,7 +318,7 @@ def test_forward_script_where_guards_every_changed_non_key_column():
     edited = [["1", "Alicia", "31"]]
     changes = compute_row_changes(columns, original, edited, key_columns=["id"])
     result = generate_update_script("dbo", "Users", changes)
-    assert "WHERE id = 1 AND name = N'Alice' AND age = 30;" in result.sql_text
+    assert "WHERE id = 1 AND name = 'Alice' AND age = 30;" in result.sql_text
 
 
 def test_forward_script_where_no_duplicate_when_changed_column_is_the_key():
@@ -344,7 +344,7 @@ def test_rollback_script_where_includes_value_forward_script_set():
     edited = [["1", "Alicia"]]
     changes = compute_row_changes(columns, original, edited, key_columns=["id"])
     result = generate_rollback_script("dbo", "Users", changes)
-    assert "WHERE id = 1 AND name = N'Alicia';" in result.sql_text
+    assert "WHERE id = 1 AND name = 'Alicia';" in result.sql_text
 
 
 def test_rollback_script_no_changes():
@@ -371,9 +371,9 @@ def test_forward_script_stamps_audit_columns_with_default_program():
     edited = [["1", "Alicia"]]
     changes = compute_row_changes(columns, original, edited, key_columns=["id"])
     result = generate_update_script("dbo", "Users", changes)
-    assert "update_program = N'JIRAXXXX'" in result.sql_text
+    assert "update_program = 'JIRAXXXX'" in result.sql_text
     assert "update_date = GETDATE()" in result.sql_text
-    assert "update_user = N'RMA'" in result.sql_text
+    assert "update_user = 'RMA'" in result.sql_text
     assert "-- Program/Jira: JIRAXXXX" in result.sql_text
 
 
@@ -383,7 +383,7 @@ def test_forward_script_uses_supplied_program_number():
     edited = [["1", "Alicia"]]
     changes = compute_row_changes(columns, original, edited, key_columns=["id"])
     result = generate_update_script("dbo", "Users", changes, program="JIRA-4821")
-    assert "update_program = N'JIRA-4821'" in result.sql_text
+    assert "update_program = 'JIRA-4821'" in result.sql_text
     assert "JIRAXXXX" not in result.sql_text
 
 
@@ -393,7 +393,7 @@ def test_forward_script_set_clause_shows_original_value_inline():
     edited = [["1", "Alicia"]]
     changes = compute_row_changes(columns, original, edited, key_columns=["id"])
     result = generate_update_script("dbo", "Users", changes)
-    assert "name = N'Alicia',  -- was: N'Alice'" in result.sql_text
+    assert "name = 'Alicia',  -- was: 'Alice'" in result.sql_text
 
 
 def test_rollback_script_set_clause_shows_value_it_replaces():
@@ -405,8 +405,8 @@ def test_rollback_script_set_clause_shows_value_it_replaces():
     edited = [["1", "Alicia"]]
     changes = compute_row_changes(columns, original, edited, key_columns=["id"])
     result = generate_rollback_script("dbo", "Users", changes, program="JIRA-4821")
-    assert "name = N'Alice',  -- was: N'Alicia'" in result.sql_text
-    assert "update_program = N'JIRA-4821'" in result.sql_text
+    assert "name = 'Alice',  -- was: 'Alicia'" in result.sql_text
+    assert "update_program = 'JIRA-4821'" in result.sql_text
     assert "update_date = GETDATE()" in result.sql_text
 
 
