@@ -15,11 +15,12 @@ browser tab - see that file's docstring.
 from __future__ import annotations
 
 import copy
+import decimal
 import os
 import re
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -34,9 +35,11 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import load_config, save_config, ConnectionConfig
 from app.core import ai_assist, diff_engine, schema_check, script_generator, sql_pretty, date_anomaly
 from app.core import hierarchy_analysis
+from app.core import bulk_checker
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
 from app.db import date_anomaly_history, internal_store, mssql, script_history
+from app.db import bulk_checker_db
 from web.auth import (
     WebUser, WebUserStore, ROLE_ADMIN, ROLE_EDITOR, ROLE_VIEWER, ROLES, ROLE_RANK,
     consume_first_run_notice, get_session_secret,
@@ -2377,6 +2380,388 @@ def hierarchy_analysis_export_xlsx(body: HierarchyExportXlsxRequest, user: str =
         content=buf.getvalue(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="hierarchy_analysis.xlsx"'},
+    )
+
+
+# ---------------------------------------------------------------------
+# Bulk Checker - ported from the standalone EWA Bulk Checker project
+# (2026-09-12, RJ's request - see app/core/bulk_checker.py's module
+# docstring for the full provenance note). Finds bulk accounts with no
+# generated lot/file yet for a billing cycle and drills into one
+# account's bills. Read-only against SQL Server (require_login only,
+# same as every other read-heavy page here); notes/saved searches are
+# local collaboration state any signed-in user can write, same as the
+# source project's own "not admin-only" design for those.
+# ---------------------------------------------------------------------
+def _bc_parse_date(label: str, raw: str) -> date:
+    try:
+        return date.fromisoformat((raw or "").strip())
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail=f"{label} must be a valid date (YYYY-MM-DD).")
+
+
+def _bc_parse_billing_period(raw) -> int:
+    try:
+        return int(str(raw).strip())
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Billing period must be a number.")
+
+
+@app.get("/api/bulk-checker/billing-periods")
+def bulk_checker_billing_periods(user: str = Depends(require_login)):
+    """Best-effort recent-periods picker - hidden client-side on failure,
+    same as build_pending_bulks_sql's other table/column guesses (see
+    bulk_checker.RECENT_BILLING_PERIODS_SQL's own comment). Typing a
+    billing period by hand always works regardless."""
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        return {"available": False, "columns": [], "rows": []}
+    try:
+        result = mssql.run_query(conn, bulk_checker.RECENT_BILLING_PERIODS_SQL)
+    except mssql.ConnectionError_:
+        return {"available": False, "columns": [], "rows": []}
+    return {
+        "available": True,
+        "columns": result.columns,
+        "rows": [[diff_engine.cell_display(v) for v in row] for row in result.rows],
+    }
+
+
+class BulkCheckerSearchRequest(BaseModel):
+    date_from: str
+    date_to: str
+    billing_period: str
+    status_filter: str = "all"
+
+
+@app.post("/api/bulk-checker/search")
+def bulk_checker_search(body: BulkCheckerSearchRequest, user: str = Depends(require_login)):
+    date_from = _bc_parse_date("From date", body.date_from)
+    date_to = _bc_parse_date("To date", body.date_to)
+    if date_to <= date_from:
+        raise HTTPException(status_code=400, detail="To date must be after the from date.")
+    billing_period = _bc_parse_billing_period(body.billing_period)
+    status_filter = body.status_filter if body.status_filter in bulk_checker.STATUS_FILTERS else "all"
+
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(
+            conn, bulk_checker.build_pending_bulks_sql(billing_period, date_from, date_to, status_filter)
+        )
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    file_number_idx = next((i for i, c in enumerate(result.columns) if c.lower() == "file_number"), None)
+    missing_bill_idx = next((i for i, c in enumerate(result.columns) if c.lower() == "has_missing_bill"), None)
+    in_invoicing_idx = next((i for i, c in enumerate(result.columns) if c.lower() == "has_bill_in_invoicing"), None)
+    pending_amount_idx = next((i for i, c in enumerate(result.columns) if c.lower() == "pending_amount"), None)
+
+    columns = result.columns + ["is_pending"]
+    display_rows: list[list[str]] = []
+    pending_count = 0
+    missing_bill_count = 0
+    in_invoicing_count = 0
+    outstanding_total = 0.0
+    for row in result.rows:
+        is_pending = file_number_idx is not None and row[file_number_idx] is None
+        if is_pending:
+            pending_count += 1
+        if missing_bill_idx is not None and row[missing_bill_idx]:
+            missing_bill_count += 1
+        if in_invoicing_idx is not None and row[in_invoicing_idx]:
+            in_invoicing_count += 1
+        if (
+            pending_amount_idx is not None
+            # SQL Server money/decimal columns come back from pytds as
+            # decimal.Decimal, not a plain float - the original isinstance
+            # check here only covered (int, float) and silently treated
+            # every real pending_amount as "not numeric", so Outstanding
+            # always summed to 0 (caught live-verifying against the tunnel
+            # DB, 2026-09-12: 242 rows with real non-zero pending_amount
+            # values still showed "Outstanding: 0").
+            and not is_pending
+            and isinstance(row[pending_amount_idx], (int, float, decimal.Decimal))
+            and row[pending_amount_idx] > 0
+        ):
+            outstanding_total += float(row[pending_amount_idx])
+        display_rows.append([diff_engine.cell_display(v) for v in row] + ["Yes" if is_pending else "No"])
+
+    # Snapshot into Trend history - only for a full, unfiltered search
+    # (see bulk_checker_db.record_search's docstring for why a narrower
+    # filter's row count isn't the period's true total). Best-effort:
+    # never breaks the search itself.
+    if status_filter == "all":
+        try:
+            bulk_checker_db.record_search(
+                config.internal_db_path,
+                billing_period=str(billing_period),
+                date_from=date_from.isoformat(),
+                date_to=date_to.isoformat(),
+                total=len(result.rows),
+                pending=pending_count,
+                missing_bill=missing_bill_count,
+                in_invoicing=in_invoicing_count,
+                outstanding_amount=outstanding_total,
+                searched_by=user,
+            )
+        except Exception:
+            pass
+
+    return {
+        "columns": columns,
+        "display_rows": display_rows,
+        "row_count": len(result.rows),
+        "pending_count": pending_count,
+        "missing_bill_count": missing_bill_count,
+        "in_invoicing_count": in_invoicing_count,
+        "outstanding_amount": outstanding_total,
+        "elapsed_ms": result.elapsed_ms,
+        "status_filter": status_filter,
+    }
+
+
+class BulkCheckerDetailRequest(BaseModel):
+    date_from: str
+    date_to: str
+    billing_period: str
+    account_number: str
+    bill_filter: str = "all"
+
+
+@app.post("/api/bulk-checker/detail")
+def bulk_checker_detail(body: BulkCheckerDetailRequest, user: str = Depends(require_login)):
+    date_from = _bc_parse_date("From date", body.date_from)
+    date_to = _bc_parse_date("To date", body.date_to)
+    billing_period = _bc_parse_billing_period(body.billing_period)
+    account_number = body.account_number.strip()
+    if not account_number:
+        raise HTTPException(status_code=400, detail="Account number is required.")
+    bill_filter = body.bill_filter if body.bill_filter in bulk_checker.BILL_FILTERS else "all"
+
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(
+            conn, bulk_checker.build_bill_detail_sql(billing_period, date_from, date_to, account_number, bill_filter)
+        )
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {
+        "columns": result.columns,
+        "display_rows": [[diff_engine.cell_display(v) for v in row] for row in result.rows],
+        "row_count": result.row_count,
+        "elapsed_ms": result.elapsed_ms,
+        "bill_filter": bill_filter,
+        "account_number": account_number,
+    }
+
+
+class BulkCheckerBulkDetailRequest(BaseModel):
+    date_from: str
+    date_to: str
+    billing_period: str
+    account_numbers: list[str]
+    bill_filter: str = "all"
+
+
+@app.post("/api/bulk-checker/bulk-detail")
+def bulk_checker_bulk_detail(body: BulkCheckerBulkDetailRequest, user: str = Depends(require_login)):
+    """Runs the same bill-detail query once per selected account and
+    concatenates the results, so several accounts can be exported
+    together instead of one at a time (same rationale as EWA's own
+    pending_bulk_detail route)."""
+    date_from = _bc_parse_date("From date", body.date_from)
+    date_to = _bc_parse_date("To date", body.date_to)
+    billing_period = _bc_parse_billing_period(body.billing_period)
+    account_numbers = list(dict.fromkeys(a.strip() for a in body.account_numbers if a.strip()))
+    if not account_numbers:
+        raise HTTPException(status_code=400, detail="Select at least one account.")
+    if len(account_numbers) > bulk_checker.MAX_BULK_ACCOUNTS:
+        raise HTTPException(
+            status_code=400, detail=f"Select at most {bulk_checker.MAX_BULK_ACCOUNTS} accounts at a time."
+        )
+    bill_filter = body.bill_filter if body.bill_filter in bulk_checker.BILL_FILTERS else "all"
+
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    columns: list[str] = []
+    display_rows: list[list[str]] = []
+    total_elapsed_ms = 0.0
+    try:
+        for account_number in account_numbers:
+            result = mssql.run_query(
+                conn, bulk_checker.build_bill_detail_sql(billing_period, date_from, date_to, account_number, bill_filter)
+            )
+            if not columns:
+                columns = result.columns
+            display_rows.extend([diff_engine.cell_display(v) for v in row] for row in result.rows)
+            total_elapsed_ms += result.elapsed_ms
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {
+        "columns": columns,
+        "display_rows": display_rows,
+        "row_count": len(display_rows),
+        "elapsed_ms": total_elapsed_ms,
+        "account_numbers": account_numbers,
+        "bill_filter": bill_filter,
+    }
+
+
+class BulkCheckerSaveSearchRequest(BaseModel):
+    name: str
+    date_from: str
+    date_to: str
+    billing_period: str
+
+
+@app.get("/api/bulk-checker/saved-searches")
+def bulk_checker_list_saved_searches(user: str = Depends(require_login)):
+    config = load_config()
+    return {
+        "searches": [
+            {
+                "id": s.id, "name": s.name, "date_from": s.date_from, "date_to": s.date_to,
+                "billing_period": s.billing_period, "created_by": s.created_by, "created_at_utc": s.created_at_utc,
+            }
+            for s in bulk_checker_db.list_saved_searches(config.internal_db_path)
+        ]
+    }
+
+
+@app.post("/api/bulk-checker/saved-searches")
+def bulk_checker_create_saved_search(body: BulkCheckerSaveSearchRequest, user: str = Depends(require_login)):
+    _bc_parse_date("From date", body.date_from)
+    _bc_parse_date("To date", body.date_to)
+    _bc_parse_billing_period(body.billing_period)
+    config = load_config()
+    try:
+        s = bulk_checker_db.save_search(
+            config.internal_db_path, body.name, body.date_from, body.date_to, body.billing_period, user
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "id": s.id, "name": s.name, "date_from": s.date_from, "date_to": s.date_to,
+        "billing_period": s.billing_period,
+    }
+
+
+@app.delete("/api/bulk-checker/saved-searches/{search_id}")
+def bulk_checker_delete_saved_search(search_id: int, user: str = Depends(require_login)):
+    config = load_config()
+    bulk_checker_db.delete_saved_search(config.internal_db_path, search_id)
+    return {"ok": True}
+
+
+@app.get("/api/bulk-checker/trend")
+def bulk_checker_trend(user: str = Depends(require_login)):
+    config = load_config()
+    entries = bulk_checker_db.list_search_history(config.internal_db_path)
+    return {
+        "entries": [
+            {
+                "billing_period": e.billing_period, "date_from": e.date_from, "date_to": e.date_to,
+                "total": e.total, "pending": e.pending, "missing_bill": e.missing_bill,
+                "in_invoicing": e.in_invoicing, "outstanding_amount": e.outstanding_amount,
+                "searched_by": e.searched_by, "searched_at_utc": e.searched_at_utc,
+            }
+            for e in entries
+        ]
+    }
+
+
+class BulkCheckerNoteRequest(BaseModel):
+    billing_period: str
+    status: str = bulk_checker_db.STATUS_OPEN
+    note: str = ""
+
+
+@app.get("/api/bulk-checker/notes")
+def bulk_checker_list_notes(billing_period: str, user: str = Depends(require_login)):
+    config = load_config()
+    items = bulk_checker_db.list_notes_for_period(config.internal_db_path, billing_period)
+    return {
+        "notes": {
+            n.account_number: {
+                "status": n.status, "note": n.note,
+                "updated_by": n.updated_by, "updated_at_utc": n.updated_at_utc,
+            }
+            for n in items
+        }
+    }
+
+
+@app.put("/api/bulk-checker/notes/{account_number}")
+def bulk_checker_upsert_note(account_number: str, body: BulkCheckerNoteRequest, user: str = Depends(require_login)):
+    config = load_config()
+    try:
+        n = bulk_checker_db.set_note(
+            config.internal_db_path, account_number, body.billing_period, body.status, body.note, user
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "account_number": n.account_number, "status": n.status, "note": n.note,
+        "updated_by": n.updated_by, "updated_at_utc": n.updated_at_utc,
+    }
+
+
+@app.delete("/api/bulk-checker/notes/{account_number}")
+def bulk_checker_delete_note(account_number: str, billing_period: str, user: str = Depends(require_login)):
+    config = load_config()
+    bulk_checker_db.clear_note(config.internal_db_path, account_number, billing_period)
+    return {"ok": True}
+
+
+class BulkCheckerExportXlsxRequest(BaseModel):
+    """Generic (not per-field) export request - Bulk Checker's two result
+    sets are wide (13 / 29 columns) and come straight from SQL Server
+    column names, unlike Hierarchy's small curated field set, so the
+    frontend just sends back whatever headers/rows are currently
+    visible/filtered on screen rather than this needing a fixed-shape
+    row model per column."""
+
+    filename: str = "bulk_checker.xlsx"
+    headers: list[str]
+    rows: list[list[str]]
+
+
+@app.post("/api/bulk-checker/export-xlsx")
+def bulk_checker_export_xlsx(body: BulkCheckerExportXlsxRequest, user: str = Depends(require_login)):
+    if not body.rows:
+        raise HTTPException(status_code=400, detail="No rows to export.")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Bulk Checker"
+    ws.append(body.headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for row in body.rows:
+        ws.append(row)
+    for col_cells in ws.columns:
+        length = max((len(str(c.value)) for c in col_cells if c.value is not None), default=8)
+        ws.column_dimensions[col_cells[0].column_letter].width = min(max(length + 2, 10), 40)
+    ws.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    filename = body.filename if body.filename.endswith(".xlsx") else f"{body.filename}.xlsx"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

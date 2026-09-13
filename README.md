@@ -715,6 +715,9 @@ app/core/snapshot_diff.py    two independent snapshot exports -> added/removed/c
 app/core/schema_check.py     query/key columns vs. a live table's actual columns (Validate Target Schema)
 app/core/ai_assist.py        Gemini API calls (suggest / optimize / explain / NL-WHERE builder / script review / test key)
 app/core/stats.py            per-column summary stats + histogram bucketing + KPI rollup + Pearson correlation for the Dashboard
+app/core/hierarchy_analysis.py system-wide scan for pending PRIMARY meter hierarchies + drill-down + reading-history popup
+app/core/bulk_checker.py     Bulk Checker: pending bulk-account search + bill drill-down queries - ported from the standalone EWA Bulk Checker project (see "Bulk Checker" below)
+app/db/bulk_checker_db.py    Bulk Checker's local collaboration state: per-account notes, shared saved searches, Trend search history (all in the shared internal SQLite db)
 app/ui/*                     Tkinter desktop UI (legacy) - main window, Config dialog, Dashboard window, theme
 web/server.py                 FastAPI app: login/session, query/format, key lookup, grid diff, script generation, history routes - all built on app/core + app/db, unchanged
 web/auth.py                   web login accounts (bcrypt) - separate from the DB connection, see "Web login accounts" above for why
@@ -1024,6 +1027,91 @@ use your own key:
    richer prompts (particularly Single NISS's enriched case context) started getting cut off
    mid-sentence. If a response still looks truncated, that cap — not a display/layout bug — is
    the first thing to check.
+
+## Bulk Checker
+
+Added 2026-09-12, ported from a standalone project (EWA Bulk Checker) into ScriptGen as its own
+sidebar page, per RJ's request - "add it as new menu, implementation is the same". Finds bulk
+accounts (`GCCOM_ACCOUNT_BUNCHER` groupings) that don't have a generated lot/file yet for a billing
+cycle, and drills into one bulk account to see every underlying bill for that cycle. Uses the same
+SQL Server connection as the rest of the app - no separate login, no separate connection config.
+
+Two queries, both RJ's own analyst-supplied SQL from the source project, copied over unchanged in
+shape/logic (see `app/core/bulk_checker.py`'s module docstring for the one real technical
+difference: the source project used pytds's own `%s` bind-parameter substitution, this port inlines
+each value via `sql_format.format_sql_literal` instead, matching every other `app/core` module's
+convention, since `app.db.mssql.run_query` doesn't take query parameters):
+
+- **Pending bulks search** (`build_pending_bulks_sql`) - one row per bulk account for a billing
+  cycle (date range + billing period), with a status filter: **All**, **Pending** (no lot/file
+  generated yet), **Generated** (a lot/file already exists), **Missing bill** (at least one
+  contracted service under the bulk has no bill at all this period), **In invoicing** (a bill
+  exists but hasn't been picked up into a sent lot yet).
+- **Bill detail drill-down** (`build_bill_detail_sql`) - every bill under one bulk account for the
+  same cycle, with its own filter: **All**, **Pending** (bill exists, not yet in a sent lot),
+  **Missing** (no bill generated at all).
+
+The page (Search card, Results grid with a status filter/search box/CSV+Excel export, per-account
+Notes via a 📝 button, and the Bills drill-down card) lives in `web/static/index.html` /
+`web/static/app.js` under `#page-bulkchecker` / the `bc*` functions, reusing the app's existing
+`.card`/`.data-grid`/`.kpi-row`/`.hier-reading-modal-overlay` CSS rather than the source project's
+own separate stylesheet. Notes (`STATUS_OPEN`/`being_handled`/`resolved` + free text per account per
+billing period, any signed-in user can set) live in `app/db/bulk_checker_db.py`, a new set of tables
+in ScriptGen's one shared internal SQLite db (same file every other `app/db` module writes to - see
+that module's own docstring for why this project doesn't introduce three more standalone `.db`
+files the way the source project did).
+
+Live-verified against the real tunnel DB (2026-09-12): 242 real bulk accounts, 64 real bills for
+one drilled-down account, notes persistence, and both export paths all confirmed working. That pass
+also caught a real bug - the Outstanding KPI always summed to 0 because SQL Server money/decimal
+columns come back from pytds as `decimal.Decimal`, and the original `isinstance(..., (int, float))`
+check silently excluded every real value. Fixed in `web/server.py` (`bulk_checker_search`) by adding
+`decimal.Decimal` to that isinstance check - written but not yet re-verified live pending a restart.
+
+**Round 2 (2026-09-12, same day, before the restart above)** - RJ: "in the bulk bills drill down,
+add a link again to open readings same as the hierarchy checker, also add filters and a quick
+summary of the status... make the design better, in the billing period dropdown display id and
+description only, in the date only month and year should be pickable as its always on first":
+- **Readings link on each bill row.** `build_bill_detail_sql` now also selects `ss.ID_SECTOR_SUPPLY`
+  so the Bills drill-down table can offer the exact same reading-history popup Hierarchy Analysis
+  uses - same `/api/hierarchy-analysis/reading-history` route, same `hierRenderReadingModal`/
+  `#hier-reading-modal-overlay`, not a duplicate. The column itself is hidden from the table/export
+  (`BC_DETAIL_HIDDEN_COLUMNS`) since it's only there to key the popup lookup.
+- **Status summary + click-to-filter, replacing the old dropdown.** The Bills drill-down now always
+  fetches the full unfiltered bill list once (`bill_filter: "all"`), then computes Done (has a bill
+  AND a file number) / Pending (has a bill, no file number yet) / Missing (no bill at all) counts
+  and lets you click a summary card to filter the table to that status - click again to clear
+  (`bcRenderDetailKpiRow`/`bcClassifyDetailRow`, same `.kpi-card-clickable`/`.is-active` pattern
+  Detect All's "Needs status advance" card already used). The old `<select>` filter (which re-fetched
+  from the server on every change) is gone.
+- **Billing-period dropdown** now shows only `{id} — {DESCRIPTION}` (falling back to `PERIOD_NAME`
+  if description is blank) instead of the first two arbitrary columns, and clicking a period also
+  auto-fills the date pickers from that period's own `INITIAL_DATE`.
+- **Date pickers are month-only** (`<input type="month">`, labeled "Cycle start/end month") since a
+  billing cycle always starts on the 1st - `bcMonthToDate`/`bcDateToMonth`/`bcNextMonth` convert
+  between the `"YYYY-MM"` picker value and the full `"YYYY-MM-01"` ISO date the backend expects.
+
+Not yet live-verified - written this round, awaiting the same restart as the Outstanding-KPI fix
+above (all static `index.html`/`app.js`/`styles.css` changes take effect on refresh; the
+`ID_SECTOR_SUPPLY` addition to `app/core/bulk_checker.py` needs the process restart).
+
+**Backend routes already built but with no frontend UI yet** (first-round scoping decision - the
+Search/Detail/Notes/Export core above is what's wired into the page; these were left for a
+follow-up round rather than risk shipping a sprawling, unverified feature in one pass):
+- `POST /api/bulk-checker/bulk-detail` - the same bill-detail query run once per selected account
+  and concatenated, so several accounts can be exported together (`bulk_checker.MAX_BULK_ACCOUNTS`
+  = 50 at a time).
+- `GET/POST/DELETE /api/bulk-checker/saved-searches` - shared, named cycles (dates + billing
+  period) any teammate can save and re-run.
+- `GET /api/bulk-checker/trend` - per-billing-period search history for a Trend chart. Snapshotted
+  automatically on every full (`status_filter=all`) search - see `bulk_checker_db.record_search`'s
+  docstring for why this is a history of searches actually run, not a live cross-period aggregate.
+
+**Not yet live-verified** against the tunnel DB - the query text was ported and unit-tested
+(`tests/test_bulk_checker.py`, SQL-text-only, no DB) but needs a real run through the UI once the
+local server is restarted (Python changes - `web/server.py`, `app/core/bulk_checker.py`,
+`app/db/bulk_checker_db.py`, `web/menu_access.py` - need an actual process restart to take effect;
+the static `index.html`/`app.js` changes don't).
 
 ## Performance notes
 

@@ -50,7 +50,7 @@ from web.auth import ROLES, ROLE_ADMIN
 # these ARE the ids used everywhere (server config, the admin panel, and
 # the frontend's own nav-item lookup), so there's exactly one place
 # (here) that has to change if a page is ever added/renamed/removed.
-MENU_IDS = ("workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "tools", "settings")
+MENU_IDS = ("workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "bulkchecker", "tools", "settings")
 
 MENU_LABELS = {
     "workspace": "Workspace",
@@ -60,6 +60,7 @@ MENU_LABELS = {
     "ai": "AI Assist",
     "dateanomaly": "DIFF DATES Anomaly",
     "hierarchy": "Hierarchy Analysis",
+    "bulkchecker": "Bulk Checker",
     "tools": "Tools",
     "settings": "Settings",
 }

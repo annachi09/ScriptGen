@@ -84,6 +84,9 @@
         <button class="nav-item" data-page="hierarchy" title="Hierarchy Analysis">
           <span class="nav-icon">🗂️</span><span class="nav-label">Hierarchy Analysis</span>
         </button>
+        <button class="nav-item" data-page="bulkchecker" title="Bulk Checker">
+          <span class="nav-icon">📋</span><span class="nav-label">Bulk Checker</span>
+        </button>
         <button class="nav-item" data-page="tools" title="Tools">
           <span class="nav-icon">🧰</span><span class="nav-label">Tools</span>
         </button>
@@ -773,6 +776,115 @@
                 <tbody></tbody>
               </table>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Bulk Checker page ===== -->
+      <section class="page" id="page-bulkchecker">
+        <header class="page-header">
+          <h1>Bulk Checker</h1>
+          <p class="page-subtitle">Find bulk accounts that don't have a generated file yet for a billing cycle, then drill into an account to see its bills. Ported from the standalone EWA Bulk Checker project (2026-09-12) - same queries, same logic.</p>
+        </header>
+
+        <div class="card">
+          <div class="card-header"><h2>Search</h2></div>
+          <div class="key-panel-row">
+            <label class="field-label">Cycle start month</label>
+            <input id="bc-date-from" class="text-input text-input-sm" type="month" />
+            <label class="field-label">Cycle end month</label>
+            <input id="bc-date-to" class="text-input text-input-sm" type="month" />
+            <span class="field-hint">Billing cycles always start on the 1st, so just pick the month.</span>
+            <label class="field-label">Billing period</label>
+            <input id="bc-billing-period" class="text-input text-input-sm" type="text" inputmode="numeric" placeholder="e.g. 10000000235" style="width:160px;" />
+            <div class="dropdown" id="bc-period-dropdown">
+              <button type="button" class="btn btn-pill-sm" id="bc-period-btn" hidden>Recent periods ▾</button>
+              <div class="dropdown-menu" id="bc-period-menu" hidden></div>
+            </div>
+            <button type="button" class="btn btn-primary" id="bc-search-btn">▶ Search</button>
+          </div>
+          <div class="editor-status" id="bc-search-status">No search run yet.</div>
+        </div>
+
+        <div class="card" id="bc-results-card" hidden>
+          <div class="card-header">
+            <h2>Results</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="bc-export-csv-btn">⬇ CSV</button>
+              <button type="button" class="btn btn-pill" id="bc-export-xlsx-btn">⬇ Excel</button>
+            </div>
+          </div>
+          <div class="kpi-row" id="bc-kpi-row"></div>
+          <div class="key-panel-row">
+            <label class="field-label">Status</label>
+            <select id="bc-status-filter" class="text-input text-input-sm">
+              <option value="all">All</option>
+              <option value="pending">Pending only</option>
+              <option value="generated">Generated only</option>
+              <option value="missing_bill">Missing bill</option>
+              <option value="in_invoicing">In invoicing</option>
+            </select>
+            <label class="field-label">Search</label>
+            <input id="bc-search-box" class="text-input text-input-sm" placeholder="Search all columns…" style="width:220px;" />
+          </div>
+          <div class="hint-text" id="bc-results-hint">Click a row to see its bills. Click 📝 to flag an account with a note for teammates. <span class="row-not-billed-swatch">■</span> = no file generated yet.</div>
+          <div class="grid-wrap">
+            <table class="data-grid" id="bc-results-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" id="bc-detail-card" hidden>
+          <div class="card-header">
+            <h2>Bills for <span id="bc-detail-account-name">—</span></h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="bc-detail-export-csv-btn">⬇ CSV</button>
+              <button type="button" class="btn btn-pill" id="bc-detail-export-xlsx-btn">⬇ Excel</button>
+              <button type="button" class="btn btn-pill-sm" id="bc-detail-close-btn">✕ Close</button>
+            </div>
+          </div>
+          <p class="hint-text">Click a summary card below to filter the table to that status - click it again to clear. <span class="row-not-billed-swatch">■</span> = missing bill. Click 📖 Readings on a row to see that supply's full reading history, same popup as Hierarchy Analysis.</p>
+          <div class="kpi-row kpi-row-compact" id="bc-detail-kpi-row"></div>
+          <div class="key-panel-row">
+            <label class="field-label">Search</label>
+            <input id="bc-detail-search-box" class="text-input text-input-sm" placeholder="Search all columns…" style="width:220px;" />
+          </div>
+          <div class="grid-wrap">
+            <table class="data-grid" id="bc-detail-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="editor-status" id="bc-detail-status"></div>
+        </div>
+
+        <!-- Note modal - reuses the same generic fixed-overlay modal
+             pattern as the Hierarchy Analysis reading-history popup
+             (see styles.css: those classes are purely presentational,
+             not actually hierarchy-specific). -->
+        <div class="hier-reading-modal-overlay" id="bc-note-modal-overlay" hidden>
+          <div class="hier-reading-modal" style="width:min(480px,100%);">
+            <div class="card-header">
+              <h2>Note for <span id="bc-note-modal-account">—</span></h2>
+              <div class="card-header-actions">
+                <button type="button" class="btn btn-pill-sm" id="bc-note-modal-close-btn">✕ Close</button>
+              </div>
+            </div>
+            <label class="field-label">Status</label>
+            <select id="bc-note-modal-status" class="text-input" style="margin-bottom:10px;">
+              <option value="open">Open</option>
+              <option value="being_handled">Being handled</option>
+              <option value="resolved">Resolved</option>
+            </select>
+            <label class="field-label">Note</label>
+            <textarea id="bc-note-modal-text" class="text-input" rows="4" maxlength="2000" style="width:100%;resize:vertical;" placeholder="Optional note for teammates…"></textarea>
+            <div class="generate-row" style="margin-top:12px;">
+              <button type="button" class="btn btn-ghost" id="bc-note-modal-clear-btn">Clear note</button>
+              <button type="button" class="btn btn-primary" id="bc-note-modal-save-btn">Save</button>
+            </div>
+            <div class="editor-status" id="bc-note-modal-status-msg"></div>
           </div>
         </div>
       </section>

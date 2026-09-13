@@ -233,6 +233,7 @@ $$(".nav-item[data-page]").forEach((btn) => {
     if (page === "tools") loadToolsPage();
     if (page === "settings") loadSettingsPage();
     if (page === "dateanomaly") { daBatchRefreshRecentRuns(); daHistoryRefresh(); }
+    if (page === "bulkchecker") bcOnPageShown();
   });
 });
 
@@ -3332,6 +3333,577 @@ async function loadServerInfo() {
     if (sidebarEl) sidebarEl.textContent = text;
   } catch (_) { /* not fatal - just no diagnostic line shown */ }
 }
+
+// ---------------- Bulk Checker ----------------
+// Ported from the standalone EWA Bulk Checker project (2026-09-12, RJ's
+// request - see app/core/bulk_checker.py's module docstring for the full
+// provenance note). Finds bulk accounts with no generated file yet for a
+// billing cycle and drills into one account's bills. This first round
+// covers search/filter/drill-down/notes/export - saved searches, Trend
+// history, and multi-account bulk export already have working backend
+// routes (see web/server.py) but no frontend UI yet; a follow-up round
+// can wire those in once this core is live-verified.
+const bcState = {
+  columns: [], rows: [],          // raw values from the last search (rows[i][j] aligns with columns[j])
+  statusFilter: "all",
+  search: "",
+  billingPeriod: "",
+  notes: {},                      // account_number -> {status, note, updated_by, updated_at_utc}
+  noteModalAccount: null,
+
+  detailColumns: [], detailRows: [],
+  detailAccount: null,
+  detailFilter: "all",
+  detailSearch: "",
+
+  billingPeriodsLoaded: false,
+};
+
+const BC_NOTE_STATUS_LABELS = { open: "Open", being_handled: "Being handled", resolved: "Resolved" };
+function bcNoteIcon(status) {
+  if (status === "being_handled") return "🛠";
+  if (status === "resolved") return "✅";
+  return "📝";
+}
+
+// Case-insensitive column lookup - same reasoning as the app's existing
+// _da_col helper (app/ui/main_window.py, web/server.py): SQL Server
+// column names come back however the driver/query defines them.
+function bcColIdx(columns, name) {
+  return columns.findIndex((c) => c.toLowerCase() === name.toLowerCase());
+}
+function bcCell(columns, row, name) {
+  const idx = bcColIdx(columns, name);
+  return idx === -1 ? "" : row[idx];
+}
+
+const BC_LABEL_OVERRIDES = {
+  ACCOUNT_NUMBER: "Bulk Account", NEXT_GROUP_DATE: "Next Group Date", IND_GROUP_BILLS: "Group Bills",
+  send_date: "Lot Send Date", total_reg: "Total Reg", total_amount: "Total Amount",
+  pending_amount: "Pending Amount", process_date: "Process Date", file_number: "File Number",
+  num_account: "# Accounts in Lot", is_pending: "Status", BULK_ACCOUNT: "Bulk Account",
+  SUB_ACCOUNT: "Sub Account", FILE_NUMBER: "File Number", send_date_RV: "Lot Send Date",
+  process_date_RV: "Lot Process Date", niss: "NISS", id_bill: "ID Bill", num_services: "# Services",
+};
+function bcPrettifyLabel(name) {
+  if (BC_LABEL_OVERRIDES[name]) return BC_LABEL_OVERRIDES[name];
+  return name.replace(/_/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2")
+    .split(" ").filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+const BC_ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T/;
+function bcFormatCell(value) {
+  if (value === null || value === undefined || value === "") return "";
+  if (typeof value === "string" && BC_ISO_DATETIME_RE.test(value)) return value.slice(0, 10);
+  return String(value);
+}
+
+// Columns hidden from the main results grid - shown instead as the row's
+// highlight color (is_pending -> red "not billed" row) or a small badge
+// (has_missing_bill / has_bill_in_invoicing), same idea as EWA's own
+// PENDING_HIDDEN_COLUMNS.
+const BC_RESULTS_HIDDEN_COLUMNS = new Set(["ID_PAYMENT_FORM_BUNCHER", "has_missing_bill", "has_bill_in_invoicing", "is_pending"]);
+
+// Billing cycles always start on the 1st (confirmed live: every
+// GCCOM_BILLING_PERIOD row's INITIAL_DATE/END_DATE spans exactly one
+// calendar month) - so the date pickers only need a month, not a full
+// date. bcMonthToDate turns the <input type="month"> value ("YYYY-MM")
+// into the actual "YYYY-MM-01" ISO date the backend expects; the reverse
+// (bcDateToMonth) is used when auto-filling from the billing-period
+// picker below.
+function bcMonthToDate(monthStr) {
+  return monthStr ? `${monthStr}-01` : "";
+}
+function bcDateToMonth(dateStr) {
+  return dateStr ? dateStr.slice(0, 7) : "";
+}
+// One calendar month after the given "YYYY-MM" string.
+function bcNextMonth(monthStr) {
+  const [y, m] = monthStr.split("-").map(Number);
+  const d = new Date(y, m, 1); // m is already 1-indexed-next since Date's month arg is 0-indexed
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function bcOnPageShown() {
+  if (!bcState.billingPeriodsLoaded) {
+    bcLoadBillingPeriods();
+    bcState.billingPeriodsLoaded = true;
+  }
+  if (!$("#bc-date-from").value && !$("#bc-date-to").value) {
+    const now = new Date();
+    const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    $("#bc-date-from").value = thisMonth;
+    $("#bc-date-to").value = bcNextMonth(thisMonth);
+  }
+}
+
+// account_number -> billing period info ({initialDate}), keyed for the
+// auto-fill-dates-on-click behavior below.
+const bcPeriodsById = {};
+
+async function bcLoadBillingPeriods() {
+  try {
+    const data = await api("/api/bulk-checker/billing-periods");
+    if (!data.available || !data.rows.length) return;
+    const idIdx = bcColIdx(data.columns, "ID_BILLING_PERIOD");
+    // Prefer DESCRIPTION; PERIOD_NAME is the same live human label
+    // (e.g. "9-September 2026") as a fallback if DESCRIPTION is blank.
+    const descIdx = bcColIdx(data.columns, "DESCRIPTION");
+    const nameIdx = bcColIdx(data.columns, "PERIOD_NAME");
+    const initialDateIdx = bcColIdx(data.columns, "INITIAL_DATE");
+    if (idIdx === -1) return;
+    const menu = $("#bc-period-menu");
+    menu.innerHTML = "";
+    data.rows.forEach((row) => {
+      const id = String(row[idIdx]);
+      const description = (descIdx !== -1 && row[descIdx]) || (nameIdx !== -1 && row[nameIdx]) || "";
+      if (initialDateIdx !== -1 && row[initialDateIdx]) {
+        bcPeriodsById[id] = { initialDate: String(row[initialDateIdx]) };
+      }
+      const item = document.createElement("div");
+      item.className = "dropdown-item";
+      item.textContent = description ? `${id} — ${description}` : id;
+      item.addEventListener("click", () => {
+        $("#bc-billing-period").value = id;
+        const info = bcPeriodsById[id];
+        if (info) {
+          const fromMonth = bcDateToMonth(info.initialDate);
+          $("#bc-date-from").value = fromMonth;
+          $("#bc-date-to").value = bcNextMonth(fromMonth);
+        }
+        menu.hidden = true;
+      });
+      menu.appendChild(item);
+    });
+    $("#bc-period-btn").hidden = false;
+  } catch (_) {
+    // Best-effort convenience only - typing the ID by hand always works.
+  }
+}
+
+$("#bc-period-btn").addEventListener("click", () => {
+  $("#bc-period-menu").hidden = !$("#bc-period-menu").hidden;
+});
+document.addEventListener("click", (e) => {
+  if (!$("#bc-period-dropdown").contains(e.target)) $("#bc-period-menu").hidden = true;
+});
+
+// ---------------- Search ----------------
+$("#bc-search-btn").addEventListener("click", bcRunSearch);
+$("#bc-status-filter").addEventListener("change", () => {
+  bcState.statusFilter = $("#bc-status-filter").value;
+  if (bcState.columns.length) bcRunSearch();
+});
+$("#bc-search-box").addEventListener("input", () => {
+  bcState.search = $("#bc-search-box").value;
+  bcRenderResultsTable();
+});
+
+async function bcRunSearch() {
+  const date_from = bcMonthToDate($("#bc-date-from").value);
+  const date_to = bcMonthToDate($("#bc-date-to").value);
+  const billing_period = $("#bc-billing-period").value.trim();
+  if (!date_from || !date_to || !billing_period) {
+    showToast("Fill in both dates and the billing period.", true);
+    return;
+  }
+  const btn = $("#bc-search-btn");
+  btn.disabled = true;
+  $("#bc-search-status").textContent = "Searching…";
+  try {
+    const result = await api("/api/bulk-checker/search", {
+      method: "POST",
+      body: { date_from, date_to, billing_period, status_filter: bcState.statusFilter },
+    });
+    bcState.columns = result.columns;
+    bcState.rows = result.display_rows;
+    bcState.billingPeriod = billing_period;
+    $("#bc-search-status").textContent =
+      `${result.row_count} row(s) in ${result.elapsed_ms.toFixed(0)} ms — ${result.pending_count} pending, ${result.missing_bill_count} missing bill, ${result.in_invoicing_count} in invoicing.`;
+    $("#bc-results-card").hidden = false;
+    $("#bc-detail-card").hidden = true;
+    bcRenderKpiRow(result);
+    await bcLoadNotesForPeriod(billing_period);
+    bcRenderResultsTable();
+  } catch (err) {
+    $("#bc-search-status").textContent = "Search failed.";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function bcRenderKpiRow(result) {
+  const cards = [
+    ["rows", "📄", "Total", result.row_count],
+    ["pending", "🕓", "Pending (no file)", result.pending_count],
+    ["missing", "⚠️", "Missing bill", result.missing_bill_count],
+    ["invoicing", "🧾", "In invoicing", result.in_invoicing_count],
+    ["outstanding", "💰", "Outstanding", result.outstanding_amount.toLocaleString(undefined, { maximumFractionDigits: 2 })],
+  ];
+  $("#bc-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
+    `<div class="kpi-card" data-kpi="${kpi}">
+      <div class="kpi-value">${escapeHtml(String(value))}</div>
+      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
+    </div>`
+  ).join("");
+}
+
+function bcVisibleColumnIdx() {
+  return bcState.columns.map((c, i) => i).filter((i) => !BC_RESULTS_HIDDEN_COLUMNS.has(bcState.columns[i]));
+}
+
+function bcVisibleResultRows() {
+  const search = bcState.search.trim().toLowerCase();
+  const visibleIdx = bcVisibleColumnIdx();
+  if (!search) return bcState.rows;
+  return bcState.rows.filter((row) => visibleIdx.some((i) => String(row[i]).toLowerCase().includes(search)));
+}
+
+function bcRenderResultsTable() {
+  const visibleIdx = bcVisibleColumnIdx();
+  const thead = $("#bc-results-table thead tr");
+  thead.innerHTML = visibleIdx.map((i) => `<th>${escapeHtml(bcPrettifyLabel(bcState.columns[i]))}</th>`).join("")
+    + `<th>Missing/Invoicing</th><th>Notes</th><th></th>`;
+
+  const accountIdx = bcColIdx(bcState.columns, "ACCOUNT_NUMBER");
+  const isPendingIdx = bcColIdx(bcState.columns, "is_pending");
+  const missingIdx = bcColIdx(bcState.columns, "has_missing_bill");
+  const invoicingIdx = bcColIdx(bcState.columns, "has_bill_in_invoicing");
+
+  const tbody = $("#bc-results-table tbody");
+  tbody.innerHTML = "";
+  const visibleRows = bcVisibleResultRows();
+  $("#bc-results-hint").nextSibling; // no-op, keeps diff minimal if hint gains an id later
+  visibleRows.forEach((row) => {
+    const tr = document.createElement("tr");
+    const isPending = isPendingIdx !== -1 && row[isPendingIdx] === "Yes";
+    tr.className = isPending ? "row-not-billed" : "";
+    tr.innerHTML = visibleIdx.map((i) => `<td>${escapeHtml(bcFormatCell(row[i]))}</td>`).join("");
+
+    const flagsTd = document.createElement("td");
+    const flags = [];
+    if (missingIdx !== -1 && (row[missingIdx] === "1" || row[missingIdx] === "Yes" || row[missingIdx] === "true"))
+      flags.push('<span class="hint-text">⚠️ missing bill</span>');
+    if (invoicingIdx !== -1 && (row[invoicingIdx] === "1" || row[invoicingIdx] === "Yes" || row[invoicingIdx] === "true"))
+      flags.push('<span class="hint-text">🧾 in invoicing</span>');
+    flagsTd.innerHTML = flags.join("<br/>");
+    tr.appendChild(flagsTd);
+
+    const accountNumber = accountIdx !== -1 ? String(row[accountIdx]) : "";
+    const noteTd = document.createElement("td");
+    const note = bcState.notes[accountNumber];
+    const noteBtn = document.createElement("button");
+    noteBtn.type = "button";
+    noteBtn.className = "btn btn-pill-sm";
+    noteBtn.title = note ? `${BC_NOTE_STATUS_LABELS[note.status] || note.status}${note.note ? ": " + note.note : ""}` : "Add a note";
+    noteBtn.textContent = note ? bcNoteIcon(note.status) : "📝";
+    noteBtn.addEventListener("click", (e) => { e.stopPropagation(); bcOpenNoteModal(accountNumber); });
+    noteTd.appendChild(noteBtn);
+    tr.appendChild(noteTd);
+
+    const billsTd = document.createElement("td");
+    const billsBtn = document.createElement("button");
+    billsBtn.type = "button";
+    billsBtn.className = "btn btn-pill-sm";
+    billsBtn.textContent = "Bills →";
+    billsBtn.addEventListener("click", (e) => { e.stopPropagation(); bcOpenDetail(accountNumber); });
+    billsTd.appendChild(billsBtn);
+    tr.appendChild(billsTd);
+
+    tr.addEventListener("click", () => { if (accountNumber) bcOpenDetail(accountNumber); });
+    tbody.appendChild(tr);
+  });
+}
+
+// ---------------- Notes ----------------
+async function bcLoadNotesForPeriod(billingPeriod) {
+  try {
+    const data = await api(`/api/bulk-checker/notes?billing_period=${encodeURIComponent(billingPeriod)}`);
+    bcState.notes = data.notes || {};
+  } catch (_) {
+    bcState.notes = {};
+  }
+}
+
+function bcOpenNoteModal(accountNumber) {
+  bcState.noteModalAccount = accountNumber;
+  const existing = bcState.notes[accountNumber];
+  $("#bc-note-modal-account").textContent = accountNumber;
+  $("#bc-note-modal-status").value = existing ? existing.status : "open";
+  $("#bc-note-modal-text").value = existing ? existing.note : "";
+  $("#bc-note-modal-status-msg").textContent = "";
+  $("#bc-note-modal-overlay").hidden = false;
+}
+
+function bcCloseNoteModal() { $("#bc-note-modal-overlay").hidden = true; }
+$("#bc-note-modal-close-btn").addEventListener("click", bcCloseNoteModal);
+$("#bc-note-modal-overlay").addEventListener("click", (e) => { if (e.target.id === "bc-note-modal-overlay") bcCloseNoteModal(); });
+
+$("#bc-note-modal-save-btn").addEventListener("click", async () => {
+  const accountNumber = bcState.noteModalAccount;
+  if (!accountNumber) return;
+  try {
+    await api(`/api/bulk-checker/notes/${encodeURIComponent(accountNumber)}`, {
+      method: "PUT",
+      body: { billing_period: bcState.billingPeriod, status: $("#bc-note-modal-status").value, note: $("#bc-note-modal-text").value },
+    });
+    await bcLoadNotesForPeriod(bcState.billingPeriod);
+    bcRenderResultsTable();
+    showToast("Note saved.");
+    bcCloseNoteModal();
+  } catch (err) {
+    $("#bc-note-modal-status-msg").textContent = err.message;
+  }
+});
+
+$("#bc-note-modal-clear-btn").addEventListener("click", async () => {
+  const accountNumber = bcState.noteModalAccount;
+  if (!accountNumber) return;
+  try {
+    await api(`/api/bulk-checker/notes/${encodeURIComponent(accountNumber)}?billing_period=${encodeURIComponent(bcState.billingPeriod)}`, { method: "DELETE" });
+    await bcLoadNotesForPeriod(bcState.billingPeriod);
+    bcRenderResultsTable();
+    showToast("Note cleared.");
+    bcCloseNoteModal();
+  } catch (err) {
+    $("#bc-note-modal-status-msg").textContent = err.message;
+  }
+});
+
+// ---------------- Detail drill-down ----------------
+// ID_SECTOR_SUPPLY is fetched (see app/core/bulk_checker.py) only so the
+// Readings button below can look up that supply's reading history - it's
+// not a column an analyst needs to see or export, so it's hidden the same
+// way BC_RESULTS_HIDDEN_COLUMNS hides internal-only columns on the main
+// results grid.
+const BC_DETAIL_HIDDEN_COLUMNS = new Set(["ID_SECTOR_SUPPLY"]);
+
+async function bcOpenDetail(accountNumber) {
+  const date_from = bcMonthToDate($("#bc-date-from").value);
+  const date_to = bcMonthToDate($("#bc-date-to").value);
+  const billing_period = bcState.billingPeriod || $("#bc-billing-period").value.trim();
+  bcState.detailAccount = accountNumber;
+  bcState.detailFilter = "all";
+  $("#bc-detail-account-name").textContent = accountNumber;
+  $("#bc-detail-card").hidden = false;
+  $("#bc-detail-status").textContent = "Loading…";
+  $("#bc-detail-card").scrollIntoView({ behavior: "smooth", block: "start" });
+  try {
+    // Always fetch the full, unfiltered bill list - the done/pending/
+    // missing summary cards and their click-to-filter behavior (RJ's
+    // request, 2026-09-12) are computed and applied entirely client-side
+    // so switching filters is instant and the counts always match what's
+    // in the table.
+    const result = await api("/api/bulk-checker/detail", {
+      method: "POST",
+      body: { date_from, date_to, billing_period, account_number: accountNumber, bill_filter: "all" },
+    });
+    bcState.detailColumns = result.columns;
+    bcState.detailRows = result.display_rows;
+    $("#bc-detail-status").textContent = `${result.row_count} bill(s) in ${result.elapsed_ms.toFixed(0)} ms.`;
+    bcRenderDetailKpiRow();
+    bcRenderDetailTable();
+  } catch (err) {
+    $("#bc-detail-status").textContent = "Failed to load bills.";
+    showToast(err.message, true);
+  }
+}
+
+$("#bc-detail-close-btn").addEventListener("click", () => { $("#bc-detail-card").hidden = true; });
+$("#bc-detail-search-box").addEventListener("input", () => {
+  bcState.detailSearch = $("#bc-detail-search-box").value;
+  bcRenderDetailTable();
+});
+
+// A bill row is "done" once it has both an id_bill AND a file_number
+// (invoiced/sent to the lot), "pending" once it has an id_bill but no
+// file_number yet, and "missing" when it has no id_bill at all - same
+// three-way split BILL_FILTERS already uses server-side for "pending"/
+// "missing"; "done" is just their complement, computed client-side since
+// there's no separate server round-trip for it.
+function bcClassifyDetailRow(row) {
+  const idBillIdx = bcColIdx(bcState.detailColumns, "id_bill");
+  const fileNumberIdx = bcColIdx(bcState.detailColumns, "file_number");
+  const hasBill = idBillIdx !== -1 && row[idBillIdx] !== null && row[idBillIdx] !== undefined && row[idBillIdx] !== "";
+  if (!hasBill) return "missing";
+  const hasFileNumber = fileNumberIdx !== -1 && row[fileNumberIdx] !== null && row[fileNumberIdx] !== undefined && row[fileNumberIdx] !== "";
+  return hasFileNumber ? "done" : "pending";
+}
+
+function bcRenderDetailKpiRow() {
+  const rows = bcState.detailRows;
+  let done = 0, pending = 0, missing = 0;
+  rows.forEach((row) => {
+    const status = bcClassifyDetailRow(row);
+    if (status === "done") done++;
+    else if (status === "pending") pending++;
+    else missing++;
+  });
+  const cards = [
+    ["all", "Total bills", rows.length],
+    ["done", "Done", done],
+    ["pending", "Pending (billed, not invoiced)", pending],
+    ["missing", "Still no bill", missing],
+  ];
+  $("#bc-detail-kpi-row").innerHTML = cards.map(([key, label, value]) => {
+    const active = bcState.detailFilter === key;
+    return `<div class="kpi-card kpi-card-clickable${active ? " is-active" : ""}" data-bc-kpi-filter="${key}" title="Click to filter the table to this status - click again to clear">` +
+      `<div class="kpi-value">${value}</div><div class="kpi-label">${escapeHtml(label)}</div></div>`;
+  }).join("");
+}
+
+$("#bc-detail-kpi-row").addEventListener("click", (ev) => {
+  const card = ev.target.closest("[data-bc-kpi-filter]");
+  if (!card) return;
+  const key = card.dataset.bcKpiFilter;
+  bcState.detailFilter = bcState.detailFilter === key ? "all" : key;
+  bcRenderDetailKpiRow();
+  bcRenderDetailTable();
+});
+
+function bcVisibleDetailColumnIdx() {
+  return bcState.detailColumns.map((c, i) => i).filter((i) => !BC_DETAIL_HIDDEN_COLUMNS.has(bcState.detailColumns[i]));
+}
+
+function bcVisibleDetailRows() {
+  const search = bcState.detailSearch.trim().toLowerCase();
+  let rows = bcState.detailRows;
+  if (bcState.detailFilter !== "all") {
+    rows = rows.filter((row) => bcClassifyDetailRow(row) === bcState.detailFilter);
+  }
+  if (search) rows = rows.filter((row) => row.some((v) => String(v).toLowerCase().includes(search)));
+  return rows;
+}
+
+function bcRenderDetailTable() {
+  const visibleIdx = bcVisibleDetailColumnIdx();
+  const sectorSupplyIdx = bcColIdx(bcState.detailColumns, "ID_SECTOR_SUPPLY");
+  const thead = $("#bc-detail-table thead tr");
+  thead.innerHTML = visibleIdx.map((i) => `<th>${escapeHtml(bcPrettifyLabel(bcState.detailColumns[i]))}</th>`).join("")
+    + `<th>Readings</th>`;
+  const idBillIdx = bcColIdx(bcState.detailColumns, "id_bill");
+
+  const tbody = $("#bc-detail-table tbody");
+  tbody.innerHTML = "";
+  bcVisibleDetailRows().forEach((row) => {
+    const tr = document.createElement("tr");
+    const missing = idBillIdx !== -1 && !row[idBillIdx];
+    tr.className = missing ? "row-not-billed" : "";
+    tr.innerHTML = visibleIdx.map((i) => `<td>${escapeHtml(bcFormatCell(row[i]))}</td>`).join("");
+
+    // Same reading-history popup Hierarchy Analysis uses (RJ: "add a
+    // link again to open readings same as the hierarchy checker") -
+    // reused directly via the existing /api/hierarchy-analysis/reading-
+    // history route and hierRenderReadingModal, not duplicated here.
+    const sectorSupply = sectorSupplyIdx !== -1 ? row[sectorSupplyIdx] : null;
+    const readingsTd = document.createElement("td");
+    if (sectorSupply) {
+      readingsTd.innerHTML = `<button type="button" class="btn btn-pill-sm bc-detail-reading-btn" ` +
+        `data-sector-supply="${escapeHtml(sectorSupply)}" data-billing-period="${escapeHtml(bcState.billingPeriod ?? "")}">📖 Readings</button>`;
+    }
+    tr.appendChild(readingsTd);
+    tbody.appendChild(tr);
+  });
+}
+
+$("#bc-detail-table tbody").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest(".bc-detail-reading-btn");
+  if (!btn) return;
+  const sectorSupply = btn.dataset.sectorSupply;
+  const billingPeriod = btn.dataset.billingPeriod;
+  if (!sectorSupply) return;
+  btn.disabled = true;
+  try {
+    const data = await api("/api/hierarchy-analysis/reading-history", {
+      method: "POST",
+      body: { id_sector_supply: sectorSupply },
+    });
+    hierRenderReadingModal(data.rows, billingPeriod);
+    $("#hier-reading-modal-title").textContent =
+      `— supply ${sectorSupply} (${data.rows.length} reading(s))` +
+      (billingPeriod ? `, checking billing period ${billingPeriod}` : "");
+    $("#hier-reading-modal-overlay").hidden = false;
+  } catch (err) {
+    showToast(err.message || "Could not load reading history.", true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---------------- Export (CSV client-side, Excel round-trips the server -
+// same pattern as Hierarchy Analysis / Detect All's own export buttons) ----
+function bcCsvBlobFor(columns, rows) {
+  const escapeCsv = (v) => {
+    const s = bcFormatCell(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [columns.map(escapeCsv).join(",")];
+  rows.forEach((row) => lines.push(row.map(escapeCsv).join(",")));
+  return new Blob([lines.join("\n")], { type: "text/csv" });
+}
+
+function bcDownloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+$("#bc-export-csv-btn").addEventListener("click", () => {
+  const rows = bcVisibleResultRows();
+  if (!rows.length) { showToast("No rows to export.", true); return; }
+  bcDownloadBlob(bcCsvBlobFor(bcState.columns, rows), `bulk_checker_${bcState.billingPeriod || "search"}.csv`);
+});
+
+$("#bc-detail-export-csv-btn").addEventListener("click", () => {
+  const rows = bcVisibleDetailRows();
+  if (!rows.length) { showToast("No rows to export.", true); return; }
+  bcDownloadBlob(bcCsvBlobFor(bcState.detailColumns, rows), `bulk_checker_bills_${bcState.detailAccount || "account"}.csv`);
+});
+
+async function bcExportXlsx(btn, headers, rows, filename) {
+  if (!rows.length) { showToast("No rows to export.", true); return; }
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Exporting…";
+  try {
+    const resp = await fetch("/api/bulk-checker/export-xlsx", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename, headers, rows }),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.detail || `Export failed (HTTP ${resp.status})`);
+    }
+    bcDownloadBlob(await resp.blob(), filename);
+  } catch (err) {
+    showToast(err.message || "Excel export failed.", true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+$("#bc-export-xlsx-btn").addEventListener("click", () => {
+  bcExportXlsx(
+    $("#bc-export-xlsx-btn"),
+    bcState.columns.map(bcPrettifyLabel),
+    bcVisibleResultRows().map((row) => row.map(bcFormatCell)),
+    `bulk_checker_${bcState.billingPeriod || "search"}.xlsx`
+  );
+});
+
+$("#bc-detail-export-xlsx-btn").addEventListener("click", () => {
+  bcExportXlsx(
+    $("#bc-detail-export-xlsx-btn"),
+    bcState.detailColumns.map(bcPrettifyLabel),
+    bcVisibleDetailRows().map((row) => row.map(bcFormatCell)),
+    `bulk_checker_bills_${bcState.detailAccount || "account"}.xlsx`
+  );
+});
 
 // ---------------- Boot ----------------
 (async function init() {
