@@ -544,6 +544,10 @@
             <h2>Detect All Pending Anomalies</h2>
             <div class="card-header-actions">
               <button type="button" class="btn btn-pill" id="da-cleanup-detect-btn">🔍 Detect All</button>
+              <label class="field-label" style="display:flex;align-items:center;gap:6px;" id="da-cleanup-export-all-wrap" hidden title="Unchecked = only the rows the current filters show. Checked = every detected row.">
+                <input type="checkbox" id="da-cleanup-export-all" />
+                Export all rows
+              </label>
               <button type="button" class="btn btn-pill" id="da-cleanup-export-csv-btn" hidden>⬇ Export CSV</button>
               <button type="button" class="btn btn-pill" id="da-cleanup-export-xlsx-btn" hidden>⬇ Export Excel</button>
             </div>
@@ -673,6 +677,10 @@
             <h2>Pending Primary Hierarchies</h2>
             <div class="card-header-actions">
               <button type="button" class="btn btn-pill" id="hier-detect-btn">🔍 Detect Pending Primaries</button>
+              <label class="field-label" style="display:flex;align-items:center;gap:6px;" id="hier-export-all-wrap" hidden title="Unchecked = only the rows the current filters show. Checked = every detected row.">
+                <input type="checkbox" id="hier-export-all" />
+                Export all rows
+              </label>
               <button type="button" class="btn btn-pill" id="hier-export-csv-btn" hidden>⬇ Export CSV</button>
               <button type="button" class="btn btn-pill" id="hier-export-xlsx-btn" hidden>⬇ Export Excel</button>
             </div>
@@ -785,51 +793,108 @@
         <nav class="da-subnav" aria-label="Bill Issuance Validator functions">
           <button type="button" class="da-subnav-btn is-active" data-biss-sub="case1">Case 1 - Prev Month Rate Only</button>
           <button type="button" class="da-subnav-btn" data-biss-sub="case2">Case 2 - Terminated Account Period Mismatch</button>
+          <button type="button" class="da-subnav-btn" data-biss-sub="case3">Case 3 - All Contract Status - Bills Complete</button>
+          <button type="button" class="da-subnav-btn" data-biss-sub="case4">Case 4 - Unclassified</button>
         </nav>
 
         <div class="da-subpage is-active" data-biss-sub="case1">
-        <p class="page-subtitle" style="margin:-6px 0 14px;">Finds accounts whose next Electricity/Water bill is stuck "waiting for other services" (ESTFAC0015) behind a Rate bill (ID_OFFERED_SERVICE 176) that's still being put to collection.</p>
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Two patterns, one table: a Rate bill (ID_OFFERED_SERVICE 176) still being put to collection that's either blocking the account's next Electricity/Water bill, or belongs to a brand-new contract whose very first cycle bill is still pending.</p>
 
-        <div class="warning-banner">
-          ℹ️ <strong>How this works.</strong> Starts from every account with a pending notice (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP) on a bill still "En proceso de puesta al cobro" (ESTFAC0012), narrows to the ones where that billing period's <strong>only</strong> bill is a Rate (176) bill, then checks the SAME account's Electricity/Water (1 or 19) bill for the <strong>next</strong> billing period. A row here means that next bill is sitting at ESTFAC0015 ("En espera de otros servicios") — blocked behind the Rate bill above it.
+        <div class="biss-info-banner">
+          ℹ️ <strong>Stuck Bill.</strong> Starts from every account with a pending notice (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP, "For validation") on a bill still "En proceso de puesta al cobro" (ESTFAC0012), narrows to the ones where that billing period's <strong>only</strong> bill is a Rate (176) bill, then checks the SAME account's Electricity/Water (1 or 19) bill for any of the <strong>next up to 11</strong> billing periods (RJ, 2026-09-14: confirmed live that a valid stuck bill can lag the Rate bill by more than one period — the closest matching period is shown when more than one qualifies). A row here means that next bill is sitting at ESTFAC0015 ("En espera de otros servicios") — blocked behind the Rate bill above it.
+        </div>
+
+        <div class="biss-info-banner" style="margin-top:10px;">
+          ℹ️ <strong>New Contract Match.</strong> A Rate (176) bill still invoicing (ESTFAC0012) with a pending notice, where that account's contract is still Active (ESTSC00002), its own <strong>start date</strong> (GCCOM_CONTRACTED_SERVICE.FROM_DATE) lands exactly on this bill's <strong>LAST_BILLING_DATE</strong> — a brand-new contract whose very first cycle bill is still pending — and it's the <strong>only</strong> bill in its own billing period and the <strong>only</strong> bill currently pending validation on the account.
         </div>
 
         <div class="card">
           <div class="card-header">
-            <h2>Stuck Bills</h2>
+            <h2>Rate Bill Matches</h2>
             <div class="card-header-actions">
-              <button type="button" class="btn btn-pill" id="billiss-detect-btn">🔍 Scan for Stuck Bills</button>
+              <button type="button" class="btn btn-pill" id="billiss-detect-btn">🔍 Scan Case 1</button>
+              <label class="field-label" style="display:flex;align-items:center;gap:6px;" id="billiss-export-all-wrap" hidden title="Unchecked = only the rows the current filters show. Checked = every scanned row.">
+                <input type="checkbox" id="billiss-export-all" />
+                Export all rows
+              </label>
               <button type="button" class="btn btn-pill" id="billiss-export-csv-btn" hidden>⬇ Export CSV</button>
+              <button type="button" class="btn btn-pill" id="billiss-export-xlsx-btn" hidden>⬇ Export Excel</button>
             </div>
           </div>
-          <p class="hint-text">One row per account, no duplicates — Electricity takes priority when it's stuck; Water only shows up when Electricity isn't.</p>
+          <p class="hint-text">One table, both patterns — use the <strong>Pattern</strong> filter below to isolate one. Stuck Bill rows are one per account, no duplicates (Electricity takes priority when it's stuck; Water only shows up when Electricity isn't).</p>
           <div class="hint-text" id="billiss-summary"></div>
 
           <div class="kpi-row" id="billiss-kpi-row" style="margin:18px 0 4px;"></div>
 
-          <div class="grid-wrap" style="margin-top:18px;">
+          <div class="key-panel-row" style="margin:10px 0 0;gap:16px;flex-wrap:wrap;align-items:center;">
+            <input type="text" id="billiss-search" class="text-input text-input-sm" placeholder="Search account #..." style="width:200px;" />
+            <label class="field-label" style="display:flex;align-items:center;gap:6px;">
+              Pattern
+              <select id="billiss-pattern-filter" class="text-input text-input-sm" style="width:170px;">
+                <option value="">All</option>
+                <option value="stuck_bill">Stuck Bill</option>
+                <option value="new_contract">New Contract Match</option>
+              </select>
+            </label>
+            <label class="field-label" style="display:flex;align-items:center;gap:6px;" title="Only applies to Stuck Bill rows - New Contract Match rows always pass this filter.">
+              Months ahead: min
+              <input type="number" id="billiss-ahead-min" class="text-input text-input-sm" style="width:64px;" min="1" max="11" value="1" />
+            </label>
+            <label class="field-label" style="display:flex;align-items:center;gap:6px;">
+              max
+              <input type="number" id="billiss-ahead-max" class="text-input text-input-sm" style="width:64px;" min="1" max="11" value="11" />
+            </label>
+          </div>
+
+          <div class="grid-wrap" style="margin-top:12px;">
             <table class="data-grid" id="billiss-table">
               <thead><tr>
                 <th class="stats-table-th-sortable" data-sort="reference">Account</th>
+                <th class="stats-table-th-sortable" data-sort="pattern">Pattern</th>
                 <th class="stats-table-th-sortable" data-sort="notice_update_date">Notice Updated</th>
-                <th class="stats-table-th-sortable" data-sort="id_bill_rate">Rate Bill</th>
-                <th class="stats-table-th-sortable" data-sort="period_rate">Rate Period</th>
+                <th class="stats-table-th-sortable" data-sort="id_bill_rate">Bill</th>
+                <th class="stats-table-th-sortable" data-sort="period_rate">Period</th>
                 <th class="stats-table-th-sortable" data-sort="id_bill_next">Next Bill</th>
                 <th class="stats-table-th-sortable" data-sort="offered_service_next_desc">Service</th>
                 <th class="stats-table-th-sortable" data-sort="period_next">Next Period</th>
-                <th class="stats-table-th-sortable" data-sort="status_next_desc">Status</th>
+                <th class="stats-table-th-sortable" data-sort="periods_ahead">Months Ahead</th>
+                <th class="stats-table-th-sortable" data-sort="status_next_desc">Next Status</th>
+                <th class="stats-table-th-sortable" data-sort="billing_status_desc">Bill Status</th>
+                <th class="stats-table-th-sortable" data-sort="last_billing_date">Last Billing Date</th>
+                <th class="stats-table-th-sortable" data-sort="contract_from_date">Contract Start</th>
+                <th class="stats-table-th-sortable" data-sort="contract_status">Contract Status</th>
               </tr></thead>
               <tbody></tbody>
             </table>
           </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>Generate Release Script</h2></div>
+          <p class="hint-text">Generates one <code>UPDATE GCCOM_NOTICE_TMP SET COD_STATUS = '1000NOTEMP', ...</code> statement releasing the pending-validation notice for <strong>every currently detected</strong> Rate bill above — both patterns (re-verifies against the live database right before generating). Does not touch GCCOM_BILL itself.</p>
+          <div class="key-panel-row" style="margin:10px 0;">
+            <label class="field-label">Program</label>
+            <input id="billiss-release-program" class="text-input text-input-sm" value="VALIDATION RELEASE_TERMINATED" style="width:220px;" />
+            <label class="field-label">User</label>
+            <input id="billiss-release-user" class="text-input text-input-sm" value="RMA" style="width:90px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;" title="Strips every comment line - leaves just the bare UPDATE statement.">
+              <input type="checkbox" id="billiss-release-clean-toggle" /> Clean script (no comments)
+            </label>
+            <button type="button" class="btn btn-primary" id="billiss-release-generate-btn">📝 Generate Release Script</button>
+          </div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" id="billiss-release-copy-btn">📋 Copy</button>
+            <button type="button" class="btn btn-pill" id="billiss-release-download-btn">⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" id="billiss-release-output">No release script generated yet — Scan Case 1, then Generate.</pre>
         </div>
         </div><!-- /biss-subpage: case1 -->
 
         <div class="da-subpage" data-biss-sub="case2">
         <p class="page-subtitle" style="margin:-6px 0 14px;">Finds accounts whose services are all Terminated, checks each service's own final bill (the one dated its termination date), and flags accounts where those final bills don't all share the same billing period.</p>
 
-        <div class="warning-banner">
-          ℹ️ <strong>How this works.</strong> For each Terminated service (GCCOM_CONTRACTED_SERVICE.STATUS = ESTSC00004), finds its own final bill — the GCCOM_BILL row dated exactly that service's termination date and either "En proceso de puesta al cobro" (invoicing, ESTFAC0012) or "Puesta al cobro" (invoiced, ESTFAC0005). Only accounts where <strong>every</strong> service is Terminated are shown. An account is <strong>Complete</strong> when every service's final bill already exists and already shares the account's target period (the <strong>latest</strong> billing period among its matched final bills); otherwise it <strong>Needs action</strong> — either a service's final bill period needs realigning, or a service has no matching final bill at all and needs investigating.
+        <div class="biss-info-banner">
+          ℹ️ <strong>How this works.</strong> For each Terminated service (GCCOM_CONTRACTED_SERVICE.STATUS = ESTSC00004) <strong>whose account also has a pending notice</strong> (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP, "For validation") — accounts with nothing pending review aren't shown — finds that service's own final bill: the GCCOM_BILL row dated exactly its termination date and either "En proceso de puesta al cobro" (invoicing, ESTFAC0012) or "Puesta al cobro" (invoiced, ESTFAC0005). Only accounts where <strong>every</strong> service is Terminated are shown. An account is <strong>Complete</strong> when every service's final bill already exists and already shares the account's target period (the <strong>latest</strong> billing period among its matched final bills); otherwise it <strong>Needs action</strong> — either a service's final bill period needs realigning, or a service has no matching final bill at all and needs investigating.
         </div>
 
         <div class="card">
@@ -847,17 +912,33 @@
                 </select>
               </label>
               <button type="button" class="btn btn-pill" id="biss2-detect-btn">🔍 Scan Terminated Accounts</button>
+              <label class="field-label" style="display:flex;align-items:center;gap:6px;" id="biss2-export-all-wrap" hidden title="Unchecked = only the rows the current filters/search show. Checked = every scanned row.">
+                <input type="checkbox" id="biss2-export-all" />
+                Export all rows
+              </label>
               <button type="button" class="btn btn-pill" id="biss2-export-csv-btn" hidden>⬇ Export CSV</button>
             </div>
           </div>
-          <p class="hint-text">Click an account row to expand its services. Rows highlighted orange are accounts that need action.</p>
+          <p class="hint-text">Click an account number to expand its services, or use the <strong>📋</strong> button to copy it. <span class="row-needs-action-swatch">⚠️ Needs action</span> / <span class="row-primary-only-swatch">✅ Complete</span> pills show each account's status.</p>
           <div class="hint-text" id="biss2-summary"></div>
 
           <div class="kpi-row" id="biss2-kpi-row" style="margin:18px 0 4px;"></div>
 
-          <div class="key-panel-row" style="margin:10px 0 0;">
-            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-              <input type="checkbox" id="biss2-show-complete" /> Show Complete accounts too (hidden by default)
+          <div class="key-panel-row" style="margin:10px 0 0;gap:16px;flex-wrap:wrap;align-items:center;">
+            <input type="text" id="biss2-search" class="text-input text-input-sm" placeholder="Search account #..." style="width:200px;" />
+            <label class="field-label" style="display:flex;align-items:center;gap:6px;">
+              Status
+              <select id="biss2-status-filter" class="text-input text-input-sm" style="width:200px;">
+                <option value="needs-action" selected>Needs action (all reasons)</option>
+                <option value="missing-bill">Needs action - bill missing</option>
+                <option value="period-mismatch">Needs action - period mismatch</option>
+                <option value="complete">Complete only</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+            <label class="field-label" style="display:flex;align-items:center;gap:6px;" title="Narrows whatever the Status dropdown already shows down to accounts with a missing bill">
+              <input type="checkbox" id="biss2-missing-bill-only" />
+              Missing bill only
             </label>
           </div>
 
@@ -895,6 +976,111 @@
           <pre class="script-output" id="biss2-output">No update script generated yet — Scan Terminated Accounts, then Generate.</pre>
         </div>
         </div><!-- /biss-subpage: case2 -->
+
+        <div class="da-subpage" data-biss-sub="case3">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Finds accounts whose total contracted-service count (every non-deleted status) exactly matches their still-invoicing cycle-bill count for one billing period — nothing's missing, so that period's billing is already complete.</p>
+
+        <div class="biss-info-banner">
+          ℹ️ <strong>How this works.</strong> For each account with a pending notice (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP, "For validation") on a bill still "En proceso de puesta al cobro" (ESTFAC0012) — same gate Case 1 and Case 2 use — counts ALL its contracted services (Active/Vigente, Suspended/Suspendido, "Baja pendiente de facturar", and Terminated/Baja) and compares that to how many of its cycle bills (BILL_TYPE = TFGEN00001) are still invoicing for ONE billing period. A row here means those two counts are <strong>exactly equal</strong> — every service already has its bill issuing for that period. <strong>With Active Contract</strong> is <strong>YES</strong> when the account still has at least one non-Terminated service, <strong>NO</strong> when every service is already Terminated.
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Bills Complete</h2>
+            <div class="card-header-actions">
+              <label class="field-label" style="display:flex;align-items:center;gap:6px;">
+                Year
+                <select id="biss3-year" class="text-input text-input-sm" style="width:100px;">
+                  <option value="2026" selected>2026</option>
+                </select>
+              </label>
+              <button type="button" class="btn btn-pill" id="biss3-detect-btn">🔍 Scan Bills Complete</button>
+              <label class="field-label" style="display:flex;align-items:center;gap:6px;" id="biss3-export-all-wrap" hidden title="Unchecked = only the rows the current search shows. Checked = every scanned row.">
+                <input type="checkbox" id="biss3-export-all" />
+                Export all rows
+              </label>
+              <button type="button" class="btn btn-pill" id="biss3-export-csv-btn" hidden>⬇ Export CSV</button>
+            </div>
+          </div>
+          <p class="hint-text">One row per account per billing period — an account can appear more than once if more than one 2026 period is already complete for it.</p>
+          <div class="hint-text" id="biss3-summary"></div>
+
+          <div class="kpi-row" id="biss3-kpi-row" style="margin:18px 0 4px;"></div>
+
+          <div class="key-panel-row" style="margin:10px 0 0;gap:16px;flex-wrap:wrap;align-items:center;">
+            <input type="text" id="biss3-search" class="text-input text-input-sm" placeholder="Search account #..." style="width:200px;" />
+            <label class="field-label" style="display:flex;align-items:center;gap:6px;">
+              Billing period
+              <select id="biss3-period-filter" class="text-input text-input-sm" style="width:170px;">
+                <option value="">All 2026 periods</option>
+              </select>
+            </label>
+            <label class="field-label" style="display:flex;align-items:center;gap:6px;">
+              With Active Contract
+              <select id="biss3-active-filter" class="text-input text-input-sm" style="width:120px;">
+                <option value="">All</option>
+                <option value="yes">YES</option>
+                <option value="no">NO</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid-wrap" style="margin-top:12px;">
+            <table class="data-grid" id="biss3-table">
+              <thead><tr>
+                <th class="stats-table-th-sortable" data-sort="reference">Account</th>
+                <th class="stats-table-th-sortable" data-sort="billing_period_name">Billing Period</th>
+                <th class="stats-table-th-sortable" data-sort="contracted_services">Contracted Services</th>
+                <th class="stats-table-th-sortable" data-sort="bills">Bills Issuing</th>
+                <th class="stats-table-th-sortable" data-sort="with_active_contract">With Active Contract</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        </div><!-- /biss-subpage: case3 -->
+
+        <div class="da-subpage" data-biss-sub="case4">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Every account pending validation that Case 1, Case 2, and Case 3 all left unexplained — the accounts nobody's rule has caught yet, for manual review.</p>
+
+        <div class="biss-info-banner">
+          ℹ️ <strong>How this works.</strong> Starts from the same "pending validation" gate every other Case uses (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP, on a bill still "En proceso de puesta al cobro" / ESTFAC0012), then calls Case 1, Case 2, and Case 3's own detection logic directly and excludes any account they already flag. What's left is <strong>Unclassified</strong> — accounts with something pending review that none of the other Cases currently explain. This list automatically stays correct as Case 1/2/3's own rules change, and will keep excluding any future Case added later.
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Unclassified Accounts</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="biss4-detect-btn">🔍 Scan Unclassified</button>
+              <label class="field-label" style="display:flex;align-items:center;gap:6px;" id="biss4-export-all-wrap" hidden title="Unchecked = only the rows the current search shows. Checked = every scanned row.">
+                <input type="checkbox" id="biss4-export-all" />
+                Export all rows
+              </label>
+              <button type="button" class="btn btn-pill" id="biss4-export-csv-btn" hidden>⬇ Export CSV</button>
+              <button type="button" class="btn btn-pill" id="biss4-export-xlsx-btn" hidden>⬇ Export Excel</button>
+            </div>
+          </div>
+          <p class="hint-text">Click an account number to expand its pending bills, or use the <strong>📋</strong> button to copy it.</p>
+          <div class="hint-text" id="biss4-summary"></div>
+
+          <div class="kpi-row" id="biss4-kpi-row" style="margin:18px 0 4px;"></div>
+
+          <div class="key-panel-row" style="margin:10px 0 0;gap:16px;flex-wrap:wrap;align-items:center;">
+            <input type="text" id="biss4-search" class="text-input text-input-sm" placeholder="Search account #..." style="width:200px;" />
+          </div>
+
+          <div class="grid-wrap" style="margin-top:12px;">
+            <table class="data-grid" id="biss4-table">
+              <thead><tr>
+                <th></th>
+                <th class="stats-table-th-sortable" data-sort="reference">Account</th>
+                <th class="stats-table-th-sortable" data-sort="bill_count">Pending Bills</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        </div><!-- /biss-subpage: case4 -->
       </section>
 
       <!-- ===== Bulk Checker page ===== -->
@@ -944,6 +1130,10 @@
           <div class="card-header">
             <h2>Results</h2>
             <div class="card-header-actions">
+              <label class="field-label" style="display:flex;align-items:center;gap:6px;" title="Unchecked = only the rows the current search/filters show. Checked = every row this search returned.">
+                <input type="checkbox" id="bc-export-all" />
+                Export all rows
+              </label>
               <button type="button" class="btn btn-pill" id="bc-export-csv-btn">⬇ CSV</button>
               <button type="button" class="btn btn-pill" id="bc-export-xlsx-btn">⬇ Excel</button>
             </div>
@@ -980,6 +1170,10 @@
           <div class="card-header">
             <h2>Bills for <span id="bc-detail-account-name">—</span></h2>
             <div class="card-header-actions">
+              <label class="field-label" style="display:flex;align-items:center;gap:6px;" title="Unchecked = only the rows the current filter/search show. Checked = every bill for this account.">
+                <input type="checkbox" id="bc-detail-export-all" />
+                Export all rows
+              </label>
               <button type="button" class="btn btn-pill" id="bc-detail-export-csv-btn">⬇ CSV</button>
               <button type="button" class="btn btn-pill" id="bc-detail-export-xlsx-btn">⬇ Excel</button>
               <button type="button" class="btn btn-pill-sm" id="bc-detail-close-btn">✕ Close</button>

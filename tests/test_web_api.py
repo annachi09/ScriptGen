@@ -2778,12 +2778,68 @@ def test_hierarchy_analysis_export_xlsx_returns_workbook(client):
 _BILLISS_COLS = [
     "ID_PAYMENT_FORM", "REFERENCE", "NOTICE_UPDATE_DATE", "ID_BILL_RATE", "PERIOD_RATE",
     "ID_BILL_NEXT", "OFFERED_SERVICE_NEXT", "OFFERED_SERVICE_NEXT_DESC", "PERIOD_NEXT",
-    "STATUS_NEXT", "STATUS_NEXT_DESC",
+    "STATUS_NEXT", "PERIODS_AHEAD", "STATUS_NEXT_DESC",
 ]
 _BILLISS_ROW = [
     110301288, "1103012884", "2026-08-24 11:28:48", 1073519772, 10000000236,
-    1073720257, 1, "Electricity", 10000000237, "ESTFAC0015", "En espera de otros servicios",
+    1073720257, 1, "Electricity", 10000000237, "ESTFAC0015", 1, "En espera de otros servicios",
 ]
+# RJ, 2026-09-14: "the next water or ele bills can be up to 11 billing
+# period ahead" - a row further out than the old exact-next-period
+# assumption, to test PERIODS_AHEAD is passed through correctly.
+_BILLISS_ROW_FAR_AHEAD = [
+    110301289, "1103012885", "2026-08-24 11:28:48", 1073519773, 10000000230,
+    1073720258, 19, "Water", 10000000237, "ESTFAC0015", 7, "En espera de otros servicios",
+]
+
+# Case 1 "New Contract Match" fixtures - RJ, 2026-09-14 (later same day):
+# "incorporate in case 1, the existing case 1 is ok, now i only want to
+# add the case that its is only rate which is in pending validation
+# notice_tmp and invoicing gccom_bill, the contract start (from_date) of
+# gccom_contracted service is same as last_billing_date of gccom_bill".
+_BILLISS_NC_COLS = [
+    "ID_PAYMENT_FORM", "REFERENCE", "NOTICE_UPDATE_DATE", "ID_BILL", "BILLING_STATUS",
+    "BILLING_STATUS_DESC", "LAST_BILLING_DATE", "BILLING_DATE", "ID_BILLING_PERIOD",
+    "ID_CONTRACTED_SERVICE", "CONTRACT_FROM_DATE", "CONTRACT_STATUS",
+]
+_BILLISS_NC_ROW = [
+    220400111, "2204001112", "2026-09-10 09:00:00", 1073900001, "ESTFAC0012",
+    "En proceso de puesta al cobro", "2026-08-01", "2026-08-01", 10000000236,
+    99001, "2026-08-01", "ESTSC00002",
+]
+# Used by the Case 4 fixture below (_biss4_fake_run_query) to represent
+# an account New Contract Match matches - same shape, account 555.
+_BILLISS_NC_ROW_ACCOUNT_555 = [
+    555, "5550001", "2026-09-10 09:00:00", 9005, "ESTFAC0012",
+    "En proceso de puesta al cobro", "2026-08-01", "2026-08-01", 10000000236,
+    99005, "2026-08-01", "ESTSC00002",
+]
+
+
+# RJ, 2026-09-14 (later still, same day): "I wanted the 2 cases merged in
+# 1 table, maybe you can do union but there will be clear identifier of
+# the case that i can use to filter." /api/bill-issuance/detect now calls
+# run_query TWICE - once for build_stuck_bills_query, once for build_new_
+# contract_match_query - and merges the results. This fake dispatches on
+# a distinguishing substring of each query's own SQL, same convention as
+# _biss4_fake_run_query below ("ID_BILL_RATE" only appears in the Stuck
+# Bills query, "CONTRACT_FROM_DATE" only in the New Contract Match query).
+def _billiss_merged_fake_run_query(stuck_rows=None, nc_rows=None, captured=None):
+    if stuck_rows is None:
+        stuck_rows = [_BILLISS_ROW]
+    if nc_rows is None:
+        nc_rows = [_BILLISS_NC_ROW]
+
+    def fake(conn, sql):
+        if captured is not None:
+            captured.setdefault("sqls", []).append(sql)
+        if "ID_BILL_RATE" in sql:
+            return QueryResult(columns=_BILLISS_COLS, rows=stuck_rows, elapsed_ms=1.0)
+        if "CONTRACT_FROM_DATE" in sql:
+            return QueryResult(columns=_BILLISS_NC_COLS, rows=nc_rows, elapsed_ms=1.0)
+        raise AssertionError(f"unexpected sql passed to run_query: {sql[:200]}")
+
+    return fake
 
 
 def test_bill_issuance_detect_requires_login(client):
@@ -2793,28 +2849,64 @@ def test_bill_issuance_detect_requires_login(client):
 
 def test_bill_issuance_detect_returns_rows(client, monkeypatch):
     import web.server as server_mod
+    from app.core import bill_issuance_validator
 
     _login(client)
     monkeypatch.setattr(
         server_mod.mssql, "run_query",
-        lambda conn, sql: QueryResult(columns=_BILLISS_COLS, rows=[_BILLISS_ROW], elapsed_ms=1.0),
+        _billiss_merged_fake_run_query(stuck_rows=[_BILLISS_ROW], nc_rows=[_BILLISS_NC_ROW]),
     )
     resp = client.post("/api/bill-issuance/detect")
     assert resp.status_code == 200
     body = resp.json()
-    assert len(body["rows"]) == 1
-    row = body["rows"][0]
-    assert row["id_payment_form"] == "110301288"
-    assert row["reference"] == "1103012884"
-    assert row["id_bill_rate"] == "1073519772"
-    assert row["period_rate"] == "10000000236"
-    assert row["id_bill_next"] == "1073720257"
-    assert row["offered_service_next"] == "1"
-    assert row["offered_service_next_desc"] == "Electricity"
-    assert row["period_next"] == "10000000237"
-    assert row["status_next"] == "ESTFAC0015"
-    assert row["status_next_desc"] == "En espera de otros servicios"
+    assert len(body["rows"]) == 2
+    assert body["stuck_bill_count"] == 1
+    assert body["new_contract_match_count"] == 1
+
+    stuck_row = next(r for r in body["rows"] if r["pattern"] == "stuck_bill")
+    assert stuck_row["id_payment_form"] == "110301288"
+    assert stuck_row["reference"] == "1103012884"
+    assert stuck_row["id_bill_rate"] == "1073519772"
+    assert stuck_row["period_rate"] == "10000000236"
+    assert stuck_row["id_bill_next"] == "1073720257"
+    assert stuck_row["offered_service_next"] == "1"
+    assert stuck_row["offered_service_next_desc"] == "Electricity"
+    assert stuck_row["period_next"] == "10000000237"
+    assert stuck_row["status_next"] == "ESTFAC0015"
+    assert stuck_row["periods_ahead"] == "1"
+    assert stuck_row["status_next_desc"] == "En espera de otros servicios"
+
+    nc_row = next(r for r in body["rows"] if r["pattern"] == "new_contract")
+    assert nc_row["id_payment_form"] == "220400111"
+    assert nc_row["reference"] == "2204001112"
+    assert nc_row["id_bill_rate"] == "1073900001"  # mapped from ID_BILL
+    assert nc_row["period_rate"] == "10000000236"  # mapped from ID_BILLING_PERIOD
+    assert nc_row["billing_status_desc"] == "En proceso de puesta al cobro"
+    assert nc_row["last_billing_date"] == "2026-08-01"
+    assert nc_row["contract_from_date"] == "2026-08-01"
+    assert nc_row["contract_status"] == "ESTSC00002"
+
     assert body["possibly_truncated"] is False
+    assert body["max_periods_ahead"] == bill_issuance_validator.NEXT_PERIOD_MAX_AHEAD_DEFAULT
+
+
+def test_bill_issuance_detect_max_periods_ahead_query_param(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    captured = {}
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        _billiss_merged_fake_run_query(stuck_rows=[_BILLISS_ROW_FAR_AHEAD], captured=captured),
+    )
+    resp = client.post("/api/bill-issuance/detect?max_periods_ahead=5")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["max_periods_ahead"] == 5
+    stuck_sql = next(s for s in captured["sqls"] if "ID_BILL_RATE" in s)
+    assert "c.PERIOD_RATE + 5" in stuck_sql
+    stuck_row = next(r for r in body["rows"] if r["pattern"] == "stuck_bill")
+    assert stuck_row["periods_ahead"] == "7"  # passed through as-is, server doesn't re-filter
 
 
 def test_bill_issuance_detect_requires_connection(client, monkeypatch):
@@ -2833,12 +2925,254 @@ def test_bill_issuance_detect_flags_possible_truncation(client, monkeypatch):
     from app.core import bill_issuance_validator
 
     _login(client)
-    rows = [_BILLISS_ROW for _ in range(bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT)]
+    stuck_rows = [_BILLISS_ROW for _ in range(bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT)]
     monkeypatch.setattr(
         server_mod.mssql, "run_query",
-        lambda conn, sql: QueryResult(columns=_BILLISS_COLS, rows=rows, elapsed_ms=1.0),
+        _billiss_merged_fake_run_query(stuck_rows=stuck_rows, nc_rows=[]),
     )
     resp = client.post("/api/bill-issuance/detect")
+    assert resp.json()["possibly_truncated"] is True
+
+
+def test_bill_issuance_export_xlsx_requires_rows(client):
+    _login(client)
+    resp = client.post("/api/bill-issuance/export-xlsx", json={"rows": []})
+    assert resp.status_code == 400
+
+
+def test_bill_issuance_export_xlsx_returns_workbook(client):
+    # RJ, 2026-09-14: "i noticed that the excel download is also missing" -
+    # same pattern as Detect All's own export-xlsx (see that test above).
+    # RJ, 2026-09-14 (later same day): rows/columns now cover both merged
+    # patterns - Pattern plus the New Contract Match-only columns.
+    from io import BytesIO
+
+    import openpyxl
+
+    _login(client)
+    resp = client.post(
+        "/api/bill-issuance/export-xlsx",
+        json={
+            "rows": [
+                {
+                    "reference": "1103012884",
+                    "pattern": "stuck_bill",
+                    "notice_update_date": "2026-08-24 11:28:48",
+                    "id_bill_rate": "1073519772",
+                    "period_rate": "10000000236",
+                    "id_bill_next": "1073720257",
+                    "offered_service_next_desc": "Electricity",
+                    "period_next": "10000000237",
+                    "periods_ahead": "1",
+                    "status_next_desc": "En espera de otros servicios",
+                },
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert 'filename="bill_issuance_case1.xlsx"' in resp.headers["content-disposition"]
+
+    wb = openpyxl.load_workbook(BytesIO(resp.content))
+    ws = wb.active
+    header = [c.value for c in ws[1]]
+    assert header == [
+        "Account", "Pattern", "Notice Updated", "Bill", "Billing Period", "Next Bill",
+        "Service", "Next Period", "Months Ahead", "Next Status", "Bill Status",
+        "Last Billing Date", "Contract Start", "Contract Status",
+    ]
+    row = [c.value for c in ws[2]]
+    assert row == [
+        "1103012884", "stuck_bill", "2026-08-24 11:28:48", "1073519772", "10000000236", "1073720257",
+        "Electricity", "10000000237", "1", "En espera de otros servicios", "", "", "", "",
+    ]
+
+
+def test_bill_issuance_export_xlsx_requires_login(client):
+    resp = client.post("/api/bill-issuance/export-xlsx", json={"rows": []})
+    assert resp.status_code == 401
+
+
+# Case 1 "Generate Release Script" - RJ, 2026-09-18: "for case 1, create
+# script for all detected, 'Generate Release script'" with RJ's own exact
+# UPDATE GCCOM_NOTICE_TMP template. The route re-runs both build_stuck_
+# bills_query AND build_new_contract_match_query fresh (RJ, 2026-09-14,
+# later same day: "the 2 cases merged in 1 table") and generates for
+# every bill from either pattern.
+def test_bill_issuance_generate_release_requires_login(client):
+    resp = client.post("/api/bill-issuance/generate-release", json={})
+    assert resp.status_code == 401
+
+
+def test_bill_issuance_generate_release_produces_script_for_all_detected(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        _billiss_merged_fake_run_query(
+            stuck_rows=[_BILLISS_ROW, _BILLISS_ROW_FAR_AHEAD], nc_rows=[_BILLISS_NC_ROW],
+        ),
+    )
+    resp = client.post("/api/bill-issuance/generate-release", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bill_count"] == 3
+    assert "b.ID_BILL IN (1073519772, 1073519773, 1073900001)" in body["sql_text"]
+    # Defaults match RJ's own literal template exactly.
+    assert "UPDATE_USER = 'RMA'" in body["sql_text"]
+    assert "UPDATE_PROGRAM = 'VALIDATION RELEASE_TERMINATED'" in body["sql_text"]
+
+    history = client.get("/api/history").json()["entries"]
+    assert any("Bill Issuance Case 1 Release" in e["table_name"] for e in history)
+
+
+def test_bill_issuance_generate_release_scopes_to_selected_bills(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        _billiss_merged_fake_run_query(
+            stuck_rows=[_BILLISS_ROW, _BILLISS_ROW_FAR_AHEAD], nc_rows=[_BILLISS_NC_ROW],
+        ),
+    )
+    resp = client.post(
+        "/api/bill-issuance/generate-release",
+        json={"id_bill_rates": ["1073519772"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bill_count"] == 1
+    assert "b.ID_BILL IN (1073519772)" in body["sql_text"]
+    assert "1073519773" not in body["sql_text"]
+    assert "1073900001" not in body["sql_text"]
+
+
+def test_bill_issuance_generate_release_custom_program_and_user(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        _billiss_merged_fake_run_query(stuck_rows=[_BILLISS_ROW], nc_rows=[]),
+    )
+    resp = client.post(
+        "/api/bill-issuance/generate-release",
+        json={"program": "JIRA-42", "audit_user": "ANALYST1"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "UPDATE_PROGRAM = 'JIRA-42'" in body["sql_text"]
+    assert "UPDATE_USER = 'ANALYST1'" in body["sql_text"]
+
+
+def test_bill_issuance_generate_release_no_bills_detected_errors(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        _billiss_merged_fake_run_query(stuck_rows=[], nc_rows=[]),
+    )
+    resp = client.post("/api/bill-issuance/generate-release", json={})
+    assert resp.status_code == 400
+
+
+def test_bill_issuance_generate_release_clean_strips_comments(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        _billiss_merged_fake_run_query(stuck_rows=[_BILLISS_ROW], nc_rows=[]),
+    )
+    resp = client.post("/api/bill-issuance/generate-release", json={"clean": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert not any(line.strip().startswith("--") for line in body["sql_text"].split("\n"))
+
+
+def test_bill_issuance_generate_release_requires_editor_role(client, monkeypatch):
+    import web.server as server_mod
+
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        _billiss_merged_fake_run_query(stuck_rows=[_BILLISS_ROW], nc_rows=[]),
+    )
+    _create_and_login_as(client, "viewer4", "viewer")
+    resp = client.post("/api/bill-issuance/generate-release", json={})
+    assert resp.status_code == 403
+
+
+def test_bill_issuance_generate_release_requires_connection(client, monkeypatch):
+    import web.server as server_mod
+    from app.config import AppConfig, AIConfig
+
+    _login(client)
+    empty_config = AppConfig(connections={}, active_connection="default", ai=AIConfig())
+    monkeypatch.setattr(server_mod, "load_config", lambda: empty_config)
+    resp = client.post("/api/bill-issuance/generate-release", json={})
+    assert resp.status_code == 400
+
+
+# Case 1 "New Contract Match" standalone route - kept for API-level access
+# to just this one pattern (Case 4 "Unclassified" also calls the query
+# builder function directly, not through this route, or through the
+# merged /detect route). Unaffected by the /detect merge above.
+def test_bill_issuance_case1_new_contract_match_detect_requires_login(client):
+    resp = client.post("/api/bill-issuance/case1/new-contract-match/detect")
+    assert resp.status_code == 401
+
+
+def test_bill_issuance_case1_new_contract_match_detect_returns_rows(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BILLISS_NC_COLS, rows=[_BILLISS_NC_ROW], elapsed_ms=1.0),
+    )
+    resp = client.post("/api/bill-issuance/case1/new-contract-match/detect")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["rows"]) == 1
+    row = body["rows"][0]
+    assert row["id_payment_form"] == "220400111"
+    assert row["reference"] == "2204001112"
+    assert row["id_bill"] == "1073900001"
+    assert row["billing_status"] == "ESTFAC0012"
+    assert row["billing_status_desc"] == "En proceso de puesta al cobro"
+    assert row["last_billing_date"] == "2026-08-01"
+    assert row["contract_from_date"] == "2026-08-01"
+    assert row["contract_status"] == "ESTSC00002"
+    assert body["possibly_truncated"] is False
+
+
+def test_bill_issuance_case1_new_contract_match_detect_requires_connection(client, monkeypatch):
+    import web.server as server_mod
+    from app.config import AppConfig, AIConfig
+
+    _login(client)
+    empty_config = AppConfig(connections={}, active_connection="default", ai=AIConfig())
+    monkeypatch.setattr(server_mod, "load_config", lambda: empty_config)
+    resp = client.post("/api/bill-issuance/case1/new-contract-match/detect")
+    assert resp.status_code == 400
+
+
+def test_bill_issuance_case1_new_contract_match_detect_flags_possible_truncation(client, monkeypatch):
+    import web.server as server_mod
+    from app.core import bill_issuance_validator
+
+    _login(client)
+    rows = [_BILLISS_NC_ROW for _ in range(bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT)]
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BILLISS_NC_COLS, rows=rows, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/bill-issuance/case1/new-contract-match/detect")
     assert resp.json()["possibly_truncated"] is True
 
 
@@ -2908,15 +3242,49 @@ def test_bill_issuance_case2_detect_returns_account_grouped_rows(client, monkeyp
     assert acct["target_period"] == "10000000237"
     assert acct["service_count"] == 4
     assert acct["needs_update_count"] == 3  # Water, Sanitary, Rate (no bill) - Electricity is OK
+    # RJ, 2026-09-14: "you did not add the filter to see the ones that
+    # need action where the bill is missing" - Water/Sanitary have a bill
+    # (just the wrong period), Rate has none at all, so this account
+    # should show 1 missing_bill + 2 period_mismatch, summing to the same
+    # needs_update_count as before.
+    assert acct["missing_bill_count"] == 1
+    assert acct["period_mismatch_count"] == 2
     assert acct["complete"] is False
     water = next(s for s in acct["services"] if s["id_bill"] == "1001")
     assert water["needs_update"] is True
     assert water["id_billing_period"] == "10000000236"
+    assert water["reason"] == "period_mismatch"
     rate = next(s for s in acct["services"] if s["id_offered_service"] == "176")
     assert rate["id_bill"] == ""  # no matching final bill at all
     assert rate["needs_update"] is True
+    assert rate["reason"] == "missing_bill"
+    electricity = next(s for s in acct["services"] if s["id_offered_service"] == "1")
+    assert electricity["needs_update"] is False
+    assert electricity["reason"] is None
     assert body["accounts_needing_action"] == 2
+    # Both accounts need action, but only 342702 has a service with no
+    # bill at all (555555's single flagged service has a real bill, just
+    # a period mismatch) - accounts_with_missing_bill should be 1, not 2.
+    assert body["accounts_with_missing_bill"] == 1
     assert body["possibly_truncated"] is False
+
+
+def test_bill_issuance_case2_detect_missing_bill_vs_period_mismatch_split(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BISS2_COLS, rows=_BISS2_ALL_ROWS, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/bill-issuance/case2/detect")
+    body = resp.json()
+    other = next(a for a in body["accounts"] if a["id_payment_form"] == "555555")
+    # 555555's only flagged service has a real bill (2001) - a period
+    # mismatch, not a missing bill.
+    assert other["missing_bill_count"] == 0
+    assert other["period_mismatch_count"] == 1
+    assert body["accounts_with_missing_bill"] == 1  # only 342702
 
 
 def test_bill_issuance_case2_detect_complete_account_flagged(client, monkeypatch):
@@ -3092,6 +3460,138 @@ def test_bill_issuance_case2_generate_requires_editor_role(client, monkeypatch):
         json={"id_payment_forms": [], "program": "JIRA-1"},
     )
     assert resp.status_code == 403
+
+
+# ---------------- Bill Issuance Validator: Case 4 (Unclassified) --------
+# RJ, 2026-09-14 (same day), own words: "create a 4th case,
+# 'Unclassified' those that are pending validation in notice TMP, and not
+# in case 1, case 2, case 3, and any other case that we will add in the
+# future." The route calls build_stuck_bills_query, build_new_contract_
+# match_query, build_terminated_period_mismatch_query, build_bills_
+# complete_query, and build_unclassified_query - this fixture dispatches
+# a distinct, minimal fake result to each based on a marker column/text
+# unique to that query's own shape, so the test can assert the excluded-
+# account logic without needing a real database.
+#
+# RJ, later same day, asked directly: "was this new rule considered in
+# case for unclassified?" - Case 1's own New Contract Match addition
+# (build_new_contract_match_query) had NOT been wired into this route's
+# exclusion set when it shipped. Account 555 below plays that role: it
+# only appears in New Contract Match's own fake result, so it must be
+# excluded from Unclassified same as 222/333/444 are.
+_BISS3_COLS = [
+    "REFERENCE", "ID_PAYMENT_FORM", "CONTRACTED_SERVICES", "BILLS", "MISSING_BILLS",
+    "ID_BILLING_PERIOD", "BILLING_PERIOD_NAME", "WITH_ACTIVE_CONTRACT",
+]
+_BISS4_COLS = [
+    "REFERENCE", "ID_PAYMENT_FORM", "ID_BILL", "ID_BILLING_PERIOD", "BILL_TYPE",
+    "ID_OFFERED_SERVICE", "OFFERED_SERVICE_DESC", "BILLING_STATUS", "BILLING_STATUS_DESC",
+    "BILLING_DATE",
+]
+# Account 111 has nothing in Case 1/2/3/New-Contract-Match's own fake
+# results below, so it's the one row that should survive as Unclassified.
+# Accounts 222/333/444/555 each appear in exactly one of those four
+# account sets, so each should be excluded from Case 4's output even
+# though they also have a row in the general "pending validation"
+# universe below.
+_BISS4_ROW_UNCLASSIFIED = ["1110001", 111, 9001, 10000000236, "TFGEN00001", 1, "Electricity", "ESTFAC0012", "En proceso de puesta al cobro", "2026-08-01"]
+_BISS4_ROW_CASE1_ACCOUNT = ["2220001", 222, 9002, 10000000236, "TFGEN00001", 176, "Rate", "ESTFAC0012", "En proceso de puesta al cobro", "2026-08-01"]
+_BISS4_ROW_CASE2_ACCOUNT = ["3330001", 333, 9003, 10000000236, "TFGEN00001", 19, "Water", "ESTFAC0012", "En proceso de puesta al cobro", "2026-08-01"]
+_BISS4_ROW_CASE3_ACCOUNT = ["4440001", 444, 9004, 10000000236, "TFGEN00001", 1, "Electricity", "ESTFAC0012", "En proceso de puesta al cobro", "2026-08-01"]
+_BISS4_ROW_NEW_CONTRACT_MATCH_ACCOUNT = ["5550001", 555, 9005, 10000000236, "TFGEN00001", 176, "Rate", "ESTFAC0012", "En proceso de puesta al cobro", "2026-08-01"]
+_BISS4_ALL_ROWS = [
+    _BISS4_ROW_UNCLASSIFIED, _BISS4_ROW_CASE1_ACCOUNT, _BISS4_ROW_CASE2_ACCOUNT, _BISS4_ROW_CASE3_ACCOUNT,
+    _BISS4_ROW_NEW_CONTRACT_MATCH_ACCOUNT,
+]
+
+
+def _biss4_fake_run_query(conn, sql):
+    if "ID_BILL_RATE" in sql:  # build_stuck_bills_query (Case 1)
+        return QueryResult(
+            columns=_BILLISS_COLS,
+            rows=[[222, "2220001", "2026-08-01", 1, 10000000235, 2, 1, "Electricity", 10000000236, "ESTFAC0015", 1, "En espera de otros servicios"]],
+            elapsed_ms=1.0,
+        )
+    if "CONTRACT_FROM_DATE" in sql:  # build_new_contract_match_query (Case 1: New Contract Match)
+        return QueryResult(columns=_BILLISS_NC_COLS, rows=[_BILLISS_NC_ROW_ACCOUNT_555], elapsed_ms=1.0)
+    if "ACCOUNT_HAS_ISSUE" in sql:  # build_terminated_period_mismatch_query (Case 2)
+        return QueryResult(
+            columns=_BISS2_COLS,
+            rows=[[333, "3330001", 19, "2026-08-01", 5001, 10000000236, "ESTFAC0012", 10000000236, 1, 1]],
+            elapsed_ms=1.0,
+        )
+    if "WITH_ACTIVE_CONTRACT" in sql:  # build_bills_complete_query (Case 3)
+        return QueryResult(
+            columns=_BISS3_COLS,
+            rows=[["4440001", 444, 3, 3, 0, 10000000236, "August 2026", "YES"]],
+            elapsed_ms=1.0,
+        )
+    return QueryResult(columns=_BISS4_COLS, rows=_BISS4_ALL_ROWS, elapsed_ms=1.0)  # build_unclassified_query
+
+
+def test_bill_issuance_case4_detect_requires_login(client):
+    resp = client.post("/api/bill-issuance/case4/detect")
+    assert resp.status_code == 401
+
+
+def test_bill_issuance_case4_detect_excludes_case123_accounts(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(server_mod.mssql, "run_query", _biss4_fake_run_query)
+    resp = client.post("/api/bill-issuance/case4/detect")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["account_count"] == 1
+    assert body["case1_account_count"] == 1
+    assert body["new_contract_match_account_count"] == 1
+    assert body["case2_account_count"] == 1
+    assert body["case3_account_count"] == 1
+    acct = body["accounts"][0]
+    assert acct["id_payment_form"] == "111"
+    assert acct["reference"] == "1110001"
+    assert acct["bill_count"] == 1
+    assert acct["bills"][0]["id_bill"] == "9001"
+    assert acct["bills"][0]["offered_service_desc"] == "Electricity"
+    # Accounts 222/333/444/555 each appeared in the general pending
+    # universe too, but were each excluded by exactly one of Case
+    # 1/New-Contract-Match/2/3 - confirm none of them leaked into the
+    # Unclassified account list. 555 specifically is the regression check
+    # for "was this new rule considered in case for unclassified?" - New
+    # Contract Match's own account set is now wired into the exclusion.
+    assert {a["id_payment_form"] for a in body["accounts"]} == {"111"}
+
+
+def test_bill_issuance_case4_export_xlsx_requires_rows(client):
+    _login(client)
+    resp = client.post("/api/bill-issuance/case4/export-xlsx", json={"rows": []})
+    assert resp.status_code == 400
+
+
+def test_bill_issuance_case4_export_xlsx_returns_workbook(client):
+    import openpyxl
+    from io import BytesIO
+
+    _login(client)
+    resp = client.post(
+        "/api/bill-issuance/case4/export-xlsx",
+        json={"rows": [{
+            "reference": "1110001", "id_payment_form": "111", "bill_count": "1",
+            "offered_services": "Electricity", "billing_periods": "10000000236",
+        }]},
+    )
+    assert resp.status_code == 200
+    wb = openpyxl.load_workbook(BytesIO(resp.content))
+    ws = wb.active
+    header = [c.value for c in ws[1]]
+    assert header == ["Account", "Payment Form ID", "Bill Count", "Services", "Billing Periods"]
+    row = [c.value for c in ws[2]]
+    assert row == ["1110001", "111", "1", "Electricity", "10000000236"]
+
+
+def test_bill_issuance_case4_export_xlsx_requires_login(client):
+    resp = client.post("/api/bill-issuance/case4/export-xlsx", json={"rows": []})
+    assert resp.status_code == 401
 
 
 # ---------------- Dashboard ----------------

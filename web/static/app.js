@@ -122,7 +122,7 @@ const EDITOR_ONLY_IDS = [
   "save-query-btn", "snapshot-export-btn",
   "ai-suggest-btn", "ai-optimize-btn", "ai-review-btn", "ai-where-btn",
   "da-generate-btn", "da-batch-run-btn", "da-cleanup-generate-btn",
-  "biss2-generate-btn",
+  "biss2-generate-btn", "billiss-release-generate-btn",
 ];
 
 function applyRolePermissionsToUI() {
@@ -1754,10 +1754,11 @@ function daCleanupTypeText(r) {
 // deliberately is NOT reset by filtering: a row checked, then hidden by a
 // filter, stays checked (same convention as most filter+select UIs) - see
 // the "Generate Cleanup Script" card's own hint text about this.
-function daCleanupVisibleIndices() {
+function daCleanupVisibleIndices(ignoreFilters = false) {
   return daCleanupRows
     .map((_, idx) => idx)
     .filter((idx) => {
+      if (ignoreFilters) return true;
       const r = daCleanupRows[idx];
       if (daCleanupFilters.offeredService && (r.offered_service || "") !== daCleanupFilters.offeredService) return false;
       if (daCleanupFilters.anomalousType && daCleanupTypeText(r) !== daCleanupFilters.anomalousType) return false;
@@ -1900,6 +1901,7 @@ function daCleanupPopulateFilterOptions() {
   $("#da-cleanup-chart-grid").hidden = daCleanupRows.length === 0;
   $("#da-cleanup-export-csv-btn").hidden = daCleanupRows.length === 0;
   $("#da-cleanup-export-xlsx-btn").hidden = daCleanupRows.length === 0;
+  $("#da-cleanup-export-all-wrap").hidden = daCleanupRows.length === 0;
 }
 
 // Exports whatever's currently VISIBLE (i.e. filtered/searched), not the
@@ -1907,7 +1909,8 @@ function daCleanupPopulateFilterOptions() {
 // bar, and matches the #dashboard-export-csv-btn convention elsewhere on
 // this page (build lines, Blob, temp <a download>, revoke).
 $("#da-cleanup-export-csv-btn").addEventListener("click", () => {
-  const visible = daCleanupVisibleIndices();
+  const exportAll = !!$("#da-cleanup-export-all")?.checked;
+  const visible = daCleanupVisibleIndices(exportAll);
   if (!visible.length) return;
   const header = ["id_item_to_bill", "account", "supply", "offered_service", "contract_status", "anomalous_type", "anomalous_status", "item_status", "needs_status_advance", "all_cycle", "non_cycle_reading_types", "billing_period_count"];
   const lines = [header.join(",")];
@@ -1926,7 +1929,7 @@ $("#da-cleanup-export-csv-btn").addEventListener("click", () => {
   const blob = new Blob([lines.join("\n")], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url; a.download = "detect_all_anomalies.csv";
+  a.href = url; a.download = exportAll ? "detect_all_anomalies_all.csv" : "detect_all_anomalies.csv";
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 });
@@ -1937,7 +1940,8 @@ $("#da-cleanup-export-csv-btn").addEventListener("click", () => {
 // (POST /api/date-anomaly/detect-all/export-xlsx, openpyxl-built) instead
 // of building a Blob client-side like the CSV button does.
 $("#da-cleanup-export-xlsx-btn").addEventListener("click", async () => {
-  const visible = daCleanupVisibleIndices();
+  const exportAll = !!$("#da-cleanup-export-all")?.checked;
+  const visible = daCleanupVisibleIndices(exportAll);
   if (!visible.length) return;
   const btn = $("#da-cleanup-export-xlsx-btn");
   const originalText = btn.textContent;
@@ -1973,7 +1977,7 @@ $("#da-cleanup-export-xlsx-btn").addEventListener("click", async () => {
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = "detect_all_anomalies.xlsx";
+    a.href = url; a.download = exportAll ? "detect_all_anomalies_all.xlsx" : "detect_all_anomalies.xlsx";
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   } catch (err) {
@@ -2935,11 +2939,12 @@ function hierIsBilled(readStatus) {
   return HIER_BILLED_READ_STATUSES.has(readStatus);
 }
 
-function hierVisibleIndices() {
+function hierVisibleIndices(ignoreFilters = false) {
   const search = hierFilters.search.trim().toLowerCase();
   const filtered = hierRows
     .map((r, i) => [r, i])
     .filter(([r]) => {
+      if (ignoreFilters) return true;
       if (hierFilters.status && r.read_status !== hierFilters.status) return false;
       if (hierFilters.type && r.reading_type !== hierFilters.type) return false;
       if (hierFilters.mpStatus && r.mp_status !== hierFilters.mpStatus) return false;
@@ -2979,6 +2984,7 @@ function hierPopulateFilterOptions() {
   $("#hier-filter-row").hidden = hierRows.length === 0;
   $("#hier-export-csv-btn").hidden = hierRows.length === 0;
   $("#hier-export-xlsx-btn").hidden = hierRows.length === 0;
+  $("#hier-export-all-wrap").hidden = hierRows.length === 0;
   $("#hier-dashboard-card").hidden = hierRows.length === 0;
 }
 
@@ -3332,7 +3338,8 @@ $("#hier-detail-filter-notbilled").addEventListener("change", () => {
 $("#hier-detail-close-btn").addEventListener("click", () => { $("#hier-detail-card").hidden = true; });
 
 $("#hier-export-csv-btn").addEventListener("click", () => {
-  const visible = hierVisibleIndices();
+  const exportAll = !!$("#hier-export-all")?.checked;
+  const visible = hierVisibleIndices(exportAll);
   if (!visible.length) return;
   const header = ["id_measuring_point", "id_main_mp", "niss", "mp_type", "mp_status", "secondary_count", "secondaries_not_sent_count", "id_calculation_module", "calc_module_type", "id_billing_period", "billing_period_desc", "id_reading", "reading_date", "reading_type", "reading_type_desc", "read_status", "ready_usage", "reading_usage"];
   const lines = [header.join(",")];
@@ -3343,13 +3350,14 @@ $("#hier-export-csv-btn").addEventListener("click", () => {
   const blob = new Blob([lines.join("\n")], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url; a.download = "hierarchy_analysis.csv";
+  a.href = url; a.download = exportAll ? "hierarchy_analysis_all.csv" : "hierarchy_analysis.csv";
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 });
 
 $("#hier-export-xlsx-btn").addEventListener("click", async () => {
-  const visible = hierVisibleIndices();
+  const exportAll = !!$("#hier-export-all")?.checked;
+  const visible = hierVisibleIndices(exportAll);
   if (!visible.length) return;
   const btn = $("#hier-export-xlsx-btn");
   const originalText = btn.textContent;
@@ -3391,7 +3399,7 @@ $("#hier-export-xlsx-btn").addEventListener("click", async () => {
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = "hierarchy_analysis.xlsx";
+    a.href = url; a.download = exportAll ? "hierarchy_analysis_all.xlsx" : "hierarchy_analysis.xlsx";
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   } catch (err) {
@@ -3427,16 +3435,59 @@ $$(".da-subnav-btn[data-biss-sub]").forEach((btn) => {
 // RJ, 2026-09-15: accounts whose next Electricity/Water bill is stuck
 // (BILLING_STATUS ESTFAC0015) behind a Rate (176) bill still being put to
 // collection - see app/core/bill_issuance_validator.py's module docstring
-// for the full query chain. Stateless, single flat result set - no
-// filters/drill-down yet (unlike Hierarchy Analysis), so this reuses the
-// same sort-header/CSV-export conventions but skips the filter-row/KPI-
-// dashboard machinery those pages have.
+// for the full query chain. Stateless, single flat result set.
+//
+// RJ, 2026-09-14: "enhancing Case 1, I found cases that the next water or
+// ele bills can be up to 11 billing period ahead of the rate bills, and
+// they are valid... add a column on how much months and then a filter as
+// well, i noticed that the excel download is also missing." The query
+// itself now scans up to 11 periods ahead by default (see build_stuck_
+// bills_query's own docstring - live-confirmed the exact-next-period-only
+// version currently finds ZERO accounts, the widened one finds 74) and
+// returns `periods_ahead` per row; this adds a client-side min/max filter
+// over that already-fetched column (same "filter what's already on
+// screen, don't re-query" convention as every other client-side filter in
+// this app) plus a real .xlsx export next to the existing CSV one.
+//
+// RJ, 2026-09-14 (later same day), verbatim: "I wanted the 2 cases merged
+// in 1 table, maybe you can do union but there will be clear identifier
+// of the case that i can use to filter." Stuck Bill and New Contract
+// Match (formerly a second, separate table - see app/core/bill_issuance_
+// validator.py's "Case 1: New Contract Match" comment block for that
+// pattern's own business rule and the 1102978994 period-uniqueness fix)
+// are now merged into ONE `billissRows` array by the server (see
+// bill_issuance_detect in web/server.py), each row tagged `pattern` -
+// "stuck_bill" or "new_contract". Common columns (reference, notice_
+// update_date, id_bill_rate, period_rate) are populated for both
+// patterns; pattern-specific columns are blank ("") on rows where they
+// don't apply - the table just renders "-" for those cells. The old
+// standalone New Contract Match card/table/detect-button and its own
+// `billissNc*` state are gone; the standalone API route
+// (/api/bill-issuance/case1/new-contract-match/detect) is kept as-is for
+// programmatic access to just that one pattern (Case 4 "Unclassified"
+// still calls the query builder function directly, not this route).
 let billissRows = [];
 let billissSortKey = null;
 let billissSortDir = 1;
 
-function billissVisibleIndices() {
-  const indices = billissRows.map((_, i) => i);
+function billissVisibleIndices(ignoreFilters = false) {
+  let indices = billissRows.map((_, i) => i);
+  if (!ignoreFilters) {
+    const min = Number($("#billiss-ahead-min")?.value) || 1;
+    const max = Number($("#billiss-ahead-max")?.value) || 11;
+    // Months-ahead filter only makes sense for Stuck Bill rows -
+    // New Contract Match rows have no periods_ahead value and always pass.
+    indices = indices.filter((i) => {
+      const r = billissRows[i];
+      if (r.pattern !== "stuck_bill") return true;
+      const n = Number(r.periods_ahead);
+      return Number.isFinite(n) && n >= min && n <= max;
+    });
+    const pattern = $("#billiss-pattern-filter")?.value || "";
+    if (pattern) indices = indices.filter((i) => billissRows[i].pattern === pattern);
+    const term = ($("#billiss-search")?.value || "").trim().toLowerCase();
+    if (term) indices = indices.filter((i) => String(billissRows[i].reference ?? "").toLowerCase().includes(term));
+  }
   if (billissSortKey) {
     indices.sort((a, b) => _hierCompareValues(billissRows[a][billissSortKey], billissRows[b][billissSortKey], billissSortDir));
   }
@@ -3445,15 +3496,22 @@ function billissVisibleIndices() {
 
 function billissRenderKpiRow() {
   // No duplicates by design (RJ, 2026-09-15: "i dont want duplicates") -
-  // one row per account, Electricity preferred over Water - so "rows"
-  // and "distinct accounts" are always the same number now; only the
-  // Electricity/Water split is worth its own card.
-  const electricityCount = billissRows.filter((r) => String(r.offered_service_next) === "1").length;
-  const waterCount = billissRows.filter((r) => String(r.offered_service_next) === "19").length;
+  // one row per account, Electricity preferred over Water - so among
+  // Stuck Bill rows, "rows" and "distinct accounts" are always the same
+  // number; only the Electricity/Water split is worth its own card.
+  const stuckRows = billissRows.filter((r) => r.pattern === "stuck_bill");
+  const ncRows = billissRows.filter((r) => r.pattern === "new_contract");
+  const electricityCount = stuckRows.filter((r) => String(r.offered_service_next) === "1").length;
+  const waterCount = stuckRows.filter((r) => String(r.offered_service_next) === "19").length;
+  const aheadValues = stuckRows.map((r) => Number(r.periods_ahead)).filter((n) => Number.isFinite(n));
+  const avgAhead = aheadValues.length ? (aheadValues.reduce((a, b) => a + b, 0) / aheadValues.length).toFixed(1) : "—";
   const cards = [
-    ["rows", "🧾", "Accounts blocked", billissRows.length],
+    ["rows", "🧾", "Total rows", billissRows.length],
+    ["stuck", "⛔", "Stuck Bill", stuckRows.length],
+    ["newcontract", "🆕", "New Contract Match", ncRows.length],
     ["electricity", "⚡", "Electricity blocked", electricityCount],
     ["water", "💧", "Water blocked (Electricity OK)", waterCount],
+    ["avgahead", "📅", "Avg. months ahead (Stuck Bill)", avgAhead],
   ];
   $("#billiss-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
     `<div class="kpi-card" data-kpi="${kpi}">
@@ -3462,6 +3520,8 @@ function billissRenderKpiRow() {
     </div>`
   ).join("");
 }
+
+const _billissPatternLabel = { stuck_bill: "Stuck Bill", new_contract: "New Contract Match" };
 
 function billissRenderTable() {
   const visible = billissVisibleIndices();
@@ -3472,18 +3532,26 @@ function billissRenderTable() {
     const tr = document.createElement("tr");
     tr.innerHTML = (
       `<td>${escapeHtml(r.reference ?? "")}</td>` +
+      `<td>${escapeHtml(_billissPatternLabel[r.pattern] ?? r.pattern ?? "")}</td>` +
       `<td>${escapeHtml(r.notice_update_date ?? "")}</td>` +
       `<td>${escapeHtml(r.id_bill_rate ?? "")}</td>` +
       `<td>${escapeHtml(r.period_rate ?? "")}</td>` +
-      `<td>${escapeHtml(r.id_bill_next ?? "")}</td>` +
-      `<td title="ID_OFFERED_SERVICE ${escapeHtml(r.offered_service_next ?? "")}">${escapeHtml(r.offered_service_next_desc ?? r.offered_service_next ?? "")}</td>` +
-      `<td>${escapeHtml(r.period_next ?? "")}</td>` +
-      `<td title="${escapeHtml(r.status_next ?? "")}">${escapeHtml(r.status_next_desc ?? r.status_next ?? "")}</td>`
+      `<td>${escapeHtml(r.id_bill_next ?? "") || "-"}</td>` +
+      `<td title="ID_OFFERED_SERVICE ${escapeHtml(r.offered_service_next ?? "")}">${escapeHtml(r.offered_service_next_desc ?? r.offered_service_next ?? "") || "-"}</td>` +
+      `<td>${escapeHtml(r.period_next ?? "") || "-"}</td>` +
+      `<td>${escapeHtml(r.periods_ahead ?? "") || "-"}</td>` +
+      `<td title="${escapeHtml(r.status_next ?? "")}">${escapeHtml(r.status_next_desc ?? r.status_next ?? "") || "-"}</td>` +
+      `<td>${escapeHtml(r.billing_status_desc ?? "") || "-"}</td>` +
+      `<td>${escapeHtml(r.last_billing_date ?? "") || "-"}</td>` +
+      `<td>${escapeHtml(r.contract_from_date ?? "") || "-"}</td>` +
+      `<td>${escapeHtml(r.contract_status ?? "") || "-"}</td>`
     );
     tbody.appendChild(tr);
   });
   billissRenderKpiRow();
   $("#billiss-export-csv-btn").hidden = billissRows.length === 0;
+  $("#billiss-export-xlsx-btn").hidden = billissRows.length === 0;
+  $("#billiss-export-all-wrap").hidden = billissRows.length === 0;
 }
 
 hierWireSortableHeaders(
@@ -3492,6 +3560,11 @@ hierWireSortableHeaders(
   () => billissSortDir, (d) => { billissSortDir = d; },
   billissRenderTable,
 );
+
+$("#billiss-ahead-min").addEventListener("input", () => billissRenderTable());
+$("#billiss-ahead-max").addEventListener("input", () => billissRenderTable());
+$("#billiss-search").addEventListener("input", () => billissRenderTable());
+$("#billiss-pattern-filter").addEventListener("change", () => billissRenderTable());
 
 $("#billiss-detect-btn").addEventListener("click", async () => {
   const btn = $("#billiss-detect-btn");
@@ -3503,13 +3576,17 @@ $("#billiss-detect-btn").addEventListener("click", async () => {
     billissRows = data.rows;
     billissSortKey = null;
     billissSortDir = 1;
+    $("#billiss-ahead-min").value = "1";
+    $("#billiss-ahead-max").value = String(data.max_periods_ahead || 11);
+    $("#billiss-search").value = "";
+    $("#billiss-pattern-filter").value = "";
     document.querySelectorAll("#billiss-table thead th[data-sort]").forEach((h) => {
       h.querySelector(".stats-table-sort-arrow")?.remove();
     });
     billissRenderTable();
     $("#billiss-summary").textContent = data.possibly_truncated
-      ? `${billissRows.length}+ stuck bills found (capped at ${data.limit} - list may be incomplete).`
-      : `${billissRows.length} stuck bill(s) found.`;
+      ? `${billissRows.length} row(s) found (${data.stuck_bill_count} Stuck Bill, ${data.new_contract_match_count} New Contract Match - one or both may be capped at their own limit, list may be incomplete).`
+      : `${billissRows.length} row(s) found: ${data.stuck_bill_count} Stuck Bill (up to ${data.max_periods_ahead} billing period(s) ahead), ${data.new_contract_match_count} New Contract Match.`;
   } catch (err) {
     showToast(err.message || "Scan failed.", true);
   } finally {
@@ -3518,22 +3595,127 @@ $("#billiss-detect-btn").addEventListener("click", async () => {
   }
 });
 
+const _billissCsvHeader = ["id_payment_form", "reference", "pattern", "notice_update_date", "id_bill_rate", "period_rate", "id_bill_next", "offered_service_next", "offered_service_next_desc", "period_next", "periods_ahead", "status_next", "status_next_desc", "billing_status_desc", "last_billing_date", "contract_from_date", "contract_status"];
+
 $("#billiss-export-csv-btn").addEventListener("click", () => {
-  const visible = billissVisibleIndices();
+  const exportAll = !!$("#billiss-export-all")?.checked;
+  const visible = billissVisibleIndices(exportAll);
   if (!visible.length) return;
-  const header = ["id_payment_form", "reference", "notice_update_date", "id_bill_rate", "period_rate", "id_bill_next", "offered_service_next", "offered_service_next_desc", "period_next", "status_next", "status_next_desc"];
-  const lines = [header.join(",")];
+  const lines = [_billissCsvHeader.join(",")];
   visible.forEach((idx) => {
     const r = billissRows[idx];
-    lines.push(header.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(","));
+    lines.push(_billissCsvHeader.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(","));
   });
   const blob = new Blob([lines.join("\n")], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url; a.download = "bill_issuance_validator.csv";
+  a.href = url; a.download = exportAll ? "bill_issuance_validator_all.csv" : "bill_issuance_validator.csv";
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 });
+
+$("#billiss-export-xlsx-btn").addEventListener("click", async () => {
+  const exportAll = !!$("#billiss-export-all")?.checked;
+  const visible = billissVisibleIndices(exportAll);
+  if (!visible.length) return;
+  const btn = $("#billiss-export-xlsx-btn");
+  btn.disabled = true;
+  try {
+    const rows = visible.map((idx) => {
+      const r = billissRows[idx];
+      return {
+        reference: r.reference ?? "", pattern: r.pattern ?? "", notice_update_date: r.notice_update_date ?? "",
+        id_bill_rate: r.id_bill_rate ?? "", period_rate: r.period_rate ?? "",
+        id_bill_next: r.id_bill_next ?? "", offered_service_next_desc: r.offered_service_next_desc ?? "",
+        period_next: r.period_next ?? "", periods_ahead: r.periods_ahead ?? "",
+        status_next_desc: r.status_next_desc ?? "",
+        billing_status_desc: r.billing_status_desc ?? "", last_billing_date: r.last_billing_date ?? "",
+        contract_from_date: r.contract_from_date ?? "", contract_status: r.contract_status ?? "",
+      };
+    });
+    const res = await fetch("/api/bill-issuance/export-xlsx", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Export failed.");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = exportAll ? "bill_issuance_case1_all.xlsx" : "bill_issuance_case1.xlsx";
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    showToast(err.message || "Excel export failed.", true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Case 1 "Generate Release Script" - RJ, 2026-09-14: "for case 1, create
+// script for all detected, 'Generate Release script'" with RJ's own exact
+// UPDATE GCCOM_NOTICE_TMP template. Always acts on every currently
+// detected Rate bill (the server re-runs the Stuck Bills scan fresh right
+// before generating - same "re-verify at generate time" pattern as Case
+// 2's own Generate button) - no row-selection UI here, unlike Case 2/4,
+// since RJ's own request was "for all detected", not a per-row pick.
+$("#billiss-release-generate-btn").addEventListener("click", async () => {
+  const program = $("#billiss-release-program").value.trim();
+  const audit_user = $("#billiss-release-user").value.trim();
+  const clean = $("#billiss-release-clean-toggle").checked;
+  const btn = $("#billiss-release-generate-btn");
+  btn.disabled = true;
+  try {
+    const result = await api("/api/bill-issuance/generate-release", {
+      method: "POST",
+      body: { program, audit_user, clean },
+    });
+    $("#billiss-release-output").textContent = result.sql_text;
+    let msg = `Release script generated: ${result.bill_count} bill(s).`;
+    if (result.warnings.length) msg += `  ${result.warnings.length} warning(s) - see comments at the top of the script.`;
+    showToast(msg);
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = state.role === "viewer";
+  }
+});
+
+$("#billiss-release-copy-btn").addEventListener("click", async () => {
+  const text = $("#billiss-release-output").textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("Release script copied to clipboard.");
+  } catch (_) {
+    showToast("Couldn't copy - select and copy manually.", true);
+  }
+});
+
+$("#billiss-release-download-btn").addEventListener("click", () => {
+  const text = $("#billiss-release-output").textContent;
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "bill_issuance_case1_release.sql";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// Case 1 "New Contract Match" - RJ, 2026-09-14 (later same day), verbatim:
+// "incorporate in case 1, the existing case 1 is ok, now i only want to
+// add the case that its is only rate which is in pending validation
+// notice_tmp and invoicing gccom_bill, the contract start (from_date) of
+// gccom_contracted service is same as last_billing_date of gccom_bill" -
+// see app/core/bill_issuance_validator.py's own "Case 1: New Contract
+// Match" comment block for RJ's exact starting SQL and the uniqueness-
+// filter fix he explicitly asked for. Originally its own second, flat
+// table within the Case 1 tab; RJ, 2026-09-14 (later still, same day)
+// then asked to merge it with Stuck Bill into one table with a filterable
+// case identifier (see the "billissRows" comment block above) - the
+// billissNc* UI state/table/detect-button that used to live here is gone,
+// its rows now render as `pattern: "new_contract"` inside #billiss-table.
+// The standalone API route (/api/bill-issuance/case1/new-contract-match/
+// detect) is unchanged and still callable directly.
 
 // ---------------- Bill Issuance Validator: Case 2 (terminated account, --
 // billing-period mismatch) ----------------
@@ -3556,10 +3738,42 @@ let biss2SortDir = 1;
 let biss2Selected = new Set(); // selected row indices - into biss2Accounts
 let biss2Expanded = new Set(); // expanded row indices - into biss2Accounts
 
-function biss2VisibleIndices() {
-  const showComplete = $("#biss2-show-complete").checked;
+// RJ, 2026-09-17: "add the filters and sort" - sort (column headers) was
+// already wired below; this is the missing filter half. Plain substring
+// match against the account REFERENCE, same "search box narrows the
+// visible rows, doesn't re-query" convention as Detect All's own search
+// box (see daCleanupSearchTerm elsewhere in this file).
+function biss2VisibleIndices(ignoreFilters = false) {
+  // RJ, 2026-09-17: "I need to have a filter to see the complete one, or
+  // to see only the ones with missing" - replaced the old single "Show
+  // Complete accounts too" checkbox with a proper 3-way status filter.
+  // RJ, 2026-09-14: "you did not add the filter to see the ones that need
+  // action where the bill is missing" - "needs action" was conflating two
+  // different reasons (no bill found at all vs. a bill that just needs
+  // its period moved - see _case2_group_rows_by_account's own docstring
+  // server-side), so this now has dedicated missing-bill/period-mismatch
+  // options alongside the original "either reason" one.
+  // RJ, 2026-09-14 (later same day): "add additional filter on case 2,
+  // check box to say with missing bill or not" - added as a standalone
+  // checkbox that ANDs on top of whatever the status dropdown already
+  // shows (e.g. "All" + checked narrows to every account, complete or
+  // not, that has ever had a missing bill), rather than folding it into
+  // the dropdown's own mutually-exclusive options.
+  // `ignoreFilters=true` is used by the Export All button (see
+  // biss2AllIndices) to get every row in current sort order, skipping
+  // the status/search/missing-bill filters entirely.
   let indices = biss2Accounts.map((_, i) => i);
-  if (!showComplete) indices = indices.filter((i) => !biss2Accounts[i].complete);
+  if (!ignoreFilters) {
+    const statusFilter = $("#biss2-status-filter")?.value || "needs-action";
+    const term = ($("#biss2-search")?.value || "").trim().toLowerCase();
+    const missingBillOnly = !!$("#biss2-missing-bill-only")?.checked;
+    if (statusFilter === "needs-action") indices = indices.filter((i) => !biss2Accounts[i].complete);
+    else if (statusFilter === "missing-bill") indices = indices.filter((i) => biss2Accounts[i].missing_bill_count > 0);
+    else if (statusFilter === "period-mismatch") indices = indices.filter((i) => biss2Accounts[i].period_mismatch_count > 0);
+    else if (statusFilter === "complete") indices = indices.filter((i) => biss2Accounts[i].complete);
+    if (missingBillOnly) indices = indices.filter((i) => biss2Accounts[i].missing_bill_count > 0);
+    if (term) indices = indices.filter((i) => String(biss2Accounts[i].reference ?? "").toLowerCase().includes(term));
+  }
   if (biss2SortKey) {
     indices.sort((a, b) => _hierCompareValues(biss2Accounts[a][biss2SortKey], biss2Accounts[b][biss2SortKey], biss2SortDir));
   }
@@ -3571,9 +3785,13 @@ function biss2RenderKpiRow() {
   const needsAction = biss2Accounts.filter((a) => !a.complete).length;
   const complete = total - needsAction;
   const servicesNeedingUpdate = biss2Accounts.reduce((sum, a) => sum + a.needs_update_count, 0);
+  // RJ, 2026-09-14: surface the missing-bill reason on its own card too,
+  // not just as a filter option - see biss2VisibleIndices' own comment.
+  const missingBillAccounts = biss2Accounts.filter((a) => a.missing_bill_count > 0).length;
   const cards = [
-    ["accounts", "🧾", "Terminated accounts scanned", total],
+    ["accounts", "🧾", "Terminated accounts with a pending notice", total],
     ["needsaction", "⚠️", "Accounts needing action", needsAction],
+    ["missingbill", "❓", "Accounts with a missing bill", missingBillAccounts],
     ["complete", "✅", "Accounts already Complete", complete],
     ["services", "🔧", "Services needing a period update", servicesNeedingUpdate],
   ];
@@ -3588,7 +3806,7 @@ function biss2RenderKpiRow() {
 function biss2RenderServiceRows(idx) {
   const acct = biss2Accounts[idx];
   const rows = acct.services.map((s) => (
-    `<tr class="biss2-service-row ${s.needs_update ? "row-multi-period" : ""}">` +
+    `<tr class="biss2-service-row ${s.needs_update ? "row-needs-action" : ""}">` +
       `<td></td><td></td>` +
       `<td title="ID_OFFERED_SERVICE ${escapeHtml(s.id_offered_service ?? "")}">${escapeHtml(s.offered_service_desc || s.id_offered_service || "")}</td>` +
       `<td colspan="2">Final bill (termination date ${escapeHtml(s.end_date ?? "")}): ` +
@@ -3596,20 +3814,30 @@ function biss2RenderServiceRows(idx) {
           ? `Bill ${escapeHtml(s.id_bill)}, period ${escapeHtml(s.id_billing_period ?? "")}, status ${escapeHtml(s.billing_status ?? "")}`
           : `<strong>none found</strong> - no bill dated exactly this service's termination date`) +
       `</td>` +
-      `<td>${s.needs_update ? "Needs update" : "OK"}</td>` +
+      `<td>${s.needs_update ? "⚠️ Needs update" : "✅ OK"}</td>` +
     `</tr>`
   )).join("");
   return rows;
 }
 
+// Case 2 row markup - RJ, 2026-09-13: "its difficult to copy the account,
+// also can you use a different look and feel, a modern one where each row
+// is clearly recognized the design is so bad." Account number now gets
+// its own dedicated copy button (data-biss2-copy) instead of relying on
+// manual text selection inside a click-to-toggle cell, and status is a
+// pill badge (.biss2-status-pill) instead of plain text. The account
+// text itself still expands the row on click (data-biss2-toggle) since
+// that's a bigger, more forgiving click target than just the chevron -
+// the copy button uses stopPropagation so it never triggers the toggle.
 function biss2RenderTable() {
   const visible = biss2VisibleIndices();
   const tbody = $("#biss2-table tbody");
   tbody.innerHTML = "";
   visible.forEach((idx) => {
     const acct = biss2Accounts[idx];
+    const expanded = biss2Expanded.has(idx);
     const tr = document.createElement("tr");
-    tr.className = acct.complete ? "" : "row-multi-period";
+    tr.className = `biss2-account-row ${acct.complete ? "is-complete" : "is-needs-action"} ${expanded ? "is-expanded" : ""}`;
     const td0 = document.createElement("td");
     const cb = document.createElement("input");
     cb.type = "checkbox";
@@ -3620,14 +3848,17 @@ function biss2RenderTable() {
     });
     td0.appendChild(cb);
     tr.appendChild(td0);
-    const expanded = biss2Expanded.has(idx);
+    const ref = escapeHtml(acct.reference ?? "");
     tr.insertAdjacentHTML("beforeend", (
-      `<td style="cursor:pointer;text-align:center;" data-biss2-toggle="${idx}">${expanded ? "▾" : "▸"}</td>` +
-      `<td style="cursor:pointer;" data-biss2-toggle="${idx}">${escapeHtml(acct.reference ?? "")}</td>` +
+      `<td class="biss2-toggle-cell" data-biss2-toggle="${idx}">${expanded ? "▾" : "▸"}</td>` +
+      `<td><div class="biss2-account-cell">` +
+        `<span class="biss2-account-num" data-biss2-toggle="${idx}">${ref}</span>` +
+        `<button type="button" class="biss2-copy-btn" data-biss2-copy="${ref}" title="Copy account number">📋</button>` +
+      `</div></td>` +
       `<td>${acct.service_count}</td>` +
       `<td>${acct.needs_update_count}</td>` +
       `<td>${escapeHtml(acct.target_period ?? "")}</td>` +
-      `<td>${acct.complete ? "Complete" : "Needs action"}</td>`
+      `<td><span class="biss2-status-pill ${acct.complete ? "is-complete" : "is-needs-action"}">${acct.complete ? "✅ Complete" : "⚠️ Needs action"}</span></td>`
     ));
     tbody.appendChild(tr);
     if (expanded) {
@@ -3641,9 +3872,54 @@ function biss2RenderTable() {
       biss2RenderTable();
     });
   });
+  tbody.querySelectorAll("[data-biss2-copy]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const value = btn.dataset.biss2Copy || "";
+      biss2CopyAccount(value, btn);
+    });
+  });
   biss2RenderKpiRow();
   $("#biss2-export-csv-btn").hidden = biss2Accounts.length === 0;
+  $("#biss2-export-all-wrap").hidden = biss2Accounts.length === 0;
   $("#biss2-select-all").checked = visible.length > 0 && visible.every((i) => biss2Selected.has(i));
+}
+
+function biss2CopyAccount(value, btn) {
+  const done = (ok) => {
+    if (!btn) return;
+    const original = btn.textContent;
+    btn.textContent = ok ? "✓" : "✕";
+    btn.classList.toggle("is-copied", ok);
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove("is-copied");
+    }, 1200);
+  };
+  // Fallback for contexts without the async Clipboard API, or where it's
+  // present but permission is denied (some embedded/kiosk browsers block
+  // it outright even for a genuine user click) - a plain textarea +
+  // execCommand("copy") still works in those cases.
+  const legacyFallback = () => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = value;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      done(ok);
+    } catch {
+      done(false);
+    }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(value).then(() => done(true)).catch(legacyFallback);
+  } else {
+    legacyFallback();
+  }
 }
 
 hierWireSortableHeaders(
@@ -3660,7 +3936,9 @@ $("#biss2-select-all").addEventListener("change", (e) => {
   biss2RenderTable();
 });
 
-$("#biss2-show-complete").addEventListener("change", () => biss2RenderTable());
+$("#biss2-status-filter").addEventListener("change", () => biss2RenderTable());
+$("#biss2-search").addEventListener("input", () => biss2RenderTable());
+$("#biss2-missing-bill-only").addEventListener("change", () => biss2RenderTable());
 
 $("#biss2-detect-btn").addEventListener("click", async () => {
   const btn = $("#biss2-detect-btn");
@@ -3675,13 +3953,14 @@ $("#biss2-detect-btn").addEventListener("click", async () => {
     biss2Expanded = new Set();
     biss2SortKey = null;
     biss2SortDir = 1;
+    $("#biss2-search").value = "";
     document.querySelectorAll("#biss2-table thead th[data-sort]").forEach((h) => {
       h.querySelector(".stats-table-sort-arrow")?.remove();
     });
     biss2RenderTable();
     $("#biss2-summary").textContent = data.possibly_truncated
-      ? `${data.account_count}+ account(s) found (row cap of ${data.limit} hit - list may be incomplete, try a shorter lookback), ${data.accounts_needing_action} needing action.`
-      : `${data.account_count} terminated account(s) found, ${data.accounts_needing_action} needing action.`;
+      ? `${data.account_count}+ account(s) with a pending notice found (row cap of ${data.limit} hit - list may be incomplete, try a shorter lookback), ${data.accounts_needing_action} needing action (${data.accounts_with_missing_bill} with a missing bill).`
+      : `${data.account_count} terminated account(s) with a pending notice found, ${data.accounts_needing_action} needing action (${data.accounts_with_missing_bill} with a missing bill).`;
   } catch (err) {
     showToast(err.message || "Scan failed.", true);
   } finally {
@@ -3691,18 +3970,47 @@ $("#biss2-detect-btn").addEventListener("click", async () => {
 });
 
 $("#biss2-export-csv-btn").addEventListener("click", () => {
-  const visible = biss2VisibleIndices();
+  // RJ, 2026-09-14 (later same day): "for case 2, i need the bills and
+  // status to be included in the export, now it only gives me the
+  // account and service count" - the export was account-level only
+  // (service_count etc.), with the actual per-service bill/status detail
+  // (acct.services[]) only visible in the UI's own drill-down, never in
+  // the CSV. Added joined-string columns built from acct.services -
+  // same "row per account, bill-level detail as semicolon-joined
+  // columns" convention Case 4's own CSV export already uses (see
+  // biss4-export-csv-btn below), so each account still exports as one
+  // row but now carries every service's bill id, billing period, and
+  // status alongside it.
+  const exportAll = !!$("#biss2-export-all")?.checked;
+  const visible = biss2VisibleIndices(exportAll);
   if (!visible.length) return;
-  const header = ["id_payment_form", "reference", "service_count", "needs_update_count", "target_period", "complete"];
+  const header = [
+    "id_payment_form", "reference", "service_count", "needs_update_count", "missing_bill_count",
+    "period_mismatch_count", "target_period", "complete",
+    "offered_services", "bills", "billing_periods", "billing_statuses",
+  ];
   const lines = [header.join(",")];
   visible.forEach((idx) => {
     const a = biss2Accounts[idx];
-    lines.push(header.map((k) => `"${String(a[k] ?? "").replace(/"/g, '""')}"`).join(","));
+    // Positionally aligned (NOT independently filtered) - a service with
+    // no matching bill (the "missing bill" case) still gets a slot so
+    // the Nth entry in every column below is still the same service,
+    // rather than the arrays silently drifting out of sync with each
+    // other once one column drops an empty value the others don't.
+    const services = a.services || [];
+    const row = {
+      ...a,
+      offered_services: services.map((s) => s.offered_service_desc || "?").join("; "),
+      bills: services.map((s) => s.id_bill || "(none)").join("; "),
+      billing_periods: services.map((s) => s.id_billing_period || "-").join("; "),
+      billing_statuses: services.map((s) => s.billing_status || "-").join("; "),
+    };
+    lines.push(header.map((k) => `"${String(row[k] ?? "").replace(/"/g, '""')}"`).join(","));
   });
   const blob = new Blob([lines.join("\n")], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const a2 = document.createElement("a");
-  a2.href = url; a2.download = "bill_issuance_validator_case2.csv";
+  a2.href = url; a2.download = exportAll ? "bill_issuance_validator_case2_all.csv" : "bill_issuance_validator_case2.csv";
   document.body.appendChild(a2); a2.click(); a2.remove();
   URL.revokeObjectURL(url);
 });
@@ -3750,6 +4058,355 @@ $("#biss2-download-btn").addEventListener("click", () => {
   a.href = url; a.download = "bill_issuance_case2_update.sql";
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
+});
+
+// ---------------- Bill Issuance Validator: Case 3 (All Contract Status -
+// Bills Complete) ----------------
+// RJ, 2026-09-14: per-account, per-2026-billing-period rows where the
+// account's total contracted-service count already exactly equals its
+// still-invoicing cycle-bill count for that period - see
+// app/core/bill_issuance_validator.py's Case 3 comment block for RJ's own
+// verbatim SQL and the "1 by 1, to obtain the correct result" per-period
+// reasoning. Read-only/informational (no Generate button - these accounts
+// have nothing wrong to fix), flat one-row-per-(account,period) table,
+// same sort-header/CSV-export/client-side-search convention as Case 1/2,
+// plus a server-side period + With-Active-Contract filter (re-scans on
+// Scan click, same idiom as Case 2's days-back dropdown) since those two
+// filters change which SQL actually runs, not just which already-fetched
+// rows are visible.
+let biss3Rows = [];
+let biss3SortKey = null;
+let biss3SortDir = 1;
+
+async function biss3LoadPeriods() {
+  const yearSel = $("#biss3-year");
+  const periodSel = $("#biss3-period-filter");
+  const year = Number(yearSel.value) || bill_issuance_case3_default_year;
+  try {
+    const data = await api(`/api/bill-issuance/case3/billing-periods?year=${year}`, { method: "GET" });
+    const current = periodSel.value;
+    periodSel.innerHTML = `<option value="">All ${year} periods</option>` + data.periods.map((p) =>
+      `<option value="${escapeHtml(p.id_billing_period)}">${escapeHtml(p.period_name)}</option>`
+    ).join("");
+    if ([...periodSel.options].some((o) => o.value === current)) periodSel.value = current;
+  } catch (_) { /* not fatal - period dropdown just stays on "All periods" */ }
+}
+const bill_issuance_case3_default_year = 2026;
+$("#biss3-year").addEventListener("change", biss3LoadPeriods);
+
+function biss3VisibleIndices(ignoreFilters = false) {
+  let indices = biss3Rows.map((_, i) => i);
+  if (!ignoreFilters) {
+    const term = ($("#biss3-search")?.value || "").trim().toLowerCase();
+    if (term) indices = indices.filter((i) => String(biss3Rows[i].reference ?? "").toLowerCase().includes(term));
+  }
+  if (biss3SortKey) {
+    indices.sort((a, b) => _hierCompareValues(biss3Rows[a][biss3SortKey], biss3Rows[b][biss3SortKey], biss3SortDir));
+  }
+  return indices;
+}
+
+function biss3RenderKpiRow(data) {
+  const cards = [
+    ["rows", "🧾", "Account/period rows", biss3Rows.length],
+    ["accounts", "🏠", "Distinct accounts", data?.account_count ?? new Set(biss3Rows.map((r) => r.id_payment_form)).size],
+    ["active", "✅", "With active contract (YES)", data?.with_active_contract_count ?? biss3Rows.filter((r) => r.with_active_contract === "YES").length],
+  ];
+  $("#biss3-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
+    `<div class="kpi-card" data-kpi="${kpi}">
+      <div class="kpi-value">${value}</div>
+      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
+    </div>`
+  ).join("");
+}
+
+function biss3RenderTable() {
+  const visible = biss3VisibleIndices();
+  const tbody = $("#biss3-table tbody");
+  tbody.innerHTML = "";
+  visible.forEach((idx) => {
+    const r = biss3Rows[idx];
+    const tr = document.createElement("tr");
+    tr.innerHTML = (
+      `<td>${escapeHtml(r.reference ?? "")}</td>` +
+      `<td title="ID_BILLING_PERIOD ${escapeHtml(r.id_billing_period ?? "")}">${escapeHtml(r.billing_period_name ?? r.id_billing_period ?? "")}</td>` +
+      `<td>${escapeHtml(r.contracted_services ?? "")}</td>` +
+      `<td>${escapeHtml(r.bills ?? "")}</td>` +
+      `<td><span class="biss2-status-pill ${r.with_active_contract === "YES" ? "is-complete" : "is-needs-action"}">${escapeHtml(r.with_active_contract ?? "")}</span></td>`
+    );
+    tbody.appendChild(tr);
+  });
+  biss3RenderKpiRow();
+  $("#biss3-export-csv-btn").hidden = biss3Rows.length === 0;
+  $("#biss3-export-all-wrap").hidden = biss3Rows.length === 0;
+}
+
+hierWireSortableHeaders(
+  "#biss3-table",
+  () => biss3SortKey, (k) => { biss3SortKey = k; },
+  () => biss3SortDir, (d) => { biss3SortDir = d; },
+  biss3RenderTable,
+);
+
+$("#biss3-search").addEventListener("input", () => biss3RenderTable());
+
+$("#biss3-detect-btn").addEventListener("click", async () => {
+  const btn = $("#biss3-detect-btn");
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "Scanning…";
+  try {
+    const year = Number($("#biss3-year").value) || bill_issuance_case3_default_year;
+    const periodId = $("#biss3-period-filter").value;
+    const activeFilter = $("#biss3-active-filter").value;
+    const params = new URLSearchParams({ year: String(year) });
+    if (periodId) params.set("billing_period_id", periodId);
+    if (activeFilter) params.set("with_active_contract", activeFilter);
+    const data = await api(`/api/bill-issuance/case3/detect?${params.toString()}`, { method: "POST" });
+    biss3Rows = data.rows;
+    biss3SortKey = null;
+    biss3SortDir = 1;
+    $("#biss3-search").value = "";
+    document.querySelectorAll("#biss3-table thead th[data-sort]").forEach((h) => {
+      h.querySelector(".stats-table-sort-arrow")?.remove();
+    });
+    biss3RenderTable(data);
+    $("#biss3-summary").textContent = data.possibly_truncated
+      ? `${data.row_count}+ row(s) found (capped at ${data.limit} - list may be incomplete, try narrowing the period filter), ${data.account_count} distinct account(s).`
+      : `${data.row_count} row(s) found, ${data.account_count} distinct account(s), ${data.with_active_contract_count} with an active contract.`;
+  } catch (err) {
+    showToast(err.message || "Scan failed.", true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+});
+
+$("#biss3-export-csv-btn").addEventListener("click", () => {
+  const exportAll = !!$("#biss3-export-all")?.checked;
+  const visible = biss3VisibleIndices(exportAll);
+  if (!visible.length) return;
+  const header = ["reference", "id_payment_form", "contracted_services", "bills", "missing_bills", "id_billing_period", "billing_period_name", "with_active_contract"];
+  const lines = [header.join(",")];
+  visible.forEach((idx) => {
+    const r = biss3Rows[idx];
+    lines.push(header.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(","));
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = exportAll ? "bill_issuance_validator_case3_all.csv" : "bill_issuance_validator_case3.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// Populate the period-filter dropdown once at load (default year 2026) -
+// same "fetch lookup data once, page opens ready to filter" convention as
+// Bulk Checker's own billing-period picker.
+biss3LoadPeriods();
+
+// ---------------- Bill Issuance Validator: Case 4 (Unclassified) --------
+// RJ, 2026-09-14 (same day), own words: "create a 4th case,
+// 'Unclassified' those that are pending validation in notice TMP, and
+// not in case 1, case 2, case 3, and any other case that we will add in
+// the future. Make it look like case 2, where there is a drill down on
+// the bills and just showing the accounts on the row and option to copy
+// and export to excel." No select-all/checkbox column and no Generate
+// button here (unlike Case 2) - Case 4 is read-only/informational, same
+// as Case 3: every account here needs its own manual investigation,
+// there's nothing this tool could safely auto-correct.
+let biss4Accounts = [];
+let biss4SortKey = null;
+let biss4SortDir = 1;
+let biss4Expanded = new Set(); // expanded row indices - into biss4Accounts
+
+function biss4VisibleIndices(ignoreFilters = false) {
+  let indices = biss4Accounts.map((_, i) => i);
+  if (!ignoreFilters) {
+    const term = ($("#biss4-search")?.value || "").trim().toLowerCase();
+    if (term) indices = indices.filter((i) => String(biss4Accounts[i].reference ?? "").toLowerCase().includes(term));
+  }
+  if (biss4SortKey) {
+    indices.sort((a, b) => _hierCompareValues(biss4Accounts[a][biss4SortKey], biss4Accounts[b][biss4SortKey], biss4SortDir));
+  }
+  return indices;
+}
+
+function biss4RenderKpiRow(data) {
+  const totalBills = biss4Accounts.reduce((sum, a) => sum + a.bill_count, 0);
+  const cards = [
+    ["accounts", "🧾", "Unclassified accounts", biss4Accounts.length],
+    ["bills", "📄", "Pending bills across them", totalBills],
+    ["case1", "1️⃣", "Excluded - Case 1", data?.case1_account_count ?? "—"],
+    ["case1nc", "1️⃣", "Excluded - New Contract Match", data?.new_contract_match_account_count ?? "—"],
+    ["case2", "2️⃣", "Excluded - Case 2", data?.case2_account_count ?? "—"],
+    ["case3", "3️⃣", "Excluded - Case 3", data?.case3_account_count ?? "—"],
+  ];
+  $("#biss4-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
+    `<div class="kpi-card" data-kpi="${kpi}">
+      <div class="kpi-value">${value}</div>
+      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
+    </div>`
+  ).join("");
+}
+
+function biss4RenderBillRows(idx) {
+  const acct = biss4Accounts[idx];
+  return acct.bills.map((b) => (
+    `<tr class="biss2-service-row">` +
+      `<td></td>` +
+      `<td colspan="2">Bill ${escapeHtml(b.id_bill ?? "")}, period ${escapeHtml(b.id_billing_period ?? "")}` +
+        (b.bill_type ? `, type ${escapeHtml(b.bill_type)}` : "") +
+        ` — ${escapeHtml(b.offered_service_desc || "")}` +
+        ` — ${escapeHtml(b.billing_status_desc || "")}` +
+        (b.billing_date ? `, billed ${escapeHtml(b.billing_date)}` : "") +
+      `</td>` +
+    `</tr>`
+  )).join("");
+}
+
+// Row markup mirrors Case 2's own (biss2RenderTable) - dedicated copy
+// button (reuses biss2CopyAccount, which isn't actually Case-2-specific
+// in what it does), click-to-expand account cell, drill-down rows for
+// the account's pending bills.
+function biss4RenderTable(data) {
+  const visible = biss4VisibleIndices();
+  const tbody = $("#biss4-table tbody");
+  tbody.innerHTML = "";
+  visible.forEach((idx) => {
+    const acct = biss4Accounts[idx];
+    const expanded = biss4Expanded.has(idx);
+    const tr = document.createElement("tr");
+    tr.className = `biss2-account-row is-needs-action ${expanded ? "is-expanded" : ""}`;
+    const ref = escapeHtml(acct.reference ?? "");
+    tr.innerHTML = (
+      `<td class="biss2-toggle-cell" data-biss4-toggle="${idx}">${expanded ? "▾" : "▸"}</td>` +
+      `<td><div class="biss2-account-cell">` +
+        `<span class="biss2-account-num" data-biss4-toggle="${idx}">${ref}</span>` +
+        `<button type="button" class="biss2-copy-btn" data-biss4-copy="${ref}" title="Copy account number">📋</button>` +
+      `</div></td>` +
+      `<td>${acct.bill_count}</td>`
+    );
+    tbody.appendChild(tr);
+    if (expanded) {
+      tbody.insertAdjacentHTML("beforeend", biss4RenderBillRows(idx));
+    }
+  });
+  tbody.querySelectorAll("[data-biss4-toggle]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const idx = Number(el.dataset.biss4Toggle);
+      if (biss4Expanded.has(idx)) biss4Expanded.delete(idx); else biss4Expanded.add(idx);
+      biss4RenderTable();
+    });
+  });
+  tbody.querySelectorAll("[data-biss4-copy]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const value = btn.dataset.biss4Copy || "";
+      biss2CopyAccount(value, btn);
+    });
+  });
+  biss4RenderKpiRow(data);
+  $("#biss4-export-csv-btn").hidden = biss4Accounts.length === 0;
+  $("#biss4-export-xlsx-btn").hidden = biss4Accounts.length === 0;
+  $("#biss4-export-all-wrap").hidden = biss4Accounts.length === 0;
+}
+
+hierWireSortableHeaders(
+  "#biss4-table",
+  () => biss4SortKey, (k) => { biss4SortKey = k; },
+  () => biss4SortDir, (d) => { biss4SortDir = d; },
+  biss4RenderTable,
+);
+
+$("#biss4-search").addEventListener("input", () => biss4RenderTable());
+
+$("#biss4-detect-btn").addEventListener("click", async () => {
+  const btn = $("#biss4-detect-btn");
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "Scanning…";
+  try {
+    const data = await api("/api/bill-issuance/case4/detect", { method: "POST" });
+    biss4Accounts = data.accounts;
+    biss4SortKey = null;
+    biss4SortDir = 1;
+    biss4Expanded = new Set();
+    $("#biss4-search").value = "";
+    document.querySelectorAll("#biss4-table thead th[data-sort]").forEach((h) => {
+      h.querySelector(".stats-table-sort-arrow")?.remove();
+    });
+    biss4RenderTable(data);
+    $("#biss4-summary").textContent = data.possibly_truncated
+      ? `${data.account_count}+ unclassified account(s) found (bill scan capped at ${data.limit} rows - list may be incomplete).`
+      : `${data.account_count} unclassified account(s), ${data.bill_count} pending bill(s) total.`;
+  } catch (err) {
+    showToast(err.message || "Scan failed.", true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+});
+
+$("#biss4-export-csv-btn").addEventListener("click", () => {
+  const exportAll = !!$("#biss4-export-all")?.checked;
+  const visible = biss4VisibleIndices(exportAll);
+  if (!visible.length) return;
+  const header = ["reference", "id_payment_form", "bill_count", "offered_services", "billing_periods"];
+  const lines = [header.join(",")];
+  visible.forEach((idx) => {
+    const acct = biss4Accounts[idx];
+    const row = {
+      reference: acct.reference,
+      id_payment_form: acct.id_payment_form,
+      bill_count: acct.bill_count,
+      offered_services: acct.bills.map((b) => b.offered_service_desc).filter(Boolean).join("; "),
+      billing_periods: acct.bills.map((b) => b.id_billing_period).filter(Boolean).join("; "),
+    };
+    lines.push(header.map((k) => `"${String(row[k] ?? "").replace(/"/g, '""')}"`).join(","));
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = exportAll ? "bill_issuance_validator_case4_all.csv" : "bill_issuance_validator_case4.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+$("#biss4-export-xlsx-btn").addEventListener("click", async () => {
+  const exportAll = !!$("#biss4-export-all")?.checked;
+  const visible = biss4VisibleIndices(exportAll);
+  if (!visible.length) return;
+  const btn = $("#biss4-export-xlsx-btn");
+  btn.disabled = true;
+  try {
+    const rows = visible.map((idx) => {
+      const acct = biss4Accounts[idx];
+      return {
+        reference: acct.reference ?? "",
+        id_payment_form: acct.id_payment_form ?? "",
+        bill_count: String(acct.bill_count ?? ""),
+        offered_services: acct.bills.map((b) => b.offered_service_desc).filter(Boolean).join("; "),
+        billing_periods: acct.bills.map((b) => b.id_billing_period).filter(Boolean).join("; "),
+      };
+    });
+    const res = await fetch("/api/bill-issuance/case4/export-xlsx", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Export failed.");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = exportAll ? "bill_issuance_case4_all.xlsx" : "bill_issuance_case4.xlsx";
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    showToast(err.message || "Excel export failed.", true);
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 // ---------------- Server-start diagnostic (login screen + sidebar) ------
@@ -4191,20 +4848,22 @@ function bcVisibleColumnIdx() {
   return bcState.columns.map((c, i) => i).filter((i) => !BC_RESULTS_HIDDEN_COLUMNS.has(bcState.columns[i]));
 }
 
-function bcVisibleResultRows() {
-  const search = bcState.search.trim().toLowerCase();
-  const visibleIdx = bcVisibleColumnIdx();
+function bcVisibleResultRows(ignoreFilters = false) {
   let rows = bcState.rows;
-  if (search) rows = rows.filter((row) => visibleIdx.some((i) => String(row[i]).toLowerCase().includes(search)));
+  if (!ignoreFilters) {
+    const search = bcState.search.trim().toLowerCase();
+    const visibleIdx = bcVisibleColumnIdx();
+    if (search) rows = rows.filter((row) => visibleIdx.some((i) => String(row[i]).toLowerCase().includes(search)));
 
-  // Amount-range filter (RJ, 2026-09-13) - client-side over the already-
-  // loaded result set, same pattern as every other Results filter here.
-  const amountIdx = bcColIdx(bcState.columns, "pending_amount");
-  if (amountIdx !== -1) {
-    const min = parseFloat(bcState.amountMin);
-    const max = parseFloat(bcState.amountMax);
-    if (!Number.isNaN(min)) rows = rows.filter((row) => { const v = parseFloat(row[amountIdx]); return !Number.isNaN(v) && v >= min; });
-    if (!Number.isNaN(max)) rows = rows.filter((row) => { const v = parseFloat(row[amountIdx]); return !Number.isNaN(v) && v <= max; });
+    // Amount-range filter (RJ, 2026-09-13) - client-side over the already-
+    // loaded result set, same pattern as every other Results filter here.
+    const amountIdx = bcColIdx(bcState.columns, "pending_amount");
+    if (amountIdx !== -1) {
+      const min = parseFloat(bcState.amountMin);
+      const max = parseFloat(bcState.amountMax);
+      if (!Number.isNaN(min)) rows = rows.filter((row) => { const v = parseFloat(row[amountIdx]); return !Number.isNaN(v) && v >= min; });
+      if (!Number.isNaN(max)) rows = rows.filter((row) => { const v = parseFloat(row[amountIdx]); return !Number.isNaN(v) && v <= max; });
+    }
   }
 
   if (bcSortKey) {
@@ -4422,13 +5081,15 @@ function bcVisibleDetailColumnIdx() {
   return bcState.detailColumns.map((c, i) => i).filter((i) => !BC_DETAIL_HIDDEN_COLUMNS.has(bcState.detailColumns[i]));
 }
 
-function bcVisibleDetailRows() {
-  const search = bcState.detailSearch.trim().toLowerCase();
+function bcVisibleDetailRows(ignoreFilters = false) {
   let rows = bcState.detailRows;
-  if (bcState.detailFilter !== "all") {
-    rows = rows.filter((row) => bcClassifyDetailRow(row) === bcState.detailFilter);
+  if (!ignoreFilters) {
+    const search = bcState.detailSearch.trim().toLowerCase();
+    if (bcState.detailFilter !== "all") {
+      rows = rows.filter((row) => bcClassifyDetailRow(row) === bcState.detailFilter);
+    }
+    if (search) rows = rows.filter((row) => row.some((v) => String(v).toLowerCase().includes(search)));
   }
-  if (search) rows = rows.filter((row) => row.some((v) => String(v).toLowerCase().includes(search)));
   if (bcDetailSortKey) {
     const idx = bcColIdx(bcState.detailColumns, bcDetailSortKey);
     if (idx !== -1) rows = [...rows].sort((a, b) => _hierCompareValues(a[idx], b[idx], bcDetailSortDir));
@@ -4514,15 +5175,17 @@ function bcDownloadBlob(blob, filename) {
 }
 
 $("#bc-export-csv-btn").addEventListener("click", () => {
-  const rows = bcVisibleResultRows();
+  const exportAll = !!$("#bc-export-all")?.checked;
+  const rows = bcVisibleResultRows(exportAll);
   if (!rows.length) { showToast("No rows to export.", true); return; }
-  bcDownloadBlob(bcCsvBlobFor(bcState.columns, rows), `bulk_checker_${bcState.billingPeriod || "search"}.csv`);
+  bcDownloadBlob(bcCsvBlobFor(bcState.columns, rows), `bulk_checker_${bcState.billingPeriod || "search"}${exportAll ? "_all" : ""}.csv`);
 });
 
 $("#bc-detail-export-csv-btn").addEventListener("click", () => {
-  const rows = bcVisibleDetailRows();
+  const exportAll = !!$("#bc-detail-export-all")?.checked;
+  const rows = bcVisibleDetailRows(exportAll);
   if (!rows.length) { showToast("No rows to export.", true); return; }
-  bcDownloadBlob(bcCsvBlobFor(bcState.detailColumns, rows), `bulk_checker_bills_${bcState.detailAccount || "account"}.csv`);
+  bcDownloadBlob(bcCsvBlobFor(bcState.detailColumns, rows), `bulk_checker_bills_${bcState.detailAccount || "account"}${exportAll ? "_all" : ""}.csv`);
 });
 
 async function bcExportXlsx(btn, headers, rows, filename) {
@@ -4550,20 +5213,22 @@ async function bcExportXlsx(btn, headers, rows, filename) {
 }
 
 $("#bc-export-xlsx-btn").addEventListener("click", () => {
+  const exportAll = !!$("#bc-export-all")?.checked;
   bcExportXlsx(
     $("#bc-export-xlsx-btn"),
     bcState.columns.map(bcPrettifyLabel),
-    bcVisibleResultRows().map((row) => row.map(bcFormatCell)),
-    `bulk_checker_${bcState.billingPeriod || "search"}.xlsx`
+    bcVisibleResultRows(exportAll).map((row) => row.map(bcFormatCell)),
+    `bulk_checker_${bcState.billingPeriod || "search"}${exportAll ? "_all" : ""}.xlsx`
   );
 });
 
 $("#bc-detail-export-xlsx-btn").addEventListener("click", () => {
+  const exportAll = !!$("#bc-detail-export-all")?.checked;
   bcExportXlsx(
     $("#bc-detail-export-xlsx-btn"),
     bcState.detailColumns.map(bcPrettifyLabel),
-    bcVisibleDetailRows().map((row) => row.map(bcFormatCell)),
-    `bulk_checker_bills_${bcState.detailAccount || "account"}.xlsx`
+    bcVisibleDetailRows(exportAll).map((row) => row.map(bcFormatCell)),
+    `bulk_checker_bills_${bcState.detailAccount || "account"}${exportAll ? "_all" : ""}.xlsx`
   );
 });
 

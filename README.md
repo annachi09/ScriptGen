@@ -89,12 +89,19 @@ pip install -r requirements.txt
 uvicorn web.server:app --host 0.0.0.0 --port 8420
 ```
 
-**Or, for local single-user use**: `python run_web.py` does the same thing but on a fixed local
-port (127.0.0.1:8420) and automatically opens it in your default browser once the server is up -
-no separate `uvicorn` command to remember, no manually typing the URL. Package it as a standalone
-`ScriptGen-Web.exe` with `build_web.bat` (see that file's header for how it differs from
-`build.bat` and `build_web_desktop.bat`, the other two packaging options for the Tkinter app and
-the pywebview-native-window wrapper respectively).
+**Or, more simply**: `python run_web.py` does the same thing but on a fixed port (8420) and
+automatically opens it in your default browser once the server is up - no separate `uvicorn`
+command to remember, no manually typing the URL. Package it as a standalone `ScriptGen-Web.exe`
+with `build_web.bat` (see that file's header for how it differs from `build.bat` and
+`build_web_desktop.bat`, the other two packaging options for the Tkinter app and the
+pywebview-native-window wrapper respectively).
+
+**RJ, 2026-09-14: "i want to share my local to my teammate ... we are on the same network."**
+`run_web.py` binds `0.0.0.0` (every network interface), not just `127.0.0.1`, so it's reachable
+from other machines on the same LAN out of the box - it auto-detects this machine's own LAN IP and
+prints a second URL (`A teammate on the same network can also reach it at: http://<your-lan-ip>:8420/`)
+right alongside the `127.0.0.1` one it opens for you. See "Sharing on your local network" below for
+the one Windows Firewall step this usually needs the first time.
 
 **Restarting doesn't always restart.** `run_web.py` binds that FIXED port on purpose (so a
 bookmark/shortcut keeps working across restarts) — but if port 8420 is already held by an earlier
@@ -167,6 +174,31 @@ the active connection in Settings changes it for everyone using this server, not
 login here only gates access to the *tool*, it does not carry its own per-person DB credentials.
 See `web/auth.py`'s docstring for why that's a deliberate, different trust model from the desktop
 app's one-person-one-machine one.
+
+#### Sharing on your local network (2026-09-14)
+
+`python run_web.py` already binds every network interface (`0.0.0.0`), so a teammate on the same
+LAN can open the URL it prints (e.g. `http://192.168.1.42:8420/`) in their own browser - no config
+change needed. Two things to check the first time:
+
+1. **Windows Firewall.** The first time the server actually gets a connection attempt from another
+   machine, Windows may show "Windows Defender Firewall has blocked some features of this app" -
+   click **Allow access** (at least for **Private** networks; only tick Public if you know this
+   network is trusted). If that prompt never appeared, or you dismissed it as Block, add the rule
+   yourself from an **Administrator** PowerShell:
+   ```
+   New-NetFirewallRule -DisplayName "ScriptGen Web" -Direction Inbound -LocalPort 8420 -Protocol TCP -Action Allow
+   ```
+2. **A login for your teammate.** They authenticate with their own ScriptGen account, not yours -
+   add one from **Settings > Users** (or `python -m web.manage_users add <username>` on this
+   machine) rather than sharing your own credentials. They never see the SQL Server connection
+   password either way - every query runs server-side on your machine, exactly as the "server-side
+   and shared" note above describes; their login only gates the *tool*, and the active DB connection
+   is still one shared setting for everyone on this server.
+
+This is still plain HTTP on a LAN, not the internet - fine for a trusted office/home network per the
+caveat above, but don't port-forward this through your router to the public internet without putting
+TLS in front of it first.
 
 ### Running the desktop version
 
@@ -1557,6 +1589,489 @@ generates for every flagged account. Every generated script is recorded to Analy
 `POST /api/bill-issuance/case2/generate` (`id_payment_forms: string[]` to scope, empty = every
 flagged account; `program`, `clean` - Editor/Admin only, same `require_editor` gate as every other
 Generate route).
+
+**Further scoping + design pass (2026-09-17, later same day).** RJ, verbatim: "for the invoicing
+validator the color is not good, make it more modern design, also we are only checking where the
+accounts exists in gccom_notic_tmp where it is in status pending validation, add the filters and
+sort." Three changes:
+
+- **Business-rule scoping.** `build_terminated_period_mismatch_query`'s `terminated_services` CTE
+  now requires an `EXISTS` match against `GCCOM_NOTICE_TMP` for the same account with
+  `COD_STATUS = '5000NOTEMP'` - confirmed live via `GCCOM_NOTICE_TMP_STATUS` that this code means
+  "For validation", the same "pending" status Case 1 already keys off. `GCCOM_NOTICE_TMP` has its
+  own `ID_PAYMENT_FORM` column with a supporting index (`IDX_GCCOM_NOTICE_TMP_02` on
+  `(ID_PAYMENT_FORM, COD_STATUS)`), so this is a plain indexed `EXISTS`, not a join through `ID_BILL`
+  like Case 1 needs. This is a real scoping rule, not cosmetic: live-confirmed on the 60-day window,
+  9,593 terminated accounts narrows to 1,217 with a pending-validation notice - most terminated
+  accounts have nothing pending review at all.
+- **Modernized colors, scoped to this page.** The "How this works" banners on both Case 1 and Case 2
+  moved from the shared `.warning-banner` (an olive/amber "caution" look that was a semantic mismatch
+  for a purely informational callout) to a new `.biss-info-banner` in the app's own accent blue.
+  Case 2's "Needs action" row highlight moved off `.row-multi-period` (borrowed from an unrelated Date
+  Anomaly concept, a heavier/muddier orange) onto a new dedicated `.row-needs-action` class - same
+  lighter-pastel-background + colored-left-border shape as the app's other semantic row classes
+  (`.row-not-billed`, `.row-checking-period`, `.row-primary-only`), in amber to match the KPI card's
+  own "Accounts needing action" styling. Both cases' KPI cards got the Dashboard's colored top-accent-
+  bar treatment (amber for needs-action, green for complete, blue for services/electricity/water).
+- **Search filter.** Case 2 already had sortable column headers; added a plain substring search box
+  (`#biss2-search`, filters by account reference) alongside a proper 3-way status filter (see below)
+  - same client-side, re-query-free convention as Detect All's own search box.
+- **Status filter.** The old single "Show Complete accounts too" checkbox became a `#biss2-status-
+  filter` dropdown: Needs action only (default) / Complete only / All - RJ's own words, "I need to
+  have a filter to see the complete one, or to see only the ones with missing."
+
+**A real false-positive found and fixed the same day.** RJ flagged account `1076362704`
+(`ID_PAYMENT_FORM` 3134) as wrongly included, verbatim: "where there is no bill in notice tmp with
+status pending validation and bill is in status invoicing." Investigated live: the account DOES have
+a `GCCOM_NOTICE_TMP` row with `COD_STATUS = 5000NOTEMP` - but that notice's own linked bill
+(`nt.ID_BILL` -> `GCCOM_BILL` 1072467931) is `ESTFAC0007` ("Anulada" / voided), not `ESTFAC0012`
+(invoicing). A pending-validation notice pointing at a bill that's since been voided isn't a live
+"needs review" signal. Fixed by joining `GCCOM_NOTICE_TMP` to `GCCOM_BILL` on `ID_BILL` and requiring
+the linked bill still be `ESTFAC0012` - the same combined "notice pending + bill invoicing" pattern
+Case 1 already uses, just not carried over to Case 2's first pass. Live-confirmed: narrows the 60-day
+window further, from 1,335 accounts (notice-status-only) to 1,064 (notice + bill still invoicing);
+account 3134's own match count against the tightened check is 0.
+
+**Row redesign + account copy button (2026-09-13, same-day follow-up).** RJ, verbatim: "its difficult
+to copy the account, also can you use a different look and feel, a modern one where each row is
+clearly recognized the design is so bad." The previous design toggled the account's row open/closed
+on click of the number itself, with no way to grab just the account for pasting elsewhere - and the
+row highlight was a single flat amber wash across every cell, easy to lose track of where one row
+ended and the next began. Redesign, scoped entirely to `#biss2-table` (Case 1 and every other
+`.data-grid` in the app keep their previous look):
+
+- **Copy button.** Each account number now has its own copy button (`.biss2-copy-btn`) next to it -
+  `biss2CopyAccount()` tries `navigator.clipboard.writeText()` first, falls back to a hidden-textarea
+  `execCommand("copy")` if that's unavailable or denied (some embedded/kiosk browser contexts block
+  the async Clipboard API outright even for a genuine click), and flashes a checkmark/X on the button
+  itself for 1.2s as feedback. `stopPropagation()` keeps the click from also triggering row-expand.
+- **Real per-row separation.** Rows get their own bottom border, generous padding, and a hover
+  background instead of relying purely on a background-color wash to read as distinct rows.
+- **Status pills.** Plain "Needs action"/"Complete" text became rounded pill badges
+  (`.biss2-status-pill`, amber/green) matching the KPI cards' own colors, both in the account rows and
+  ("Needs update"/"OK") in the per-service drill-down rows.
+- **Monospace account number.** `.biss2-account-num` uses a monospace font stack so the digits are
+  easier to scan and compare at a glance.
+
+Live-verified in-browser: toggling a row's expand/collapse still works via the account number or the
+chevron, is fully decoupled from the copy button, and the copy button's clipboard-write/fallback/visual
+-feedback logic all run correctly (confirmed via DOM inspection - the automated browser tool's own
+script-dispatched clicks don't carry real user-activation, so clipboard permission is denied in that
+harness specifically; a genuine mouse click from RJ carries user-activation and should succeed via the
+primary `navigator.clipboard.writeText()` path in a normal browser tab).
+
+**Real bug fixed: exact-datetime join was silently mis-flagging most accounts (2026-09-13, same
+day).** RJ flagged account REFERENCE `1059650711`, verbatim: "check account 1059650711, it has all
+the service bill on the termination date, by the way we need cycle bills TFGEN0001 something in
+bill_type of gccom_bill, the only issue is that it is in a different billing period and its already
+issued, so this account should be marked ok, then tagged as complete with other bill invoiced in
+another billing period." Investigated live and found two compounding issues:
+
+- **The final-bill join compared full datetimes, not just dates.** `GCCOM_CONTRACTED_SERVICE.END_DATE`
+  can carry a non-midnight time-of-day component (this account's Rate/176 service: `2026-08-30
+  19:45:30`), while `GCCOM_BILL.BILLING_DATE` is always midnight - so the old `b.BILLING_DATE =
+  ts.END_DATE` equality could never match that service's real final bill at all. Confirmed this isn't
+  a one-off: ~59% of Rate/176 terminations in a 60-day sample carry a non-midnight `END_DATE`. Fixed
+  by comparing DATE only, via a `>=` / `< DATEADD(DAY, 1, ...)` range on the un-wrapped
+  `BILLING_DATE` column rather than a `CAST()` on it - keeps any index on `BILLING_DATE` sargable,
+  the same lesson as the earlier `N'...'`-literal performance fix.
+- **An already-invoiced bill in a different period isn't a live problem.** Once date-matched, this
+  account's Rate service's real final bill (period 236) turned out to already be
+  `BILL_STATUS_INVOICED` (`ESTFAC0005`) while the account's other 3 services landed at period 237
+  (still `BILL_STATUS_ISSUING`/`ESTFAC0012`). RJ's own call: an already-issued bill has gone out to
+  the customer and "correcting" its period now would be pointless - and the generated UPDATE script
+  could never safely have targeted it anyway. `NEEDS_UPDATE` now only fires on a period mismatch when
+  the bill is still `ESTFAC0012` (not yet finalized); an already-`ESTFAC0005` bill in a different
+  period is accepted as-is.
+- **Added a `BILL_TYPE = 'TFGEN00001'` requirement** to the final-bill match per RJ's explicit ask
+  (`GCCOM_BILL.BILL_TYPE`, confirmed live via `OUC_ADMIN.GCCOM_GENERABLE_BILL_TYPE`: `TFGEN00001` =
+  "Contracted Service Bill", the regular/cycle type, vs. ~13 other `TFGEN1xxxx` one-off charge types
+  like deposits and reconnection fees) - a defensive correctness fix so a one-off charge bill sharing
+  the termination date can't be mistaken for the real final bill.
+
+**Live-confirmed impact, same 60-day window:** total account count is unchanged (963 - the
+notice-pending scoping wasn't touched), but the Complete/Needs-action split flips dramatically: from
+946 needing action / 17 Complete to **344 needing action / 619 Complete**. The exact-datetime bug
+alone was silently mis-flagging the large majority of these accounts - not because their billing was
+actually broken, but because the query itself couldn't see their real final bill. Account 1059650711
+itself: all 4 services now show `NEEDS_UPDATE = 0`, confirmed live.
+
+## Bill Issuance Validator Case 3: All Contract Status - Bills Complete (2026-09-14)
+
+RJ, verbatim: "for the third case of bill issuance validator we will call it 'All Contract Status -
+Bills Complete', add filters and dashboards as well ... here is the query to detect them, you can
+always optimize, provided that it will give us the same result", followed by his own working SQL
+(one hardcoded billing period, `10000000237`). Unlike Case 1 and Case 2, this case is
+**read-only/informational** - it finds accounts where billing is already complete for a period, so
+there's nothing to generate an UPDATE script for.
+
+**What it finds.** Per account (scoped to accounts with a pending notice on a still-invoicing bill -
+the same `GCCOM_NOTICE_TMP`/`ESTFAC0012` gate Case 1 and Case 2 both use), compares the account's
+total contracted-service count across every non-deleted status (`ESTSC00002` Vigente/Active,
+`ESTSC00007` Suspendido/Suspended, `ESTSC00003` "Baja pendiente de facturar", `ESTSC00004`
+Baja/Terminated - confirmed live via `GCCOM_CONTRACT_SERV_STATUS`) to its count of still-invoicing
+cycle bills (`BILL_TYPE = 'TFGEN00001'`, `BILLING_STATUS = 'ESTFAC0012'`) for ONE billing period.
+When the two counts are exactly equal, nothing's missing for that account in that period - "Bills
+Complete." `WITH_ACTIVE_CONTRACT` is `YES` when the account still has any non-Terminated service,
+`NO` when every service is already Terminated (RJ's own CASE expression, unchanged).
+
+**"Repeat this for all the billing period of 2026 ... 1 by 1 to obtain the correct result."**
+Confirmed live via `GCCOM_BILLING_PERIOD`: 2026 is exactly 12 periods (IDs `10000000229`-
+`10000000240`, one per calendar month, no gaps/overlap). Rather than hardcode those 12 IDs or
+literally loop/UNION the query 12 times, `build_bills_complete_query` widens the single `WHERE
+B.ID_BILLING_PERIOD = <one id>` filter to a live subquery against `GCCOM_BILLING_PERIOD` itself
+(`WHERE YEAR(INITIAL_DATE) = 2026`), keeping the bill subquery's own `GROUP BY ID_PAYMENT_FORM,
+ID_BILLING_PERIOD` unchanged. This is mathematically identical to running the original query once
+per period and UNIONing the results - the GROUP BY already partitions bill counts strictly by
+(account, period), and `GCCOM_CONTRACTED_SERVICE` carries no period column at all, so widening the
+period filter can only ever add more (account, period) combinations to check, never change what
+"equal" means for any one of them. **Verified live (2026-09-14):** a literal translation of RJ's own
+query shape (`WHERE ... IN (12 real 2026 period ids)`) and this module's optimized rewrite returned
+byte-for-byte identical rows against the real tunnel DB.
+
+**Optimization** (RJ's own explicit permission - "you can always optimize, provided that it will
+give us the same result"): RJ's own `cs` subquery aggregates `GCCOM_CONTRACTED_SERVICE` with no
+account scoping first - confirmed live, that's 4,620,339 rows, most of the table, before any join
+narrows it down. Since the final result can only ever include accounts that already passed the
+pending-notice gate AND have a matching period bill (confirmed live: 2,960 such accounts, against a
+table with millions of contracted-service rows), `build_bills_complete_query` computes the
+pending-notice account set and the per-period bill counts FIRST, then aggregates
+`GCCOM_CONTRACTED_SERVICE` only for that already-narrow account list - same "filter before you
+aggregate a huge table" lesson as Case 2's own `account_status` CTE. Confirmed live: only 1 account
+in the real 2026 dataset (as of 2026-09-14) currently satisfies the full "Bills Complete" condition
+- the equality is a narrow filter by design, most accounts with a pending notice still have services
+whose bill count doesn't yet match.
+
+**UI.** New "Case 3 - All Contract Status - Bills Complete" sub-nav tab, flat one-row-per-
+(account, period) table (an account can appear more than once if more than one 2026 period is
+already complete for it), sortable columns, a client-side account-number search box, a KPI row
+(row count, distinct accounts, count with an active contract), and two server-side filters (billing
+period dropdown - populated live from `GCCOM_BILLING_PERIOD` - and With Active Contract YES/NO)
+that re-scan on demand, same idiom as Case 2's own look-back dropdown. `POST
+/api/bill-issuance/case3/detect` and `GET /api/bill-issuance/case3/billing-periods` (the period
+dropdown's own lookup) are both read-only/`require_login`, no `require_editor` needed since this
+case never writes anything.
+
+## Bill Issuance Validator Case 2: split "needs action" into missing-bill vs period-mismatch (2026-09-14, same day)
+
+RJ, verbatim: "you did not add the filter to see the ones that need action where the bill is
+missing." The existing "Needs action" status filter already existed but conflated two different
+reasons a service can be flagged (see `build_terminated_period_mismatch_query`'s own `flagged` CTE):
+`ID_BILL IS NULL` (no bill at all was found dated the service's termination date - nothing for the
+Generate button to correct, needs manual investigation) and a bill that WAS found but its
+`ID_BILLING_PERIOD` disagrees with `TARGET_PERIOD` while still `ESTFAC0012` (the Generate button's
+UPDATE script fixes this one automatically). No query change was needed - `ID_BILL` was already in
+the result set - only the account-grouping and UI needed to surface the distinction that was already
+sitting in the data.
+
+**What changed:** `_case2_group_rows_by_account` (`web/server.py`) now computes a per-service
+`reason` (`"missing_bill"` / `"period_mismatch"` / `null`) and rolls it up into two new account-level
+counts, `missing_bill_count` and `period_mismatch_count` (they always sum to the existing
+`needs_update_count`, kept unchanged for backward compat). The detect route also returns a new
+`accounts_with_missing_bill` summary count. The Case 2 status-filter dropdown gained two options -
+**"Needs action - bill missing"** and **"Needs action - period mismatch"** - alongside the original
+"Needs action (all reasons)" / "Complete only" / "All", plus a new "Accounts with a missing bill" KPI
+card and an updated scan summary line. CSV export now includes both new count columns. 3 new/updated
+tests in `tests/test_web_api.py` confirm the split against the existing Case 2 fixture data (one
+account with 1 missing-bill + 2 period-mismatch services, another with only a period mismatch).
+
+## Bill Issuance Validator Case 1: widen next-period match to up to 11 periods ahead (2026-09-14, same day)
+
+RJ, verbatim: "enhancing Case 1, I found cases that the next water or ele bills can be up to 11
+billing period ahead of the rate bills, and they are valid. So can you include them if the next
+bill of water and rate is up to 11 billing period ahead, then add a column on how much months and
+then a filter as well, i noticed that the excel download is also missing."
+
+**The bug:** `build_stuck_bills_query`'s `matched` CTE only ever checked `PERIOD_RATE + 1` - the
+immediate next billing period - for a stuck Electricity/Water bill. **Live-confirmed this round:
+that exact-next-period version currently finds ZERO accounts against real data.** Widening the
+join to a range, `PERIOD_RATE + 1` through `PERIOD_RATE + 11`, finds **74** accounts - live
+distribution: 47 at 2 periods ahead, 12 at 3, 9 at 4, and a scattered tail out to 10. Real
+operations can leave Water/Electricity billing lagging the Rate bill by several months, not just
+one - every one of those is still a genuine `ESTFAC0015` ("En espera de otros servicios") bill,
+the exact same defining status the whole tool is keyed off, so widening the range doesn't relax
+what counts as "stuck," it just stops assuming the lag is always exactly 1 period.
+
+**Fix:** the range is now `PERIOD_RATE + 1 .. PERIOD_RATE + max_periods_ahead`
+(`max_periods_ahead` defaults to the new `NEXT_PERIOD_MAX_AHEAD_DEFAULT = 11`, RJ's own confirmed
+number, and is a real parameter - `/api/bill-issuance/detect?max_periods_ahead=N` - for future
+tuning without a code change). A new `PERIODS_AHEAD` column (`ID_BILLING_PERIOD - PERIOD_RATE`) is
+computed per match and carried through to the API/UI. The existing "no duplicates, Electricity
+first" dedupe rule (RJ, 2026-09-15) still applies but is now ordered by closest period first, then
+Electricity-before-Water only as a same-period tiebreak - an account with more than one qualifying
+period surfaces its nearest one, not an arbitrary one.
+
+**UI:** new **Months Ahead** column, plus a client-side **min/max** filter (two number inputs,
+defaulting to the full 1-11 range) over the already-fetched rows - narrowing it doesn't re-query.
+A new **Avg. months ahead** KPI card. The info banner text was updated to describe the range instead
+of "next" (singular).
+
+**Also fixed same round:** Case 1 had no Excel export (RJ: "i noticed that the excel download is
+also missing") - Case 2/3 also only have CSV, but RJ flagged Case 1 specifically here. Added a new
+`POST /api/bill-issuance/export-xlsx` route (identical pattern to Detect All's own
+`export-xlsx` - the frontend sends back whatever rows are currently visible after the Months-Ahead
+filter, server turns them into a real `.xlsx` via `openpyxl`) and an **Export Excel** button next
+to the existing Export CSV one.
+
+## Case 1: search-by-account-number box (2026-09-14, same day)
+
+RJ, verbatim: "add an option for all to filter by account number" - Case 2/3/4 all already had a
+"Search account #..." box; Case 1 was the odd one out (it only had the Months Ahead min/max filter).
+Added `#billiss-search`, wired into `billissVisibleIndices()` the same way as every other Case's own
+search box - client-side substring match on `reference`, skipped when the Export All checkbox's
+`ignoreFilters` is set. All four Bill Issuance Validator tabs now filter by account number
+consistently. Frontend-only change (`index.html`/`app.js` serve fresh per request - no restart
+needed), live-verified the element renders and is wired correctly.
+
+## Case 2: standalone "Missing bill only" checkbox (2026-09-14, same day)
+
+RJ, verbatim: "add additional filter on case 2, check box to say with missing bill or not." The
+Status dropdown already had a dedicated "Needs action - bill missing" option (from the earlier
+same-day round), but RJ asked for a quick checkbox specifically. Added `#biss2-missing-bill-only` as
+a standalone checkbox that **ANDs** on top of whatever the Status dropdown already shows - e.g.
+"All" + checked narrows to every account (complete or not) that has a missing bill, a distinct
+combination the dropdown alone couldn't express.
+
+## Bill Issuance Validator Case 4: "Unclassified" (2026-09-14, same day)
+
+RJ, verbatim: "now, create a 4th case, 'Unclassified' those that are pending validation in notice
+TMP, and not in case 1, case 2, case 3, and any other case that we will add in the future. Make it
+look like case 2, where there is a drill down on the bills and just showing the accounts on the row
+and option to copy and export to excel."
+
+**Design:** rather than re-encoding Case 1/2/3's own business rules a second time here (which would
+silently drift the moment any of those Cases' own logic changes), the new `POST
+/api/bill-issuance/case4/detect` route calls `build_stuck_bills_query`, `build_terminated_period_
+mismatch_query`, and `build_bills_complete_query` directly - each **unlimited** (`limit=None`) - to
+get every Case's own real account-ID set, then excludes any account already in one of those sets
+from `build_unclassified_query`'s general "pending validation" universe (the new query builder in
+`app/core/bill_issuance_validator.py`: same NOTICE_TMP/ESTFAC0012 gate every other Case already
+uses, one row per currently-issuing bill). This guarantees Case 4 can never disagree with what Case
+1/2/3 actually flag, and a future Case 5 only needs its own account-ID set added to the same
+exclusion list - nothing else changes. Confirmed live (2026-09-14) before writing any code: 2,940
+total pending accounts; 74 in Case 1; 645 in Case 2 (all-time); 2 in Case 3 (2026) - each unlimited
+query ran in ~1-1.6s, so a full Case 4 scan costs a few seconds per click.
+
+**UI:** new **Case 4 - Unclassified** sub-nav tab, styled like Case 2 per RJ's own instruction - one
+row per account (no select-all/checkbox column and no Generate button, unlike Case 2, since
+Unclassified is read-only/informational: every account here needs its own manual investigation).
+Click an account to expand a drill-down of its pending bills; a dedicated **📋** button copies the
+account number. Search box, a KPI row (account/bill counts plus how many accounts each of Case
+1/2/3 excluded), **Export CSV** (client-side) and a new **Export Excel** button (`POST
+/api/bill-issuance/case4/export-xlsx`) - Case 4 got Excel from day one since RJ's own request
+explicitly asked for it, unlike Case 2/3 which still only have CSV.
+
+## Every export gets an "Export all rows" option (2026-09-14, same day)
+
+RJ, verbatim: "also the excel export, i need it to have an option to download all, or download only
+selected across all this project." Clarified scope with RJ up front: "selected" means whatever rows
+the current search/filters already show (the existing default behavior on every export button in
+the app), and "all" means every row from the last scan, ignoring filters - not a new per-row
+checkbox-selection UI.
+
+Every CSV/Excel export button across the whole app now sits next to a small **Export all rows**
+checkbox (unchecked by default, so existing behavior is unchanged unless RJ opts in): Bill Issuance
+Case 1/2/3/4, Detect All (date anomaly), Hierarchy Analysis, and Bulk Checker's Results and Detail
+tables. Implemented by adding an `ignoreFilters` parameter to each table's own `*VisibleIndices()`
+filter helper (skips every filter/search check but keeps the current sort when `true`) and wiring
+each export handler to read the new checkbox. No backend changes were needed - every `/export-xlsx`
+route already just turns whatever rows the frontend sends into a workbook, so "Export all" simply
+means more rows in the same request.
+
+## Real bug fixed: Case 1 missed accounts blocked by a coexisting non-cycle bill (2026-09-14, same day)
+
+RJ asked why account REFERENCE 1100068871 wasn't showing up in Case 1. Investigated live:
+1100068871's Rate (176) bill genuinely has a stuck next-period Electricity bill (ESTFAC0015) - exactly
+the pattern Case 1 is supposed to catch - but it was filtered out earlier by the "Rate bill must be the
+ONLY bill in its period" check (`period_counts`/`pc.BILL_COUNT = 1`), because a **Deposito** bill
+(`BILL_TYPE` `TFGEN10006`, already invoiced) happened to share that same billing period. `period_counts`
+was counting every bill regardless of type/status, so a one-off charge bill unrelated to the cycle-
+billing dependency this tool is actually about could wrongly disqualify a real match.
+
+RJ's own fix direction, verbatim: "we only check TFGEN0001 and in status INVOICING for case 1." `period_
+counts` in `build_stuck_bills_query` now only counts bills that are BOTH the cycle bill type
+(`BILL_TYPE = 'TFGEN00001'`) AND still invoicing (`BILLING_STATUS = 'ESTFAC0012'`) - the same
+distinction Case 2/3 already learned to make, just never carried back into Case 1 (which was built
+earlier). Live-confirmed before the fix: 1,714 candidate accounts (pending notice + issuing Rate bill)
+were disqualified purely by a coexisting non-cycle bill; scoping by `BILL_TYPE` alone raised Case 1's
+own unlimited match count from 74 to 1,272 in that same check. After the server restarted with the real
+fix (`BILL_TYPE` + `BILLING_STATUS` both scoped) live, `/api/bill-issuance/detect` now returns **1,359**
+matches (well under the 2,000 row cap, not truncated), and account 1100068871 is in that result with
+exactly the expected next-period bill (Electricity, period 237, ESTFAC0015, 1 period ahead).
+
+## Case 1: "New Contract Match" (2026-09-14, same day)
+
+RJ, verbatim (with his own exact SQL template): "incorporate in case 1, the existing case 1 is ok,
+now i only want to add the case that its is only rate which is in pending validation notice_tmp and
+invoicing gccom_bill, the contract start (from_date) of gccom_contracted service is same as
+last_billing_date of gccom_bill, see this example query but i did not check that it is the only
+bill in pending validation":
+
+```sql
+select pf.reference, b.id_bill, b.billing_status, t.COD_STATUS, b.LAST_BILLING_DATE,
+  b.billing_date, cs.FROM_DATE, cs.STATUS, b.bill_type
+from OUC_COMMON_ADMIN.gccom_bill b
+  join OUC_ADMIN.GCCOM_NOTICE_TMP t on t.id_bill = b.id_bill
+  join GCCOM_CONTRACTED_SERVICE cs on cs.ID_CONTRACTED_SERVICE = b.ID_CONTRACTED_SERVICE
+  join gccom_payment_form pf on pf.id_payment_form = b.ID_PAYMENT_FORM
+where b.BILLING_STATUS = 'ESTFAC0012'
+  and t.COD_STATUS = '5000NOTEMP'
+  and b.LAST_BILLING_DATE = cs.FROM_DATE
+  and bill_type = 'TFGEN00001'
+  and cs.status = 'ESTSC00002'
+  and cs.ID_OFFERED_SERVICE = 176;
+```
+
+**Not a new numbered Case** - RJ was explicit that Case 1 itself is unchanged; this is a second,
+independent detection pattern living in the same Case 1 tab. It shares no logic with the existing
+Stuck Bills query (no next-period Electricity/Water lookup at all) - it instead catches a brand-new
+contract whose very first cycle bill is still pending: a Rate (176) bill still invoicing
+(`ESTFAC0012`) with a pending notice (`5000NOTEMP`), where the account's contract is still Active
+(`ESTSC00002`) and its own **start date** (`GCCOM_CONTRACTED_SERVICE.FROM_DATE`) exactly equals this
+bill's `LAST_BILLING_DATE`.
+
+**RJ's own explicit caveat, fixed:** "i did not check that it is the only bill in pending
+validation... add a filter for this cases." His example query can multi-match an account that has
+more than one bill currently pending validation. Added a `pending_counts` CTE - `COUNT(*)` of every
+`GCCOM_NOTICE_TMP` row still `COD_STATUS = '5000NOTEMP'` for that account (any billing period, via
+the linked bill's own `ID_PAYMENT_FORM`) - and require exactly 1: this Rate bill's own pending
+notice must be the *only* one on the account right now. Deliberately a different uniqueness scope
+than the existing Stuck Bills query's own `period_counts` (which counts bills sharing one billing
+period, not every pending notice on the account).
+
+**New:** `build_new_contract_match_query(limit=...)` in `app/core/bill_issuance_validator.py`, new
+route `POST /api/bill-issuance/case1/new-contract-match/detect` (`require_login`, stateless - same
+"every call re-runs the query fresh" pattern as every other detect route). New **New Contract
+Match** card under the Case 1 tab (below Generate Release Script) - a flat, read-only table (no
+drill-down, no Generate button, same pattern as Case 3) with search, KPI row, sortable columns, and
+CSV export with an Export-all-rows checkbox.
+
+**Live-verified after restart:** 656 matches against the real DB (well under the 2,000 row cap).
+Also spot-checked the uniqueness fix's actual impact: running RJ's own raw query (no `pending_counts`
+filter) returns 706 - confirming the fix correctly excludes 50 accounts that had more than one bill
+pending validation, exactly the false-positive case RJ flagged.
+
+## Real bug fixed: New Contract Match wasn't excluded from Case 4 "Unclassified" (2026-09-14, same day)
+
+RJ, after the above shipped and was live-verified, asked directly: "was this new rule considered in
+case for unclassified?" It was not. Case 4's `case4/detect` route excludes an account from
+"Unclassified" only if it appears in Case 1's Stuck Bills, Case 2's, or Case 3's own account sets -
+New Contract Match (a same-tab addition to Case 1, not a new numbered Case) was never added to that
+exclusion list, so all 656 accounts it matches were silently still showing up as Unclassified even
+though Case 1 now explains them.
+
+**Fix:** `bill_issuance_case4_detect` now also calls `build_new_contract_match_query(limit=None)` and
+unions its account set into `excluded_ids`, same as Case 1/2/3. Response gained a
+`new_contract_match_account_count` field, and the Case 4 KPI row gained a matching "Excluded - New
+Contract Match" card, alongside the existing Case 1/2/3 cards.
+
+**Takeaway documented in both the module comment and the route's own docstring:** any *future*
+addition to the Case 1 tab - numbered Case or not - needs this same manual step: add its own
+account-ID set to `excluded_ids` in `bill_issuance_case4_detect`. Case 4's own exclusion list does
+not update itself just because a query builder exists elsewhere in the module.
+
+## Real bug fixed: New Contract Match matched a Rate bill sharing its period with another bill (2026-09-14, later same day)
+
+RJ, checking a specific account: "check 1102978994, it is wrong, i explicitly told you that it
+should only be rate bill for that specific billing period." Investigated live: account 1102978994's
+billing period `10000000236` actually has **three** bills - a Water (19) cycle/invoicing bill, the
+Rate (176) cycle/invoicing bill New Contract Match wrongly matched, and a `TFGEN10006` ("Deposito",
+a one-off charge type, already invoiced) bill. `build_new_contract_match_query` had an account-level
+uniqueness check (`pending_counts` - only one pending notice on the whole account) but **no
+period-level check at all** - unlike Case 1's own Stuck Bills query, which already learned (see the
+1100068871 fix above) that a Rate bill must be the *only* cycle+invoicing bill in its own specific
+billing period.
+
+**Fix:** added a `period_counts` CTE to `build_new_contract_match_query` - identical shape to Stuck
+Bills' own (`BILL_TYPE = 'TFGEN00001' AND BILLING_STATUS = 'ESTFAC0012'`, grouped by
+`ID_PAYMENT_FORM, ID_BILLING_PERIOD`) - and require `BILL_COUNT = 1` alongside the existing
+`PENDING_COUNT = 1` check. Same proven pattern reused rather than inventing a new one, for
+consistency and correctness confidence.
+
+## Case 1: Stuck Bills + New Contract Match merged into one table (2026-09-14, later same day)
+
+RJ, verbatim: "I wanted the 2 cases merged in 1 table, maybe you can do union but there will be
+clear identifier of the case that i can use to filter." The two patterns were previously two
+separate cards/tables in the Case 1 tab; they're now one table (`#billiss-table`) with a **Pattern**
+column and filter (`stuck_bill` / `new_contract`).
+
+**Design:** merged in Python at the route layer (`bill_issuance_detect` in `web/server.py`), not a
+raw SQL `UNION` - each query builder (`build_stuck_bills_query`, `build_new_contract_match_query`)
+stays the single source of truth for its own business rule, matching Case 4's own "call the existing
+builder, don't re-derive it" convention. Common columns (account, notice-updated date, bill,
+period) are populated for both patterns; pattern-specific columns (Next Bill/Service/Next
+Period/Months Ahead/Next Status for Stuck Bill; Bill Status/Last Billing Date/Contract Start/
+Contract Status for New Contract Match) are blank on rows where they don't apply and render as "-".
+
+Response gained `stuck_bill_count` and `new_contract_match_count` alongside the merged `rows`.
+**Generate Release Script** now re-runs both queries fresh and releases every bill from either
+pattern (still one `UPDATE ... WHERE id_notice_tmp IN (...)` statement). The **Excel export**
+gained a Pattern column plus the four New Contract Match-only columns.
+
+The old standalone New Contract Match card/table is gone from the UI. The standalone API route
+(`POST /api/bill-issuance/case1/new-contract-match/detect`) is unchanged and still callable
+directly - Case 4 "Unclassified" still calls the query builder function directly, not through this
+route or the merged `/detect` route.
+
+## Case 2: CSV export now includes bill/status detail (2026-09-14, same day)
+
+RJ, verbatim: "for case 2, i need the bills and status to be included in the export, now it only
+gives me the account and service count." The CSV export (`#biss2-export-csv-btn`, client-side, no
+backend route) was account-level only (`service_count`, `needs_update_count`, etc.) - the actual
+per-service bill id/billing period/status detail lived in `acct.services[]` and was only ever shown
+in the UI's own drill-down, never exported.
+
+Added four joined-string columns built from each account's `services` array - `offered_services`,
+`bills`, `billing_periods`, `billing_statuses` - same "row per account, bill-level detail as
+semicolon-joined columns" convention Case 4's own CSV export already uses. The four new columns are
+**positionally aligned** (not independently filtered): a service with no matching bill (the
+"missing bill" case) still gets a slot in every column (`(none)` / `-`) so the Nth entry always
+refers to the same service across all four columns, rather than one column silently dropping an
+empty value the others keep and drifting out of sync.
+
+## Case 1: "Generate Release Script" (2026-09-14, same day)
+
+RJ, verbatim (with his own exact SQL template): "for case 1, create script for all detected,
+'Generate Release script' this is the script: `update gccom_notice_tmp set cod_status =
+'1000NOTEMP', update_date = getdate(), update_user = 'RMA', update_program = 'VALIDATION
+RELEASE_TERMINATED' where id_notice_tmp in ( select nt.id_notice_tmp from gccom_notice_tmp nt join
+gccom_bill b on b.id_bill = nt.id_bill where nt.cod_status = '5000NOTEMP' and b.billing_status =
+'ESTFAC0012' and b.id_bill in ( <all the rate bills detected here>)) and cod_status =
+'5000NOTEMP';`"
+
+**What it does:** releases the pending-validation notice (`GCCOM_NOTICE_TMP.COD_STATUS`
+`5000NOTEMP` "For validation" → `1000NOTEMP` "Pendiente de generar factura", both confirmed live
+via `GCCOM_NOTICE_TMP_STATUS`) for every currently detected Rate bill's own blocking notice. Does
+**not** touch `GCCOM_BILL` itself - only `GCCOM_NOTICE_TMP`. RJ's own exact template shape is
+preserved: ONE `UPDATE` statement with an `ID_NOTICE_TMP IN (...)` subquery (not one statement per
+bill, unlike Case 2's own Generate script), keeping both of his `COD_STATUS = '5000NOTEMP'` guards
+verbatim - the outer one makes re-running the script against an already-released notice a safe
+no-op, same "only touch if still in the state we expect" convention every other correction script
+in this app already follows.
+
+**New:** `build_release_notice_script(bill_ids, ...)` in `app/core/bill_issuance_validator.py`.
+`program`/`user` are real, overridable parameters (same shape as every other `build_*_script`
+function here) but default to RJ's own literal values (`VALIDATION RELEASE_TERMINATED` / `RMA`) so
+the out-of-the-box script matches his template byte-for-byte - unlike every other Generate script's
+`program` default (`JIRAXXXX`, a per-run Jira placeholder), these were given as a fixed template
+for this one action, not something to fill in.
+
+New route `POST /api/bill-issuance/generate-release` (`require_editor`) re-runs
+`build_stuck_bills_query` fresh right before generating - the same "re-verify at generate time"
+pattern every other Generate route in this app already uses - and releases every `ID_BILL_RATE`
+from that fresh scan (optionally narrowed via `id_bill_rates`, though the current UI always acts on
+everything detected, matching RJ's own "for all detected" request). Recorded to script history the
+same way as every other generated script.
+
+**Updated (2026-09-14, later same day, table-merge round):** now also re-runs
+`build_new_contract_match_query` fresh and releases every matched bill from *either* pattern - see
+"Case 1: Stuck Bills + New Contract Match merged into one table" below.
+
+**UI:** new **Generate Release Script** card under Case 1's Stuck Bills table - Program/User text
+inputs (pre-filled with RJ's own literal defaults), a Clean-script toggle, Generate/Copy/Download
+buttons, matching Case 2's own Generate card layout. No row-selection checkboxes on Case 1's table
+(unlike Case 2/4) - RJ's request was "for all detected", not a per-row pick, so Generate always acts
+on the full current scan.
 
 ## Real bug fixed: query timeouts crashed as a bare 500 (2026-09-16)
 

@@ -2436,23 +2436,340 @@ def hierarchy_analysis_export_xlsx(body: HierarchyExportXlsxRequest, user: str =
 # Hierarchy Analysis - every call re-runs the query fresh.
 # ---------------------------------------------------------------------
 @app.post("/api/bill-issuance/detect")
-def bill_issuance_detect(user: str = Depends(require_login)):
+def bill_issuance_detect(
+    max_periods_ahead: int = bill_issuance_validator.NEXT_PERIOD_MAX_AHEAD_DEFAULT,
+    user: str = Depends(require_login),
+):
     """
-    bill_issuance_validator.build_stuck_bills_query - see that function's
-    own docstring for the full CTE chain. One row per account (RJ,
-    2026-09-15: "i dont want duplicates") - an account with BOTH its
-    Electricity and Water bills stuck for the same period surfaces once,
-    preferring Electricity; Water only shows up when Electricity itself
-    isn't one of the stuck bills.
+    Case 1's combined table - RJ, 2026-09-14 (later same day): "I wanted
+    the 2 cases merged in 1 table, maybe you can do union but there will
+    be clear identifier of the case that i can use to filter." Runs BOTH
+    of Case 1's own patterns - bill_issuance_validator.build_stuck_bills_
+    query (see that function's own docstring for the full CTE chain) and
+    build_new_contract_match_query (see its own docstring/module comment)
+    - and merges them into one row list, each row carrying a `pattern`
+    field ("stuck_bill" or "new_contract") as the "clear identifier ... to
+    filter" RJ asked for. Deliberately merged in Python here rather than a
+    hand-written SQL UNION: each query builder stays the single source of
+    truth for its own business rule (same "call the existing builder,
+    don't re-derive it" convention Case 4 already uses), and the two
+    patterns' row shapes only partially overlap (next-period bill info
+    only applies to stuck_bill; contract dates only apply to new_contract).
+
+    Common fields across both patterns: id_payment_form, reference,
+    notice_update_date, id_bill_rate (the matched Rate bill), period_rate
+    (its billing period). Pattern-specific fields are "" for a row where
+    they don't apply - id_bill_next/offered_service_next_desc/period_next/
+    status_next_desc/periods_ahead are stuck_bill-only; billing_status_
+    desc/last_billing_date/contract_from_date/contract_status are new_
+    contract-only.
+
+    One row per account for stuck_bill matches (RJ, 2026-09-15: "i dont
+    want duplicates") - an account with BOTH its Electricity and Water
+    bills stuck for the same period surfaces once, preferring Electricity.
+    New Contract Match has no such dedup concern (one bill per account
+    already, by construction of its own period_counts/pending_counts
+    filters).
+
+    `max_periods_ahead` (query param, RJ 2026-09-14: "the next water or
+    ele bills can be up to 11 billing period ahead of the rate bills, and
+    they are valid") widens the next-period lookup from a single exact
+    period to a range - defaults to NEXT_PERIOD_MAX_AHEAD_DEFAULT (11),
+    the number RJ confirmed live. Only applies to the stuck_bill pattern.
     """
     config = load_config()
     conn = config.get_active_connection()
     if not conn:
         raise HTTPException(status_code=400, detail="No connection configured.")
 
-    limit = bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT
+    stuck_limit = bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT
+    new_contract_limit = bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT
     try:
-        result = mssql.run_query(conn, bill_issuance_validator.build_stuck_bills_query(limit=limit))
+        stuck_result = mssql.run_query(
+            conn,
+            bill_issuance_validator.build_stuck_bills_query(limit=stuck_limit, max_periods_ahead=max_periods_ahead),
+        )
+        new_contract_result = mssql.run_query(
+            conn, bill_issuance_validator.build_new_contract_match_query(limit=new_contract_limit),
+        )
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    stuck_rows = [dict(zip(stuck_result.columns, r)) for r in stuck_result.rows]
+    new_contract_rows = [dict(zip(new_contract_result.columns, r)) for r in new_contract_result.rows]
+
+    rows = [
+        {
+            "pattern": "stuck_bill",
+            "id_payment_form": diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM")),
+            "reference": diff_engine.cell_display(_da_col(r, "REFERENCE")),
+            "notice_update_date": diff_engine.cell_display(_da_col(r, "NOTICE_UPDATE_DATE")),
+            "id_bill_rate": diff_engine.cell_display(_da_col(r, "ID_BILL_RATE")),
+            "period_rate": diff_engine.cell_display(_da_col(r, "PERIOD_RATE")),
+            "id_bill_next": diff_engine.cell_display(_da_col(r, "ID_BILL_NEXT")),
+            "offered_service_next": diff_engine.cell_display(_da_col(r, "OFFERED_SERVICE_NEXT")),
+            "offered_service_next_desc": diff_engine.cell_display(_da_col(r, "OFFERED_SERVICE_NEXT_DESC")),
+            "period_next": diff_engine.cell_display(_da_col(r, "PERIOD_NEXT")),
+            "status_next": diff_engine.cell_display(_da_col(r, "STATUS_NEXT")),
+            "status_next_desc": diff_engine.cell_display(_da_col(r, "STATUS_NEXT_DESC")),
+            "periods_ahead": diff_engine.cell_display(_da_col(r, "PERIODS_AHEAD")),
+            "billing_status_desc": "",
+            "last_billing_date": "",
+            "contract_from_date": "",
+            "contract_status": "",
+        }
+        for r in stuck_rows
+    ] + [
+        {
+            "pattern": "new_contract",
+            "id_payment_form": diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM")),
+            "reference": diff_engine.cell_display(_da_col(r, "REFERENCE")),
+            "notice_update_date": diff_engine.cell_display(_da_col(r, "NOTICE_UPDATE_DATE")),
+            "id_bill_rate": diff_engine.cell_display(_da_col(r, "ID_BILL")),
+            "period_rate": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
+            "id_bill_next": "",
+            "offered_service_next": "",
+            "offered_service_next_desc": "",
+            "period_next": "",
+            "status_next": "",
+            "status_next_desc": "",
+            "periods_ahead": "",
+            "billing_status_desc": diff_engine.cell_display(_da_col(r, "BILLING_STATUS_DESC")),
+            "last_billing_date": diff_engine.cell_display(_da_col(r, "LAST_BILLING_DATE")),
+            "contract_from_date": diff_engine.cell_display(_da_col(r, "CONTRACT_FROM_DATE")),
+            "contract_status": diff_engine.cell_display(_da_col(r, "CONTRACT_STATUS")),
+        }
+        for r in new_contract_rows
+    ]
+
+    return {
+        "rows": rows,
+        "stuck_bill_count": len(stuck_rows),
+        "new_contract_match_count": len(new_contract_rows),
+        "possibly_truncated": len(stuck_rows) >= stuck_limit or len(new_contract_rows) >= new_contract_limit,
+        "limit": stuck_limit,
+        "max_periods_ahead": max_periods_ahead,
+    }
+
+
+class BillIssuanceExportRow(BaseModel):
+    """
+    One row of whatever Case 1's combined table currently has VISIBLE
+    (i.e. filtered by the Months Ahead range and/or Pattern filter) - same
+    "frontend sends back exactly its own CSV-export row shape, server just
+    turns it into a real .xlsx" convention as DetectAllExportRow above, so
+    this endpoint never re-derives Case 1's own filter logic server-side.
+
+    Covers both patterns (RJ, 2026-09-14: "I wanted the 2 cases merged in
+    1 table") - `pattern` is the same "clear identifier ... to filter"
+    field the detect route and the frontend table use; the stuck_bill-only
+    and new_contract-only fields are simply "" on a row where they don't
+    apply.
+    """
+
+    pattern: str = ""
+    reference: str = ""
+    notice_update_date: str = ""
+    id_bill_rate: str = ""
+    period_rate: str = ""
+    id_bill_next: str = ""
+    offered_service_next_desc: str = ""
+    period_next: str = ""
+    periods_ahead: str = ""
+    status_next_desc: str = ""
+    billing_status_desc: str = ""
+    last_billing_date: str = ""
+    contract_from_date: str = ""
+    contract_status: str = ""
+
+
+class BillIssuanceExportXlsxRequest(BaseModel):
+    rows: list[BillIssuanceExportRow]
+
+
+@app.post("/api/bill-issuance/export-xlsx")
+def bill_issuance_export_xlsx(body: BillIssuanceExportXlsxRequest, user: str = Depends(require_login)):
+    """
+    Excel counterpart to Case 1's client-side CSV export
+    (#billiss-export-csv-btn) - RJ, 2026-09-14: "i noticed that the excel
+    download is also missing" (Case 2/Case 3 both have CSV only too, but
+    RJ specifically flagged Case 1 here, matching Detect All's own
+    CSV+Excel pair - see date_anomaly_detect_all_export_xlsx above for
+    the identical pattern/reasoning this copies). require_login only,
+    read-only export of data the caller's own scan already returned.
+    """
+    if not body.rows:
+        raise HTTPException(status_code=400, detail="No rows to export.")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Bill Issuance Case 1"
+    headers = [
+        "Account", "Pattern", "Notice Updated", "Bill", "Billing Period", "Next Bill",
+        "Service", "Next Period", "Months Ahead", "Next Status", "Bill Status",
+        "Last Billing Date", "Contract Start", "Contract Status",
+    ]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for r in body.rows:
+        ws.append([
+            r.reference, r.pattern, r.notice_update_date, r.id_bill_rate, r.period_rate, r.id_bill_next,
+            r.offered_service_next_desc, r.period_next, r.periods_ahead, r.status_next_desc,
+            r.billing_status_desc, r.last_billing_date, r.contract_from_date, r.contract_status,
+        ])
+    widths = [16, 14, 20, 14, 14, 14, 14, 14, 14, 30, 30, 16, 16, 16]
+    for i, width in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
+    ws.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="bill_issuance_case1.xlsx"'},
+    )
+
+
+class BillIssuanceGenerateReleaseRequest(BaseModel):
+    # Optional subset of ID_BILL_RATE (as display strings) the analyst
+    # checked on the Case 1 table - empty means "every currently detected
+    # Rate bill", same "no selection = act on everything detected" default
+    # Case 2's own Generate route uses.
+    id_bill_rates: list[str] = []
+    program: str = bill_issuance_validator.RELEASE_SCRIPT_DEFAULT_PROGRAM
+    audit_user: str = bill_issuance_validator.RELEASE_SCRIPT_DEFAULT_USER
+    clean: bool = False
+    max_periods_ahead: int = bill_issuance_validator.NEXT_PERIOD_MAX_AHEAD_DEFAULT
+
+
+@app.post("/api/bill-issuance/generate-release")
+def bill_issuance_generate_release(
+    body: BillIssuanceGenerateReleaseRequest, user: str = Depends(require_editor),
+):
+    """
+    Generates Case 1's "Generate Release Script" (bill_issuance_validator.
+    build_release_notice_script) - RJ's own words: "for case 1, create
+    script for all detected, 'Generate Release script'", with RJ's own
+    exact UPDATE template. See build_release_notice_script's own docstring
+    (and the module-level comment block just above it) for the full
+    business meaning and RJ's verbatim template.
+
+    Re-runs BOTH of Case 1's own patterns fresh right before generating -
+    build_stuck_bills_query and build_new_contract_match_query - same
+    "re-verify at generate time" pattern every other Generate route in
+    this app uses (Case 2's own Generate route, date_anomaly's detect-all
+    cleanup, batch, etc) - rather than trusting whatever the analyst's
+    browser last rendered, since Case 1's detect snapshot may be stale by
+    the time Generate is clicked. RJ, 2026-09-14 (later same day, merging
+    the two patterns into one table): since both patterns are Rate bills
+    with a pending notice, releasing covers both the same way - the
+    combined table's Generate button now releases whichever bills are
+    selected/detected across EITHER pattern, not just Stuck Bills.
+    Collects every matched bill id from both fresh results, optionally
+    narrowed to id_bill_rates (RJ can check specific rows instead of
+    releasing everything detected, same optional-subset convention as
+    BillIssuanceCase2GenerateRequest.id_payment_forms).
+    """
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+
+    program = body.program.strip() or bill_issuance_validator.RELEASE_SCRIPT_DEFAULT_PROGRAM
+    audit_user = body.audit_user.strip() or bill_issuance_validator.RELEASE_SCRIPT_DEFAULT_USER
+
+    scope = None
+    if body.id_bill_rates:
+        scope = {str(x).strip() for x in body.id_bill_rates if str(x).strip()}
+
+    stuck_limit = bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT
+    new_contract_limit = bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT
+    try:
+        stuck_result = mssql.run_query(
+            conn,
+            bill_issuance_validator.build_stuck_bills_query(
+                limit=stuck_limit, max_periods_ahead=body.max_periods_ahead,
+            ),
+        )
+        new_contract_result = mssql.run_query(
+            conn, bill_issuance_validator.build_new_contract_match_query(limit=new_contract_limit),
+        )
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    stuck_rows = [dict(zip(stuck_result.columns, r)) for r in stuck_result.rows]
+    new_contract_rows = [dict(zip(new_contract_result.columns, r)) for r in new_contract_result.rows]
+
+    bill_ids = []
+    for r in stuck_rows:
+        bill_id = _da_col(r, "ID_BILL_RATE")
+        if scope is not None and str(bill_id) not in scope:
+            continue
+        bill_ids.append(bill_id)
+    for r in new_contract_rows:
+        bill_id = _da_col(r, "ID_BILL")
+        if scope is not None and str(bill_id) not in scope:
+            continue
+        bill_ids.append(bill_id)
+
+    if not bill_ids:
+        raise HTTPException(status_code=400, detail="No Rate bills detected to release.")
+
+    release_result = bill_issuance_validator.build_release_notice_script(
+        bill_ids, program=program, user=audit_user, clean=body.clean,
+    )
+
+    try:
+        script_history.record_script(
+            config.internal_db_path,
+            username=user,
+            kind=script_history.KIND_BILL_ISSUANCE,
+            schema_name="",
+            table_name=f"Bill Issuance Case 1 Release ({release_result.bill_count} bill(s))",
+            program=program,
+            statement_count=1 if release_result.bill_count else 0,
+            warning_count=release_result.warning_count,
+            sql_text=release_result.sql_text,
+            source=script_history.SOURCE_WEB,
+        )
+    except Exception:
+        pass
+
+    return {
+        "sql_text": release_result.sql_text,
+        "bill_count": release_result.bill_count,
+        "warnings": release_result.warnings,
+    }
+
+
+@app.post("/api/bill-issuance/case1/new-contract-match/detect")
+def bill_issuance_case1_new_contract_match_detect(user: str = Depends(require_login)):
+    """
+    bill_issuance_validator.build_new_contract_match_query - RJ's own
+    words: "incorporate in case 1, the existing case 1 is ok, now i only
+    want to add the case that its is only rate which is in pending
+    validation notice_tmp and invoicing gccom_bill, the contract start
+    (from_date) of gccom_contracted service is same as last_billing_date
+    of gccom_bill". See that function's own docstring (and the module-
+    level comment block just above it) for RJ's exact starting SQL and
+    the uniqueness-filter fix he explicitly asked for.
+
+    A second, independent detection within the Case 1 tab - not a new
+    numbered Case (RJ was explicit: "the existing case 1 is ok") and not
+    related to the Stuck Bills next-period lookup above; this route is
+    entirely separate/stateless, same as every other detect route in this
+    app - every call re-runs the query fresh.
+    """
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+
+    limit = bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT
+    try:
+        result = mssql.run_query(conn, bill_issuance_validator.build_new_contract_match_query(limit=limit))
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -2463,14 +2780,15 @@ def bill_issuance_detect(user: str = Depends(require_login)):
                 "id_payment_form": diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM")),
                 "reference": diff_engine.cell_display(_da_col(r, "REFERENCE")),
                 "notice_update_date": diff_engine.cell_display(_da_col(r, "NOTICE_UPDATE_DATE")),
-                "id_bill_rate": diff_engine.cell_display(_da_col(r, "ID_BILL_RATE")),
-                "period_rate": diff_engine.cell_display(_da_col(r, "PERIOD_RATE")),
-                "id_bill_next": diff_engine.cell_display(_da_col(r, "ID_BILL_NEXT")),
-                "offered_service_next": diff_engine.cell_display(_da_col(r, "OFFERED_SERVICE_NEXT")),
-                "offered_service_next_desc": diff_engine.cell_display(_da_col(r, "OFFERED_SERVICE_NEXT_DESC")),
-                "period_next": diff_engine.cell_display(_da_col(r, "PERIOD_NEXT")),
-                "status_next": diff_engine.cell_display(_da_col(r, "STATUS_NEXT")),
-                "status_next_desc": diff_engine.cell_display(_da_col(r, "STATUS_NEXT_DESC")),
+                "id_bill": diff_engine.cell_display(_da_col(r, "ID_BILL")),
+                "billing_status": diff_engine.cell_display(_da_col(r, "BILLING_STATUS")),
+                "billing_status_desc": diff_engine.cell_display(_da_col(r, "BILLING_STATUS_DESC")),
+                "last_billing_date": diff_engine.cell_display(_da_col(r, "LAST_BILLING_DATE")),
+                "billing_date": diff_engine.cell_display(_da_col(r, "BILLING_DATE")),
+                "id_billing_period": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
+                "id_contracted_service": diff_engine.cell_display(_da_col(r, "ID_CONTRACTED_SERVICE")),
+                "contract_from_date": diff_engine.cell_display(_da_col(r, "CONTRACT_FROM_DATE")),
+                "contract_status": diff_engine.cell_display(_da_col(r, "CONTRACT_STATUS")),
             }
             for r in rows
         ],
@@ -2500,6 +2818,23 @@ def _case2_group_rows_by_account(rows: list[dict]) -> list[dict]:
     down. Row order from the query is already ID_PAYMENT_FORM, ID_
     OFFERED_SERVICE - dict insertion order preserves that grouping
     without needing a second sort here.
+
+    RJ, 2026-09-14: "you did not add the filter to see the ones that need
+    action where the bill is missing" - NEEDS_UPDATE (from the query) is
+    1 for TWO different reasons that the account-level table previously
+    collapsed into one `needs_update_count` (see build_terminated_period_
+    mismatch_query's own `flagged` CTE docstring): (a) ID_BILL IS NULL -
+    no bill at all was found dated this service's own termination date,
+    nothing to correct, needs manual investigation; or (b) a bill WAS
+    found but its ID_BILLING_PERIOD disagrees with TARGET_PERIOD while
+    still ESTFAC0012 - the Generate button's UPDATE script can fix this
+    one automatically. These need different filters because they need
+    different analyst action, so this now splits the per-service `needs_
+    update` flag into a `reason` ("missing_bill" / "period_mismatch" /
+    None) and rolls that up into two separate account-level counts
+    (`missing_bill_count`, `period_mismatch_count` - they sum to `needs_
+    update_count`, kept as-is for backward compat with the existing
+    "Needs action" filter/KPI card, which means "either reason").
     """
     accounts: dict[str, dict] = {}
     for r in rows:
@@ -2513,22 +2848,32 @@ def _case2_group_rows_by_account(rows: list[dict]) -> list[dict]:
                 "complete": not bool(_da_col(r, "ACCOUNT_HAS_ISSUE")),
                 "service_count": 0,
                 "needs_update_count": 0,
+                "missing_bill_count": 0,
+                "period_mismatch_count": 0,
                 "services": [],
             }
             accounts[pf] = acct
         offered_service_id = _da_col(r, "ID_OFFERED_SERVICE")
+        raw_id_bill = _da_col(r, "ID_BILL")
         needs_update = bool(_da_col(r, "NEEDS_UPDATE"))
+        missing_bill = needs_update and raw_id_bill is None
+        reason = "missing_bill" if missing_bill else ("period_mismatch" if needs_update else None)
         acct["service_count"] += 1
         if needs_update:
             acct["needs_update_count"] += 1
+            if missing_bill:
+                acct["missing_bill_count"] += 1
+            else:
+                acct["period_mismatch_count"] += 1
         acct["services"].append({
             "id_offered_service": diff_engine.cell_display(offered_service_id),
             "offered_service_desc": _OFFERED_SERVICE_NAMES.get(offered_service_id, ""),
             "end_date": diff_engine.cell_display(_da_col(r, "END_DATE")),
-            "id_bill": diff_engine.cell_display(_da_col(r, "ID_BILL")),
+            "id_bill": diff_engine.cell_display(raw_id_bill),
             "id_billing_period": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
             "billing_status": diff_engine.cell_display(_da_col(r, "BILLING_STATUS")),
             "needs_update": needs_update,
+            "reason": reason,
         })
     return list(accounts.values())
 
@@ -2576,6 +2921,12 @@ def bill_issuance_case2_detect(days_back: int | None = None, user: str = Depends
         "accounts": accounts,
         "account_count": len(accounts),
         "accounts_needing_action": sum(1 for a in accounts if not a["complete"]),
+        # RJ, 2026-09-14: wants to filter specifically to "the bill is
+        # missing" accounts (missing_bill_count > 0) as distinct from
+        # "needs action" in general (which also includes accounts that
+        # only have a period mismatch, auto-fixable via Generate) - see
+        # _case2_group_rows_by_account's own docstring for the reasoning.
+        "accounts_with_missing_bill": sum(1 for a in accounts if a["missing_bill_count"] > 0),
         "possibly_truncated": len(rows) >= limit,
         "limit": limit,
         "days_back": effective_days_back or None,
@@ -2678,6 +3029,330 @@ def bill_issuance_case2_generate(
         "update_count": fix_result.update_count,
         "warnings": fix_result.warnings,
     }
+
+
+# Case 3 (RJ, 2026-09-14) - "All Contract Status - Bills Complete". See
+# app/core/bill_issuance_validator.py's Case 3 comment block (above
+# CONTRACT_STATUS_ACTIVE) for RJ's own verbatim starting SQL and the
+# per-period/optimization reasoning. Read-only/informational - unlike
+# Case 1/2 this finds accounts where billing is ALREADY complete for a
+# period, so there's nothing to generate an UPDATE script for; just a
+# detect route.
+@app.post("/api/bill-issuance/case3/detect")
+def bill_issuance_case3_detect(
+    year: int = bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_YEAR,
+    billing_period_id: str | None = None,
+    with_active_contract: str | None = None,
+    user: str = Depends(require_login),
+):
+    """
+    bill_issuance_validator.build_bills_complete_query - see that
+    function's own docstring for the full CTE chain.
+
+    `year` scopes to every GCCOM_BILLING_PERIOD row in that calendar year
+    (RJ, 2026-09-14: "repeat this for all the billing period of 2026...
+    use the billing period 1 by 1 to obtain the correct result") - default
+    2026, the year RJ asked for, but left open so this doesn't need a code
+    change once 2027 periods exist.
+
+    `billing_period_id` (optional, from the frontend's own period filter)
+    narrows to just that one period instead of the whole year - passed
+    straight through as build_bills_complete_query's billing_period_ids
+    (single-element list).
+
+    `with_active_contract` (optional query param, "yes"/"no") filters to
+    just that WITH_ACTIVE_CONTRACT value; anything else (including absent)
+    means no filter - both shown.
+    """
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+
+    active_filter: bool | None = None
+    if with_active_contract and with_active_contract.strip().lower() == "yes":
+        active_filter = True
+    elif with_active_contract and with_active_contract.strip().lower() == "no":
+        active_filter = False
+
+    period_ids = [billing_period_id] if billing_period_id else None
+    limit = bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_LIMIT
+    try:
+        result = mssql.run_query(
+            conn,
+            bill_issuance_validator.build_bills_complete_query(
+                year=year if not period_ids else None,
+                billing_period_ids=period_ids,
+                with_active_contract=active_filter,
+                limit=limit,
+            ),
+        )
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    rows = [dict(zip(result.columns, r)) for r in result.rows]
+    out_rows = [
+        {
+            "reference": diff_engine.cell_display(_da_col(r, "REFERENCE")),
+            "id_payment_form": diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM")),
+            "contracted_services": diff_engine.cell_display(_da_col(r, "CONTRACTED_SERVICES")),
+            "bills": diff_engine.cell_display(_da_col(r, "BILLS")),
+            "missing_bills": diff_engine.cell_display(_da_col(r, "MISSING_BILLS")),
+            "id_billing_period": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
+            "billing_period_name": diff_engine.cell_display(_da_col(r, "BILLING_PERIOD_NAME")),
+            "with_active_contract": diff_engine.cell_display(_da_col(r, "WITH_ACTIVE_CONTRACT")),
+        }
+        for r in rows
+    ]
+    return {
+        "rows": out_rows,
+        "row_count": len(out_rows),
+        "account_count": len({r["id_payment_form"] for r in out_rows}),
+        "with_active_contract_count": sum(1 for r in out_rows if r["with_active_contract"] == "YES"),
+        "possibly_truncated": len(out_rows) >= limit,
+        "limit": limit,
+        "year": year,
+    }
+
+
+@app.get("/api/bill-issuance/case3/billing-periods")
+def bill_issuance_case3_billing_periods(
+    year: int = bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_YEAR,
+    user: str = Depends(require_login),
+):
+    """
+    Powers the Case 3 period-filter dropdown - every GCCOM_BILLING_PERIOD
+    row for `year`, so the frontend can offer "January 2026", "February
+    2026", etc. instead of a raw ID_BILLING_PERIOD. Read-only, no
+    app/core query builder needed for a plain lookup like this (same
+    convention as RECENT_BILLING_PERIODS_SQL in bulk_checker.py).
+    """
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    sql = (
+        f"SELECT {bill_issuance_validator.BILLING_PERIOD_ID_COLUMN}, "
+        f"{bill_issuance_validator.BILLING_PERIOD_NAME_COLUMN} "
+        f"FROM {bill_issuance_validator.BILL_SCHEMA}.{bill_issuance_validator.BILLING_PERIOD_TABLE} "
+        f"WHERE YEAR({bill_issuance_validator.BILLING_PERIOD_YEAR_COLUMN}) = {int(year)} "
+        f"ORDER BY {bill_issuance_validator.BILLING_PERIOD_ID_COLUMN}"
+    )
+    try:
+        result = mssql.run_query(conn, sql)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [dict(zip(result.columns, r)) for r in result.rows]
+    return {
+        "periods": [
+            {
+                "id_billing_period": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
+                "period_name": diff_engine.cell_display(_da_col(r, "PERIOD_NAME")),
+            }
+            for r in rows
+        ],
+    }
+
+
+# Case 4 (RJ, 2026-09-14, same day) - "Unclassified": every account that's
+# pending validation (same NOTICE_TMP/ESTFAC0012 gate Case 1/2/3 all use)
+# but that NONE of Case 1/2/3 actually flagged. See app/core/bill_
+# issuance_validator.py's Case 4 comment block (above UNCLASSIFIED_
+# DEFAULT_LIMIT) for the full design rationale: rather than re-deriving
+# Case 1/2/3's own business rules here, this route calls their own query
+# builders directly (unlimited) to get each Case's real account-ID set,
+# then excludes those accounts from build_unclassified_query's general
+# pending universe - guaranteeing Case 4 can never disagree with what
+# Case 1/2/3 themselves flag, and extends cleanly to a future Case 5 (add
+# its own account-ID set to `excluded_ids` below, nothing else changes).
+# Read-only/informational, same as Case 3 - "Unclassified" isn't itself
+# something to generate an UPDATE script for (each account here needs its
+# own investigation, which is the entire point of surfacing it), so this
+# only has a detect route + an Excel export, no generate route.
+#
+# RJ, 2026-09-14 (later same day, asked directly): "was this new rule
+# considered in case for unclassified?" - Case 1's own New Contract Match
+# addition (a same-tab addition, not a new numbered Case) had NOT been
+# added to `excluded_ids` below when it shipped, so its 656 live matches
+# were silently still showing up as Unclassified. Fixed - build_new_
+# contract_match_query is now a fifth exclusion source. Any FUTURE
+# addition to the Case 1 tab (numbered Case or not) needs the same manual
+# step: add its own account-ID set to `excluded_ids` here.
+def _case4_group_rows_by_account(rows: list[dict]) -> list[dict]:
+    """
+    Groups build_unclassified_query's per-bill rows into one object per
+    account (ID_PAYMENT_FORM) - RJ's own words for Case 4: "Make it look
+    like case 2, where there is a drill down on the bills and just
+    showing the accounts on the row". Unlike Case 2, there's no NEEDS_
+    UPDATE/complete concept here - every bill in the input is already
+    "currently issuing and unexplained by any other Case", so each
+    account object just carries its REFERENCE, a `bill_count`, and a
+    `bills` list (one entry per pending bill) for the drill-down. Row
+    order from the query is already REFERENCE, ID_BILLING_PERIOD - dict
+    insertion order preserves that grouping without a second sort here.
+    """
+    accounts: dict[str, dict] = {}
+    for r in rows:
+        pf = diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM"))
+        acct = accounts.get(pf)
+        if acct is None:
+            acct = {
+                "id_payment_form": pf,
+                "reference": diff_engine.cell_display(_da_col(r, "REFERENCE")),
+                "bill_count": 0,
+                "bills": [],
+            }
+            accounts[pf] = acct
+        acct["bill_count"] += 1
+        acct["bills"].append({
+            "id_bill": diff_engine.cell_display(_da_col(r, "ID_BILL")),
+            "id_billing_period": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
+            "bill_type": diff_engine.cell_display(_da_col(r, "BILL_TYPE")),
+            "offered_service_desc": diff_engine.cell_display(_da_col(r, "OFFERED_SERVICE_DESC")),
+            "billing_status_desc": diff_engine.cell_display(_da_col(r, "BILLING_STATUS_DESC")),
+            "billing_date": diff_engine.cell_display(_da_col(r, "BILLING_DATE")),
+        })
+    return list(accounts.values())
+
+
+@app.post("/api/bill-issuance/case4/detect")
+def bill_issuance_case4_detect(user: str = Depends(require_login)):
+    """
+    Computes Case 4 "Unclassified" - see the module-level design comment
+    just above and app/core/bill_issuance_validator.py's own Case 4
+    comment block. Five live queries per call (Case 1 Stuck Bills, Case
+    1's own New Contract Match, Case 2, Case 3 - each unlimited - plus
+    build_unclassified_query itself, also unlimited) - confirmed live
+    (2026-09-14) the original four each ran in ~1-1.6s, so a full Case 4
+    scan costs a few seconds, acceptable for an on-demand button click
+    rather than something polled/auto-run.
+
+    RJ, 2026-09-14 (asked directly): "was this new rule considered in
+    case for unclassified?" - it hadn't been: New Contract Match (build_
+    new_contract_match_query) was added to the Case 1 tab AFTER this
+    route was first built, and this route's own exclusion set was never
+    updated to call it, so every account it matches (656 live at the
+    time this was caught) was silently still showing up as "Unclassified"
+    even though Case 1 now explains it. Fixed by adding it as a fifth
+    exclusion source, same as Case 1/2/3 - this is exactly the "any other
+    case that we will add in the future" scenario the module's own Case 4
+    design comment already anticipated, just missed in practice for a
+    same-tab addition that isn't a new numbered Case.
+
+    Case 3's own account set is scoped to ALL_CONTRACT_STATUS_DEFAULT_
+    YEAR (2026, the year RJ's Case 3 tab itself defaults to) - if a
+    future year needs its own Case 3 scan, this route's Case 3 exclusion
+    would need widening to match, same as Case 3's own tab would.
+    """
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+
+    try:
+        case1_result = mssql.run_query(
+            conn, bill_issuance_validator.build_stuck_bills_query(limit=None),
+        )
+        new_contract_match_result = mssql.run_query(
+            conn, bill_issuance_validator.build_new_contract_match_query(limit=None),
+        )
+        case2_result = mssql.run_query(
+            conn, bill_issuance_validator.build_terminated_period_mismatch_query(limit=None, days_back=None),
+        )
+        case3_result = mssql.run_query(
+            conn,
+            bill_issuance_validator.build_bills_complete_query(
+                year=bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_YEAR, limit=None,
+            ),
+        )
+        unclassified_result = mssql.run_query(
+            conn, bill_issuance_validator.build_unclassified_query(limit=None),
+        )
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    def _account_ids(result) -> set[str]:
+        idx = result.columns.index("ID_PAYMENT_FORM")
+        return {diff_engine.cell_display(row[idx]) for row in result.rows}
+
+    excluded_ids = (
+        _account_ids(case1_result)
+        | _account_ids(new_contract_match_result)
+        | _account_ids(case2_result)
+        | _account_ids(case3_result)
+    )
+
+    all_rows = [dict(zip(unclassified_result.columns, r)) for r in unclassified_result.rows]
+    rows = [r for r in all_rows if diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM")) not in excluded_ids]
+
+    limit = bill_issuance_validator.UNCLASSIFIED_DEFAULT_LIMIT
+    possibly_truncated = len(all_rows) >= limit
+    accounts = _case4_group_rows_by_account(rows)
+    return {
+        "accounts": accounts,
+        "account_count": len(accounts),
+        "bill_count": len(rows),
+        "case1_account_count": len(_account_ids(case1_result)),
+        "new_contract_match_account_count": len(_account_ids(new_contract_match_result)),
+        "case2_account_count": len(_account_ids(case2_result)),
+        "case3_account_count": len(_account_ids(case3_result)),
+        "possibly_truncated": possibly_truncated,
+        "limit": limit,
+    }
+
+
+class BillIssuanceCase4ExportRow(BaseModel):
+    """
+    One row of whatever Case 4's account table currently has VISIBLE - a
+    flat, account-level shape (like BillIssuanceExportRow), so this
+    endpoint never re-derives Case 4's own grouping/exclusion logic
+    server-side. `offered_services` and `billing_periods` are already
+    comma-joined by the frontend before it sends the request.
+    """
+
+    reference: str = ""
+    id_payment_form: str = ""
+    bill_count: str = ""
+    offered_services: str = ""
+    billing_periods: str = ""
+
+
+class BillIssuanceCase4ExportXlsxRequest(BaseModel):
+    rows: list[BillIssuanceCase4ExportRow]
+
+
+@app.post("/api/bill-issuance/case4/export-xlsx")
+def bill_issuance_case4_export_xlsx(body: BillIssuanceCase4ExportXlsxRequest, user: str = Depends(require_login)):
+    """
+    Excel counterpart to Case 4's client-side CSV export - RJ's own
+    request for Case 4 explicitly included "export to excel" (unlike
+    Case 2/3, which only ever got a CSV button). Same round-trip-through-
+    openpyxl pattern as bill_issuance_export_xlsx (Case 1) above.
+    """
+    if not body.rows:
+        raise HTTPException(status_code=400, detail="No rows to export.")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Bill Issuance Case 4"
+    headers = ["Account", "Payment Form ID", "Bill Count", "Services", "Billing Periods"]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for r in body.rows:
+        ws.append([r.reference, r.id_payment_form, r.bill_count, r.offered_services, r.billing_periods])
+    widths = [16, 16, 12, 30, 24]
+    for i, width in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
+    ws.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="bill_issuance_case4.xlsx"'},
+    )
 
 
 # ---------------------------------------------------------------------

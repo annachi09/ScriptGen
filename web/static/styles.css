@@ -568,7 +568,95 @@ button { font-family: inherit; }
 .data-grid tr.row-primary-only td { background: #d7f5e3; }
 .data-grid tr.row-primary-only td:first-child { border-left: 3px solid var(--success); }
 .row-primary-only-swatch { color: var(--success); }
+/* Bill Issuance Validator Case 2 (RJ, 2026-09-17 modernization pass):
+   an account (or one of its services in the drill-down) that Needs
+   action. Was reusing .row-multi-period, borrowed from an unrelated
+   Date Anomaly concept with a heavier, muddier wash (#ffe4c2) - this is
+   the same lighter-pastel-bg + colored-left-border shape as .row-not-
+   billed/.row-checking-period/.row-primary-only above, just in amber
+   (var(--warning)) to match the KPI card's own ⚠️ "Accounts needing
+   action" styling below. */
+.data-grid tr.row-needs-action td { background: #fef3d6; }
+.data-grid tr.row-needs-action td:first-child { border-left: 3px solid var(--warning); }
+.row-needs-action-swatch { color: var(--warning); }
 .data-grid td[contenteditable="true"]:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* Case 2 (Terminated Accounts) table redesign - RJ, 2026-09-13:
+   "its difficult to copy the account, also can you use a different look
+   and feel, a modern one where each row is clearly recognized the design
+   is so bad." Replaces the flat amber-wash row (above) with real per-row
+   separation (border + hover + a colored left accent kept thin), pill
+   badges for status instead of plain text, a monospace account number,
+   and a dedicated copy button so the account doesn't have to be
+   click-toggled or manually selected to grab it. Scoped entirely to
+   #biss2-table so Case 1 and every other .data-grid in the app keep
+   their current look untouched. */
+#biss2-table { border-collapse: collapse; }
+#biss2-table tbody tr.biss2-account-row td {
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--card-border);
+  background: var(--card-bg);
+  transition: background 0.12s ease;
+}
+#biss2-table tbody tr.biss2-account-row:hover td { background: #f6f7fb; }
+#biss2-table tbody tr.biss2-account-row.is-needs-action td:first-child { border-left: 3px solid var(--warning); }
+#biss2-table tbody tr.biss2-account-row.is-complete td:first-child { border-left: 3px solid var(--success); }
+#biss2-table tbody tr.biss2-account-row.is-expanded td { background: var(--accent-bg-soft); }
+#biss2-table .biss2-toggle-cell {
+  cursor: pointer;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  transition: transform 0.12s ease, color 0.12s ease;
+}
+#biss2-table .biss2-toggle-cell:hover { color: var(--accent); }
+.biss2-account-cell { display: flex; align-items: center; gap: 8px; }
+.biss2-account-num {
+  font-family: "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.2px;
+  cursor: pointer;
+}
+.biss2-copy-btn {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.biss2-copy-btn:hover { background: var(--accent-bg-soft); border-color: var(--accent); color: var(--accent); }
+.biss2-copy-btn.is-copied { background: var(--success); border-color: var(--success); color: #fff; }
+.biss2-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.biss2-status-pill.is-needs-action { background: #fef3d6; color: #92620a; }
+.biss2-status-pill.is-complete { background: #d7f5e3; color: #15803d; }
+#biss2-table tbody tr.biss2-service-row td {
+  padding: 8px 10px 8px 34px;
+  border-bottom: 1px solid var(--card-border);
+  background: #fafbfe;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+#biss2-table tbody tr.biss2-service-row.row-needs-action td { background: #fffaf0; color: var(--text-primary); }
 
 .generate-row { display: flex; gap: 10px; margin-top: 14px; }
 
@@ -780,6 +868,18 @@ button { font-family: inherit; }
 .kpi-card[data-kpi="nulls"]::before { background: var(--danger); }
 .kpi-card[data-kpi="duplicates"]::before { background: #8b5cf6; }
 .kpi-card[data-kpi="completeness"]::before { background: var(--success); }
+/* Bill Issuance Validator KPI row (both cases) - same "color follows
+   meaning" rule as the Dashboard cards above. Case 1: rows=neutral,
+   electricity/water=accent (both are "blocked", the color split is just
+   which service, not severity). Case 2: needsaction=warning (matches
+   the ⚠️ icon and .row-needs-action), complete=success (matches ✅),
+   services=accent. "accounts"/"rows" fall through to the base ::before
+   rule's neutral --text-muted, which is already correct here. */
+.kpi-card[data-kpi="electricity"]::before,
+.kpi-card[data-kpi="water"]::before,
+.kpi-card[data-kpi="services"]::before { background: var(--accent); }
+.kpi-card[data-kpi="needsaction"]::before { background: var(--warning); }
+.kpi-card[data-kpi="complete"]::before { background: var(--success); }
 .kpi-card:hover { box-shadow: 0 4px 14px rgba(16, 24, 40, 0.1); transform: translateY(-1px); }
 .kpi-card-icon { font-size: 13px; margin-right: 4px; opacity: 0.8; }
 
@@ -889,6 +989,29 @@ button { font-family: inherit; }
 }
 .warning-banner code { background: rgba(0, 0, 0, 0.06); padding: 1px 4px; border-radius: 4px; }
 
+/* Bill Issuance Validator (RJ, 2026-09-17: "the color is not good, make
+   it more modern design"). Both Case 1/Case 2 "How this works" callouts
+   are purely informational, not actual warnings - .warning-banner's
+   olive/amber "caution" look was a semantic mismatch as well as feeling
+   dated. This is the same flat-card shape but in the app's own --accent
+   blue, matching .row-checking-period's "orientation cue, not a problem
+   flag" language elsewhere in this file. Left scoped to Bill Issuance
+   Validator rather than repainting .warning-banner everywhere else it's
+   used (Date Anomaly, Hierarchy Analysis) - RJ's complaint was about
+   this page specifically. */
+.biss-info-banner {
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: var(--accent-bg-soft);
+  border: 1px solid #c7d2fe;
+  border-left: 3px solid var(--accent);
+  color: var(--text-primary);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+.biss-info-banner code { background: rgba(0, 0, 0, 0.06); padding: 1px 4px; border-radius: 4px; }
+.biss-info-banner strong { color: var(--accent); }
+
 /* ---------------- Settings: connection form ---------------- */
 .connection-form {
   margin-top: 16px;
@@ -969,6 +1092,18 @@ button { font-family: inherit; }
 :root[data-theme="dark"] .data-grid tr.row-not-billed td:first-child { border-left: 3px solid #f87171; }
 :root[data-theme="dark"] .data-grid tr.row-primary-only td { background: #123524; }
 :root[data-theme="dark"] .data-grid tr.row-primary-only td:first-child { border-left: 3px solid #34d399; }
+:root[data-theme="dark"] .data-grid tr.row-needs-action td { background: #3a2c10; }
+:root[data-theme="dark"] .data-grid tr.row-needs-action td:first-child { border-left: 3px solid #fbbf24; }
+:root[data-theme="dark"] #biss2-table tbody tr.biss2-account-row td { background: var(--card-bg); border-bottom-color: var(--card-border); }
+:root[data-theme="dark"] #biss2-table tbody tr.biss2-account-row:hover td { background: #232640; }
+:root[data-theme="dark"] #biss2-table tbody tr.biss2-account-row.is-expanded td { background: #1e2352; }
+:root[data-theme="dark"] .biss2-status-pill.is-needs-action { background: #3a2c10; color: #fbbf24; }
+:root[data-theme="dark"] .biss2-status-pill.is-complete { background: #123524; color: #34d399; }
+:root[data-theme="dark"] .biss2-copy-btn { background: #1b1d29; border-color: var(--card-border); color: var(--text-secondary); }
+:root[data-theme="dark"] .biss2-copy-btn:hover { background: #262838; border-color: var(--accent); color: var(--accent); }
+:root[data-theme="dark"] .biss2-copy-btn.is-copied { background: var(--success); border-color: var(--success); color: #0b1a10; }
+:root[data-theme="dark"] #biss2-table tbody tr.biss2-service-row td { background: #181a26; color: var(--text-secondary); }
+:root[data-theme="dark"] #biss2-table tbody tr.biss2-service-row.row-needs-action td { background: #241d0c; color: var(--text-primary); }
 :root[data-theme="dark"] .key-panel { background: #1a1c29; }
 :root[data-theme="dark"] .da-cleanup-filter-bar { background: #1a1c29; }
 :root[data-theme="dark"] .da-subnav { background: #14151f; }
@@ -977,6 +1112,8 @@ button { font-family: inherit; }
 :root[data-theme="dark"] .ai-output { background: #1a1c29; }
 :root[data-theme="dark"] .warning-banner { background: #2c2410; border-color: #4a3c14; color: #fbbf24; }
 :root[data-theme="dark"] .warning-banner code { background: rgba(255, 255, 255, 0.1); }
+:root[data-theme="dark"] .biss-info-banner { background: #1e2352; border-color: #383f78; color: var(--text-primary); }
+:root[data-theme="dark"] .biss-info-banner code { background: rgba(255, 255, 255, 0.1); }
 :root[data-theme="dark"] .dropdown-menu { background: #1b1d29; }
 :root[data-theme="dark"] .badge { background: #052e22; color: #34d399; }
 :root[data-theme="dark"] .badge-noncycle { background: #4a2f0f; color: #fb923c; }

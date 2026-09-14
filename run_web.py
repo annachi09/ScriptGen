@@ -19,6 +19,18 @@ does not stop the server (there's no window-close hook to catch, unlike
 pywebview's), so something visible has to exist for "how do I stop
 this" to have an answer - Ctrl+C in this window.
 
+RJ, 2026-09-14: "i want to share my local to my teammate so we can work
+together in the scriptgen, we are on the same network." BIND_HOST below
+is 0.0.0.0 (listen on every network interface, not just loopback) so a
+teammate on the same LAN can reach this same server at this machine's
+own LAN IP - CHECK_HOST/the auto-opened browser tab still use 127.0.0.1
+so this machine's own "is it already running" check and the tab that
+pops up on launch are unaffected. Auth is unchanged - a teammate still
+needs their own ScriptGen login (Users admin panel -> add one) and never
+sees the SQL Server credentials, since every query runs server-side on
+THIS machine. See README's "Sharing on your local network" section for
+the Windows Firewall step this usually needs the first time.
+
 Run with:  python run_web.py
 (or via the built ScriptGen-Web.exe, once packaged - see build_web.bat)
 """
@@ -29,7 +41,8 @@ import threading
 import time
 import webbrowser
 
-HOST = "127.0.0.1"
+BIND_HOST = "0.0.0.0"   # listen on every interface - allows LAN teammates in
+CHECK_HOST = "127.0.0.1"  # this machine's own loopback - for the busy-port check + auto-opened tab
 PORT = 8420
 
 
@@ -41,14 +54,41 @@ def _port_is_open(host: str, port: int, timeout: float = 0.25) -> bool:
         return False
 
 
+def _lan_ip() -> str | None:
+    """
+    Best-effort LAN IP for this machine, so main() can print a URL a
+    teammate on the same network can actually use (CHECK_HOST/127.0.0.1
+    only ever means "this same machine" to them). Uses the "UDP connect
+    to a public IP, read back the local address the OS would have used"
+    trick - no packet is actually sent (UDP connect() just resolves
+    routing), so this works even offline, and it's more reliable than
+    socket.gethostbyname(gethostname()) on machines with multiple
+    adapters (VPN, Wi-Fi + Ethernet, etc). Returns None (never raises) if
+    there's no route at all - main() just skips the LAN line in that case.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return None
+
+
 def main() -> None:
     import uvicorn
     from web.server import app
 
-    url = f"http://{HOST}:{PORT}/"
+    url = f"http://{CHECK_HOST}:{PORT}/"
+    lan_ip = _lan_ip()
+    lan_url = f"http://{lan_ip}:{PORT}/" if lan_ip else None
 
-    if _port_is_open(HOST, PORT):
+    if _port_is_open(CHECK_HOST, PORT):
         print(f"ScriptGen already appears to be running at {url} - opening it in your browser.")
+        if lan_url:
+            print(f"A teammate on the same network can also reach it at: {lan_url}")
         print(
             "NOTE: this is reattaching to whatever is ALREADY running on port "
             f"{PORT}, not starting a new server. If you just made code changes "
@@ -69,7 +109,7 @@ def main() -> None:
 
     print(f"Starting ScriptGen on {url} ...")
     server_thread = threading.Thread(
-        target=lambda: uvicorn.run(app, host=HOST, port=PORT, log_level="warning"),
+        target=lambda: uvicorn.run(app, host=BIND_HOST, port=PORT, log_level="warning"),
         daemon=True,
     )
     server_thread.start()
@@ -79,11 +119,22 @@ def main() -> None:
     # doesn't race on a slow machine or stall on a fast one (same
     # pattern desktop_launcher.py uses before creating its webview window).
     deadline = time.time() + 10
-    while time.time() < deadline and not _port_is_open(HOST, PORT):
+    while time.time() < deadline and not _port_is_open(CHECK_HOST, PORT):
         time.sleep(0.1)
 
     webbrowser.open(url)
     print(f"ScriptGen is running at {url}")
+    if lan_url:
+        print(f"A teammate on the same network can also reach it at: {lan_url}")
+        print(
+            "(First time only: Windows may prompt \"Windows Defender Firewall has "
+            "blocked some features of this app\" - click Allow access, at least for "
+            "Private networks. If nothing prompts and a teammate still can't connect, "
+            "see README's \"Sharing on your local network\" section for the exact "
+            "firewall-rule command.)"
+        )
+    else:
+        print("Couldn't detect a LAN IP to share with a teammate - check your network connection.")
     print("Leave this window open while you use it. Press Ctrl+C here to stop the server.")
 
     try:
