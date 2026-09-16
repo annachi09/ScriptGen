@@ -86,6 +86,14 @@ from .sql_format import format_sql_literal, quote_ident
 NOTICE_SCHEMA = "OUC_ADMIN"
 NOTICE_TABLE = "GCCOM_NOTICE_TMP"
 
+# Same schema/table date_anomaly.py's own ADMIN_SCHEMA/ITEMS_TO_BILL_TABLE
+# use - confirmed live (INFORMATION_SCHEMA.COLUMNS) it has its own
+# ID_BILL/ID_BILLING_PERIOD/UPDATE_DATE/UPDATE_PROGRAM/UPDATE_USER columns,
+# same shape as GCCOM_BILL's own audit columns - used by Case 2's own
+# "Generate Update Script" (see build_terminated_period_fix_script).
+ITEMS_TO_BILL_SCHEMA = "OUC_ADMIN"
+ITEMS_TO_BILL_TABLE = "GCCOM_ITEMS_TO_BILL"
+
 BILL_SCHEMA = "OUC_COMMON_ADMIN"
 BILL_TABLE = "GCCOM_BILL"
 PAYMENT_FORM_TABLE = "GCCOM_PAYMENT_FORM"
@@ -872,6 +880,31 @@ def build_release_notice_script(
 # confirmed excluded under this fix (period_counts = 2 for period
 # 10000000236: the Water bill and the Rate bill both count, the Deposito
 # bill doesn't since it's neither cycle type nor still invoicing).
+#
+# RJ, 2026-09-15, after the table-merge round surfaced account 1102980263
+# appearing as BOTH a Stuck Bill row AND a New Contract Match row: "for
+# contract match, there should no bill on the succeeding cycles which is
+# in waiting for other services as it is already covered by stuck bill."
+# Investigated live: 1102980263's Rate bill (1072985046, period 236) is
+# genuinely both - it's the account's only pending-validation Rate bill
+# (matches New Contract Match) AND it's blocking that same account's
+# Electricity bill (1075198521, period 237, ESTFAC0015) one period later
+# (matches Stuck Bill independently). Not a bug in either query - the two
+# patterns are just modeling the same underlying notice from two angles -
+# but RJ wants New Contract Match to defer to Stuck Bill whenever a later
+# bill is already ESTFAC0015, rather than flagging the same root cause
+# twice. Added a `NOT EXISTS` check: no bill on the account with a LATER
+# ID_BILLING_PERIOD than the matched Rate bill's own period is currently
+# BILLING_STATUS = ESTFAC0015 (BILL_STATUS_WAITING_OTHER_SERVICES).
+# Deliberately broader than an exact mirror of Stuck Bill's own scan (which
+# only checks OFFERED_SERVICE IN (Electricity, Water) within the next 11
+# periods) - RJ's own words state the general principle ("no bill... which
+# is in waiting for other services"), not a scoped one, so ANY ESTFAC0015
+# bill on the account in a later period disqualifies the match, regardless
+# of which service or how far ahead. Live-confirmed: 12 of 674 candidate
+# matches are excluded by this filter, including both of Case 1's own
+# current Stuck Bill accounts (1102980263, 1102980503) - exactly the
+# overlap RJ flagged.
 NEW_CONTRACT_MATCH_DEFAULT_LIMIT = 2000
 
 
@@ -902,7 +935,16 @@ def build_new_contract_match_query(limit: int | None = NEW_CONTRACT_MATCH_DEFAUL
     still pending validation, contract still Active, contract's own start
     date equal to the bill's LAST_BILLING_DATE, cycle bill type), joined to
     both `pending_counts` (PENDING_COUNT = 1) and `period_counts`
-    (BILL_COUNT = 1).
+    (BILL_COUNT = 1), plus a `NOT EXISTS` check that no bill on the same
+    account in a LATER billing period is currently BILLING_STATUS =
+    ESTFAC0015 (BILL_STATUS_WAITING_OTHER_SERVICES) - RJ, 2026-09-15:
+    "there should no bill on the succeeding cycles which is in waiting for
+    other services as it is already covered by stuck bill." Without this,
+    the same Rate bill can legitimately satisfy both this query AND Case
+    1's own Stuck Bills query at once (see the module-level comment above
+    for the 1102980263 case this fixed) - this defers to Stuck Bill
+    whenever that overlap exists, rather than flagging the same root cause
+    twice.
 
     Final SELECT - LEFT JOINs to GCCOM_BILL_STATUS purely for a human-
     readable BILLING_STATUS description, same defensive-LEFT-JOIN pattern
@@ -952,6 +994,12 @@ def build_new_contract_match_query(limit: int | None = NEW_CONTRACT_MATCH_DEFAUL
         f"    AND cs.ID_OFFERED_SERVICE = {format_sql_literal(OFFERED_SERVICE_RATE)}\n"
         f"    AND pc.PENDING_COUNT = 1\n"
         f"    AND prc.BILL_COUNT = 1\n"
+        f"    AND NOT EXISTS (\n"
+        f"      SELECT 1 FROM {bill_tbl} b3\n"
+        f"      WHERE b3.ID_PAYMENT_FORM = b.ID_PAYMENT_FORM\n"
+        f"        AND b3.ID_BILLING_PERIOD > b.ID_BILLING_PERIOD\n"
+        f"        AND b3.BILLING_STATUS = {format_sql_literal(BILL_STATUS_WAITING_OTHER_SERVICES)}\n"
+        f"    )\n"
         f")\n"
         f"SELECT {top_clause}m.ID_PAYMENT_FORM, m.REFERENCE, m.NOTICE_UPDATE_DATE,\n"
         f"  m.ID_BILL, m.BILLING_STATUS,\n"
@@ -1342,17 +1390,24 @@ def _strip_sql_comments(sql_text: str) -> str:
 @dataclass
 class TerminatedPeriodFixScript:
     """
-    Result of build_terminated_period_fix_script - one UPDATE statement
-    per (id_bill, target_period) pair the caller passes in, each moving
-    that bill's ID_BILLING_PERIOD to the account's target (latest) period.
+    Result of build_terminated_period_fix_script - TWO UPDATE statements
+    per (id_bill, target_period) pair the caller passes in (GCCOM_BILL and
+    GCCOM_ITEMS_TO_BILL, RJ 2026-09-15: "we need to also update GCCOM_
+    ITEMS_TO_BILL... similar to how we are doing now gccom_bill"), each
+    moving that bill's ID_BILLING_PERIOD to the account's target (latest)
+    period.
+
+    `update_count` is the number of BILLS affected (what the UI shows,
+    e.g. "N bill(s)") - `statement_count` is the actual number of raw SQL
+    UPDATE statements in the script (2x update_count, since each bill now
+    gets one statement per table) - kept as two separate fields rather
+    than update_count doubling, so the frontend's own "N bill(s)" wording
+    doesn't silently change meaning.
     """
     sql_text: str
     update_count: int = 0
+    statement_count: int = 0
     warnings: list[str] = field(default_factory=list)
-
-    @property
-    def statement_count(self) -> int:
-        return self.update_count
 
     @property
     def warning_count(self) -> int:
@@ -1390,7 +1445,11 @@ def build_terminated_period_fix_script(
     analyst sees it needs manual investigation instead of it just
     vanishing.
 
-    Each statement carries a defensive WHERE ID_BILLING_PERIOD <> target
+    Each bill gets TWO statements - GCCOM_BILL and GCCOM_ITEMS_TO_BILL -
+    RJ, 2026-09-15: "we need to also update GCCOM_ITEMS_TO_BILL in the
+    script generated... similar to how we are doing now gccom_bill." Both
+    set ID_BILLING_PERIOD to the same target period and carry the same
+    audit columns and the same defensive WHERE ID_BILLING_PERIOD <> target
     guard (in addition to WHERE ID_BILL = id) - so re-running the script
     against a bill that's already been corrected some other way (or
     already ran once) is a safe no-op, same "only touch if still in the
@@ -1399,23 +1458,35 @@ def build_terminated_period_fix_script(
     Part A, etc).
     """
     bill_tbl = _qualified(BILL_SCHEMA, BILL_TABLE)
+    items_to_bill_tbl = _qualified(ITEMS_TO_BILL_SCHEMA, ITEMS_TO_BILL_TABLE)
     warnings: list[str] = []
     pairs = list(updates)
 
     stmts: list[str] = []
     skipped = 0
+    bills_updated = 0
     for id_bill, target_period in pairs:
         if id_bill is None:
             skipped += 1
             continue
+        bills_updated += 1
         set_clause = f"{quote_ident('ID_BILLING_PERIOD')} = {format_sql_literal(target_period)}"
         set_clause += _bill_audit_set_fragment(program, user)
-        stmts.append(
-            f"-- Align ID_BILLING_PERIOD for bill {id_bill} -> {target_period}\n"
-            f"UPDATE {bill_tbl}\n"
-            f"SET {set_clause}\n"
+        where_clause = (
             f"WHERE {quote_ident('ID_BILL')} = {format_sql_literal(id_bill)}\n"
             f"  AND {quote_ident('ID_BILLING_PERIOD')} <> {format_sql_literal(target_period)};"
+        )
+        stmts.append(
+            f"-- Align ID_BILLING_PERIOD for bill {id_bill} -> {target_period} (GCCOM_BILL)\n"
+            f"UPDATE {bill_tbl}\n"
+            f"SET {set_clause}\n"
+            f"{where_clause}"
+        )
+        stmts.append(
+            f"-- Align ID_BILLING_PERIOD for bill {id_bill} -> {target_period} (GCCOM_ITEMS_TO_BILL)\n"
+            f"UPDATE {items_to_bill_tbl}\n"
+            f"SET {set_clause}\n"
+            f"{where_clause}"
         )
     if skipped:
         warnings.append(
@@ -1431,10 +1502,10 @@ def build_terminated_period_fix_script(
         f"-- Program/Jira: {program}",
         "-- WARNING: every service on the affected account(s) is Terminated",
         "-- (GCCOM_CONTRACTED_SERVICE.STATUS = ESTSC00004) - this script only",
-        "-- realigns GCCOM_BILL.ID_BILLING_PERIOD so the account's remaining",
-        "-- pending/issuing bills share one billing period and can complete",
-        "-- issuance together. It does not change BILLING_STATUS, BILLING_DATE,",
-        "-- or anything else on the bill.",
+        "-- realigns GCCOM_BILL.ID_BILLING_PERIOD and GCCOM_ITEMS_TO_BILL.",
+        "-- ID_BILLING_PERIOD so the account's remaining pending/issuing bills",
+        "-- share one billing period and can complete issuance together. It",
+        "-- does not change BILLING_STATUS, BILLING_DATE, or anything else.",
         f"-- Statements: {len(stmts)}",
     ]
     for w in warnings:
@@ -1453,6 +1524,7 @@ def build_terminated_period_fix_script(
         sql_text = _strip_sql_comments(sql_text)
     return TerminatedPeriodFixScript(
         sql_text=sql_text,
-        update_count=len(stmts),
+        update_count=bills_updated,
+        statement_count=len(stmts),
         warnings=warnings,
     )

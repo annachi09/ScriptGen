@@ -557,6 +557,7 @@
             ℹ️ <strong>Generate Script for Selected</strong> runs the full original correction (<code>READING_PREV_DATE</code>, <code>INI_DATE</code>, <code>XML_TO_BILL</code>, <code>GCCOM_ITEMS_TO_BILL.STATUS</code>, cancelling <code>GCCOM_ANOMALOUS</code>, and resetting any non-cycle <code>TIPTL00011</code> readings) for each selected row's Supply/NISS — the same pipeline as Single NISS/Batch — via a background batch run. You'll be switched to the <strong>Batch</strong> tab to watch it run.
           </div>
           <div class="hint-text" id="da-cleanup-summary"></div>
+          <div class="hint-text" id="da-cleanup-filtered-count"></div>
 
           <div class="key-panel-row da-cleanup-filter-bar" id="da-cleanup-filter-row" hidden>
             <label class="field-label">Search</label>
@@ -687,6 +688,7 @@
           </div>
           <p class="hint-text">Scans <strong>every</strong> primary measuring point at once for a not-yet-billed Cycle/Distribution reading — no NISS/id needed here. Click 🔗 on a row to drill into that hierarchy's full member list. <span class="row-primary-only-swatch">■</span> green rows have every secondary already sent to bill (or further) — the primary's own reading is the only thing left to fix in that hierarchy.</p>
           <div class="hint-text" id="hier-summary"></div>
+          <div class="hint-text" id="hier-filtered-count"></div>
 
           <div class="key-panel-row" id="hier-filter-row" hidden>
             <label class="field-label">Search</label>
@@ -823,6 +825,7 @@
           </div>
           <p class="hint-text">One table, both patterns — use the <strong>Pattern</strong> filter below to isolate one. Stuck Bill rows are one per account, no duplicates (Electricity takes priority when it's stuck; Water only shows up when Electricity isn't).</p>
           <div class="hint-text" id="billiss-summary"></div>
+          <div class="hint-text" id="billiss-filtered-count"></div>
 
           <div class="kpi-row" id="billiss-kpi-row" style="margin:18px 0 4px;"></div>
 
@@ -921,6 +924,7 @@
           </div>
           <p class="hint-text">Click an account number to expand its services, or use the <strong>📋</strong> button to copy it. <span class="row-needs-action-swatch">⚠️ Needs action</span> / <span class="row-primary-only-swatch">✅ Complete</span> pills show each account's status.</p>
           <div class="hint-text" id="biss2-summary"></div>
+          <div class="hint-text" id="biss2-filtered-count"></div>
 
           <div class="kpi-row" id="biss2-kpi-row" style="margin:18px 0 4px;"></div>
 
@@ -1004,6 +1008,7 @@
           </div>
           <p class="hint-text">One row per account per billing period — an account can appear more than once if more than one 2026 period is already complete for it.</p>
           <div class="hint-text" id="biss3-summary"></div>
+          <div class="hint-text" id="biss3-filtered-count"></div>
 
           <div class="kpi-row" id="biss3-kpi-row" style="margin:18px 0 4px;"></div>
 
@@ -1062,6 +1067,7 @@
           </div>
           <p class="hint-text">Click an account number to expand its pending bills, or use the <strong>📋</strong> button to copy it.</p>
           <div class="hint-text" id="biss4-summary"></div>
+          <div class="hint-text" id="biss4-filtered-count"></div>
 
           <div class="kpi-row" id="biss4-kpi-row" style="margin:18px 0 4px;"></div>
 

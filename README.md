@@ -2008,10 +2008,70 @@ Response gained `stuck_bill_count` and `new_contract_match_count` alongside the 
 pattern (still one `UPDATE ... WHERE id_notice_tmp IN (...)` statement). The **Excel export**
 gained a Pattern column plus the four New Contract Match-only columns.
 
+## Real bug fixed: New Contract Match could double-detect a Stuck Bill account (2026-09-15)
+
+The merged table surfaced something the two separate tables had been hiding: account 1102980263
+appeared as BOTH a Stuck Bill row and a New Contract Match row. RJ asked why, then gave the fix
+direction himself: "for contract match, there should no bill on the succeeding cycles which is in
+waiting for other services as it is already covered by stuck bill."
+
+**Investigated live:** the account's Rate bill (1072985046, period 236) is genuinely both - it's
+the account's only pending-validation Rate bill (satisfies New Contract Match) AND it's blocking
+that same account's Electricity bill (1075198521, period 237, `ESTFAC0015` "En espera de otros
+servicios") one period later (satisfies Stuck Bill independently). Not a bug in either query on its
+own - the two patterns model the same underlying notice from two different angles, and both were
+genuinely true here.
+
+**Fix:** added a `NOT EXISTS` check to `build_new_contract_match_query` - no bill on the same
+account with a LATER `ID_BILLING_PERIOD` than the matched Rate bill's own period is currently
+`ESTFAC0015`. Deliberately broader than an exact mirror of Stuck Bill's own scan (which only checks
+Electricity/Water within the next 11 periods) - RJ's own words state the general principle, not a
+scoped one, so any `ESTFAC0015` bill on the account in a later period disqualifies the match,
+regardless of service or how far ahead - New Contract Match defers to Stuck Bill whenever that
+overlap exists, rather than flagging the same root cause twice.
+
+**Live-verified:** 12 of 674 candidate matches are excluded by this filter, including both of Case
+1's own current Stuck Bill accounts (1102980263 and 1102980503) - exactly the overlap RJ flagged.
+
 The old standalone New Contract Match card/table is gone from the UI. The standalone API route
 (`POST /api/bill-issuance/case1/new-contract-match/detect`) is unchanged and still callable
 directly - Case 4 "Unclassified" still calls the query builder function directly, not through this
 route or the merged `/detect` route.
+
+## Every filterable table now shows how many rows the current filters hid (2026-09-15)
+
+RJ: "for case 2, if i filter, i want to see how many rows filtered, do this also for all of the
+project." A shared `renderFilteredCount(elId, shownCount, totalCount)` helper in `app.js` is now
+called from the end of every filterable table's own `RenderTable()` function - which already runs
+on both a fresh detect AND every filter/search change, so it always reflects the live filter state
+without any new event wiring. Writes into a small `<div class="hint-text" id="X-filtered-count">`
+placed right under each table's existing summary line; blank when no filter is actually narrowing
+the rows (so the common unfiltered case isn't cluttered with a redundant "N of N").
+
+Covers every filterable table in the app: Case 1 (`#billiss-filtered-count`), Case 2
+(`#biss2-filtered-count`), Case 3 (`#biss3-filtered-count`), Case 4
+(`#biss4-filtered-count`), Hierarchy Analysis (`#hier-filtered-count`), and Detect All
+(`#da-cleanup-filtered-count`). Bulk Checker was left out - its search is a server-side query, not
+a client-side filter over an already-fetched row set, so there's no "filtered out" count to show.
+
+## Case 2: generated script now also updates GCCOM_ITEMS_TO_BILL (2026-09-15)
+
+RJ, verbatim: "we need to also update GCCOM_ITEMS_TO_BILL in the script generated: update
+GCCOM_ITEMS_TO_BILL set ID_BILLING_PERIOD = :billing_period where id_bill = :ID_BILL, similar to
+how we are doing now gccom_bill." Confirmed live (`INFORMATION_SCHEMA.COLUMNS`) that
+`OUC_ADMIN.GCCOM_ITEMS_TO_BILL` has its own `ID_BILL`/`ID_BILLING_PERIOD`/`UPDATE_DATE`/
+`UPDATE_PROGRAM`/`UPDATE_USER` columns, same shape as `GCCOM_BILL`'s own audit columns.
+
+**Fix:** `build_terminated_period_fix_script` now emits TWO `UPDATE` statements per bill -
+`GCCOM_BILL` (unchanged) and a new `GCCOM_ITEMS_TO_BILL` one, same `SET ID_BILLING_PERIOD =
+target`, same audit columns, same defensive `WHERE ID_BILL = id AND ID_BILLING_PERIOD <> target`
+guard as the existing statement. A bill with `id_bill = None` (no matching final bill) is still
+skipped for both tables, same as before.
+
+`TerminatedPeriodFixScript.update_count` stays "bills affected" (what the UI shows, e.g. "3
+bill(s)") - a new `statement_count` field is the actual raw SQL statement count, now 2x
+`update_count` since each bill touches both tables. Kept as two separate fields rather than
+`update_count` silently doubling, so the frontend's own "N bill(s)" wording doesn't change meaning.
 
 ## Case 2: CSV export now includes bill/status detail (2026-09-14, same day)
 

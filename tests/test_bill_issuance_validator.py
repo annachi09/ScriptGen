@@ -288,6 +288,23 @@ def test_build_new_contract_match_query_requires_only_rate_bill_in_period():
     assert "prc.BILL_COUNT = 1" in sql
 
 
+def test_build_new_contract_match_query_excludes_accounts_with_later_stuck_bill():
+    # RJ, 2026-09-15, after account 1102980263 showed up as BOTH a Stuck
+    # Bill row and a New Contract Match row in the merged table: "for
+    # contract match, there should no bill on the succeeding cycles which
+    # is in waiting for other services as it is already covered by stuck
+    # bill." A NOT EXISTS check that no bill on the SAME account with a
+    # LATER ID_BILLING_PERIOD is currently ESTFAC0015 (waiting for other
+    # services) - deferring to Stuck Bill whenever that overlap exists.
+    sql = biv.build_new_contract_match_query()
+    matched_block = sql.split("matched AS (")[1].split(")\nSELECT")[0]
+    assert "NOT EXISTS (" in matched_block
+    not_exists_block = matched_block.split("NOT EXISTS (")[1]
+    assert "b3.ID_PAYMENT_FORM = b.ID_PAYMENT_FORM" in not_exists_block
+    assert "b3.ID_BILLING_PERIOD > b.ID_BILLING_PERIOD" in not_exists_block
+    assert "b3.BILLING_STATUS = 'ESTFAC0015'" in not_exists_block
+
+
 def test_build_new_contract_match_query_joins_lookup_for_status_description():
     sql = biv.build_new_contract_match_query()
     assert "LEFT JOIN OUC_ADMIN.GCCOM_BILL_STATUS bs ON bs.COD_DEVELOP = m.BILLING_STATUS" in sql
@@ -488,6 +505,35 @@ def test_build_terminated_period_fix_script_skips_pairs_with_no_bill_and_warns()
     assert result.sql_text.count("UPDATE OUC_COMMON_ADMIN.GCCOM_BILL") == 1
     assert len(result.warnings) == 1
     assert "no bill matching" in result.warnings[0]
+
+
+# RJ, 2026-09-15: "we need to also update GCCOM_ITEMS_TO_BILL in the
+# script generated... similar to how we are doing now gccom_bill." Each
+# bill now gets a second UPDATE against OUC_ADMIN.GCCOM_ITEMS_TO_BILL,
+# same SET/WHERE shape as the existing GCCOM_BILL statement.
+def test_build_terminated_period_fix_script_also_updates_items_to_bill():
+    result = biv.build_terminated_period_fix_script([(555, 237), (556, 237)])
+    assert result.sql_text.count("UPDATE OUC_ADMIN.GCCOM_ITEMS_TO_BILL") == 2
+    assert result.sql_text.count("UPDATE OUC_COMMON_ADMIN.GCCOM_BILL") == 2
+    # Both statements for bill 555 carry the same target period + guard.
+    assert result.sql_text.count("SET ID_BILLING_PERIOD = 237") == 4
+    assert result.sql_text.count("WHERE ID_BILL = 555") == 2
+    assert result.sql_text.count("AND ID_BILLING_PERIOD <> 237") == 4
+
+
+def test_build_terminated_period_fix_script_statement_count_is_two_per_bill():
+    # update_count stays "bills affected" (what the UI shows) -
+    # statement_count is the raw SQL statement count, now 2x since each
+    # bill touches both GCCOM_BILL and GCCOM_ITEMS_TO_BILL.
+    result = biv.build_terminated_period_fix_script([(555, 237), (556, 237)])
+    assert result.update_count == 2
+    assert result.statement_count == 4
+
+
+def test_build_terminated_period_fix_script_items_to_bill_skipped_with_no_bill():
+    result = biv.build_terminated_period_fix_script([(555, 237), (None, 237)])
+    assert result.sql_text.count("UPDATE OUC_ADMIN.GCCOM_ITEMS_TO_BILL") == 1
+    assert result.statement_count == 2
 
 
 # ---------------- Case 3: All Contract Status - Bills Complete ----------------

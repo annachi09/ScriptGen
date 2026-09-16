@@ -1754,6 +1754,20 @@ function daCleanupTypeText(r) {
 // deliberately is NOT reset by filtering: a row checked, then hidden by a
 // filter, stays checked (same convention as most filter+select UIs) - see
 // the "Generate Cleanup Script" card's own hint text about this.
+// RJ, 2026-09-15: "if i filter, i want to see how many rows filtered, do
+// this also for all of the project." Shared helper used by every
+// filterable table's own RenderTable() function (called on both a fresh
+// detect AND every filter/search change, so this always reflects the
+// current filter state) - blank when no filter is actually narrowing the
+// rows, so the unfiltered case isn't cluttered with a redundant "N of N".
+function renderFilteredCount(elId, shownCount, totalCount) {
+  const el = $(elId);
+  if (!el) return;
+  el.textContent = (totalCount > 0 && shownCount < totalCount)
+    ? `Showing ${shownCount} of ${totalCount} row(s) with current filters.`
+    : "";
+}
+
 function daCleanupVisibleIndices(ignoreFilters = false) {
   return daCleanupRows
     .map((_, idx) => idx)
@@ -1830,6 +1844,7 @@ function daCleanupRenderTable() {
   const tbody = document.querySelector("#da-cleanup-table tbody");
   tbody.innerHTML = "";
   const visible = daCleanupVisibleIndices();
+  renderFilteredCount("#da-cleanup-filtered-count", visible.length, daCleanupRows.length);
   visible.forEach((idx) => {
     const r = daCleanupRows[idx];
     const tr = document.createElement("tr");
@@ -3060,6 +3075,7 @@ function hierRenderTable() {
   const visible = hierVisibleIndices();
   const tbody = $("#hier-table tbody");
   tbody.innerHTML = "";
+  renderFilteredCount("#hier-filtered-count", visible.length, hierRows.length);
   visible.forEach((idx) => {
     const r = hierRows[idx];
     const tr = document.createElement("tr");
@@ -3527,6 +3543,7 @@ function billissRenderTable() {
   const visible = billissVisibleIndices();
   const tbody = $("#billiss-table tbody");
   tbody.innerHTML = "";
+  renderFilteredCount("#billiss-filtered-count", visible.length, billissRows.length);
   visible.forEach((idx) => {
     const r = billissRows[idx];
     const tr = document.createElement("tr");
@@ -3833,6 +3850,7 @@ function biss2RenderTable() {
   const visible = biss2VisibleIndices();
   const tbody = $("#biss2-table tbody");
   tbody.innerHTML = "";
+  renderFilteredCount("#biss2-filtered-count", visible.length, biss2Accounts.length);
   visible.forEach((idx) => {
     const acct = biss2Accounts[idx];
     const expanded = biss2Expanded.has(idx);
@@ -4124,6 +4142,7 @@ function biss3RenderTable() {
   const visible = biss3VisibleIndices();
   const tbody = $("#biss3-table tbody");
   tbody.innerHTML = "";
+  renderFilteredCount("#biss3-filtered-count", visible.length, biss3Rows.length);
   visible.forEach((idx) => {
     const r = biss3Rows[idx];
     const tr = document.createElement("tr");
@@ -4273,6 +4292,7 @@ function biss4RenderTable(data) {
   const visible = biss4VisibleIndices();
   const tbody = $("#biss4-table tbody");
   tbody.innerHTML = "";
+  renderFilteredCount("#biss4-filtered-count", visible.length, biss4Accounts.length);
   visible.forEach((idx) => {
     const acct = biss4Accounts[idx];
     const expanded = biss4Expanded.has(idx);
