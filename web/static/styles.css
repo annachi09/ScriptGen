@@ -23,6 +23,17 @@
   --accent: #3b5bfd;
   --accent-hover: #2c48e0;
   --accent-bg-soft: #eef0ff;
+  /* Futuristic redesign (2026-09-23, RJ: "make it look futuristic, the
+     whole theme of this application") - a second accent hue + a shared
+     gradient/glow pair built from --accent/--accent-2, referenced by
+     .card/.btn-primary/.nav-item.is-active/.sidebar/table headers below
+     so the new look cascades through every page's shared components
+     without rebuilding each page's own markup. Token VALUES change here;
+     no existing selector/variable name is removed, so nothing that
+     already references --accent/--card-shadow/etc. needs touching. */
+  --accent-2: #06b6d4;
+  --gradient-accent: linear-gradient(135deg, var(--accent), var(--accent-2));
+  --glow-accent: 0 0 0 1px rgba(59, 91, 253, 0.12), 0 8px 24px rgba(59, 91, 253, 0.16);
 
   --success: #22c55e;
   --danger: #ef4444;
@@ -141,9 +152,13 @@ button { font-family: inherit; }
 }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn-block { width: 100%; justify-content: center; margin-top: 6px; }
+.btn { transition: box-shadow 0.15s ease, filter 0.15s ease; }
 
-.btn-primary { background: var(--accent); color: #fff; box-shadow: 0 1px 2px rgba(59, 91, 253, 0.15), 0 2px 6px rgba(59, 91, 253, 0.18); }
-.btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+/* Gradient fill (var(--gradient-accent)) instead of a flat --accent -
+   the primary "do the thing" button across every page (Run Query,
+   Generate Update Script, every Detect/Scan/Generate button app-wide). */
+.btn-primary { background: var(--gradient-accent); color: #fff; box-shadow: var(--glow-accent); }
+.btn-primary:hover:not(:disabled) { filter: brightness(1.08); box-shadow: var(--glow-accent), 0 4px 14px rgba(6, 182, 212, 0.22); }
 
 .btn-secondary { background: #eef0f4; color: var(--text-primary); }
 .btn-secondary:hover:not(:disabled) { background: #e3e6ec; }
@@ -187,7 +202,13 @@ button { font-family: inherit; }
 .sidebar {
   width: 250px;
   flex: none;
-  background: var(--sidebar-bg);
+  /* Same soft radial-glow treatment the login screen already uses, just
+     fainter - so the sidebar (visible on every single page) carries the
+     futuristic look consistently instead of a flat dark fill. */
+  background:
+    radial-gradient(420px circle at 15% -5%, rgba(109, 124, 255, 0.16), transparent 60%),
+    radial-gradient(360px circle at 100% 90%, rgba(34, 211, 238, 0.10), transparent 55%),
+    var(--sidebar-bg);
   color: var(--sidebar-text);
   display: flex;
   flex-direction: column;
@@ -264,8 +285,18 @@ button { font-family: inherit; }
   font-weight: 500;
   cursor: pointer;
 }
+.nav-item { position: relative; transition: background 0.15s ease, color 0.15s ease; }
 .nav-item:hover:not(.is-disabled) { background: #1a1c29; color: #fff; }
-.nav-item.is-active { background: var(--sidebar-bg-active); color: var(--sidebar-text-active); font-weight: 700; }
+/* Futuristic redesign: a gradient wash (rather than a flat navy fill)
+   plus a glowing left accent bar for the active page - same --gradient-
+   accent every other component now uses, at low opacity so sidebar text
+   stays readable over it. */
+.nav-item.is-active {
+  background: linear-gradient(90deg, rgba(109, 124, 255, 0.28), rgba(34, 211, 238, 0.10));
+  color: var(--sidebar-text-active);
+  font-weight: 700;
+  box-shadow: inset 3px 0 0 var(--accent-2, #06b6d4);
+}
 .nav-item.is-disabled { cursor: default; color: var(--sidebar-text-muted); }
 .nav-icon { font-size: 15px; width: 18px; text-align: center; }
 .nav-label { flex: 1; }
@@ -415,13 +446,36 @@ button { font-family: inherit; }
 }
 
 .card {
+  position: relative;
   background: var(--card-bg);
   border: 1px solid var(--card-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--card-shadow);
   padding: 22px 24px;
   margin-bottom: 22px;
+  transition: box-shadow 0.18s ease;
 }
+/* Futuristic redesign: a thin gradient accent bar along the top of every
+   card (same idea .overview-card::before already used just for Overview -
+   generalized here to every .card app-wide, RJ: "the whole theme of this
+   application"), plus a slightly stronger glow on hover so the whole app
+   reads as one consistent design language, not just the Overview page.
+   Deliberately NOT `overflow: hidden` on .card itself (unlike .overview-
+   card, which can afford it) - several pages pop a `.dropdown-menu`
+   (position: absolute, top: calc(100% + 6px)) out of a `.dropdown` that
+   lives inside a .card, and clipping the card would silently cut those
+   menus off. The bar's own top corners are rounded to match instead, so
+   nothing needs clipping to look right. */
+.card::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--gradient-accent);
+  opacity: 0.85;
+}
+.card:hover { box-shadow: var(--glow-accent), var(--card-shadow); }
 
 .card-header {
   display: flex;
@@ -519,9 +573,10 @@ button { font-family: inherit; }
 }
 .data-grid thead th {
   position: sticky; top: 0;
-  background: #f6f7fb;
+  background: linear-gradient(180deg, rgba(59, 91, 253, 0.06), rgba(59, 91, 253, 0.02)), #f6f7fb;
   font-weight: 700;
   color: var(--text-secondary);
+  border-bottom: 2px solid var(--accent-bg-soft);
   z-index: 1;
 }
 .data-grid td.preview-col {
@@ -551,6 +606,19 @@ button { font-family: inherit; }
 .data-grid tr.row-not-billed td { background: #fdd9d9; }
 .data-grid tr.row-not-billed td:first-child { border-left: 3px solid #ef4444; }
 .row-not-billed-swatch { color: #ef4444; }
+/* Incorrect Billing Period (2026-09-23): a group-divider row inserted
+   directly into #ibp-table's flat <tbody> wherever ID_OFFERED_SERVICE
+   changes (RJ: "Group it with id_offered_service") - a sticky-looking
+   section header without a second nested table. */
+.data-grid tr.ibp-group-row td {
+  background: var(--accent-bg-soft);
+  font-weight: 700;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 7px 10px;
+}
 /* Reading-history popup (task #143): the row whose BILLING_PERIOD matches
    the Hierarchy Detail row the popup was opened from - "the reading being
    checked". Blue rather than red/orange since this isn't a problem flag,
@@ -883,6 +951,84 @@ button { font-family: inherit; }
 .kpi-card:hover { box-shadow: 0 4px 14px rgba(16, 24, 40, 0.1); transform: translateY(-1px); }
 .kpi-card-icon { font-size: 13px; margin-right: 4px; opacity: 0.8; }
 
+/* ---- Overview (home dashboard across every menu) ----
+   RJ, 2026-09-23: "create a dashboard for all our menu... modern graphs,
+   pie chart... when clicked redirect to details/menu." Cards reuse the
+   same accent-bar/hover-lift visual language as .kpi-card above, but are
+   click-through navigation rather than read-only stats - a stronger
+   hover lift plus a pointer cursor cues that difference. Each card's
+   accent color is set inline via --overview-accent (one color per menu
+   area, assigned in app.js) rather than a fixed set of [data-x]::before
+   rules, since the set of areas can grow without a CSS change. */
+.overview-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  margin-bottom: 24px;
+}
+/* One section per sidebar menu area (RJ: "i like it to be grouped base on
+   the menu") - #overview-cards now holds a stack of these instead of one
+   flat grid, so Bill Issuance's 3 cases read as one area instead of 3
+   peers mixed in with DIFF DATES/Hierarchy/Bulk Checker/History. */
+.overview-group-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 10px;
+}
+.overview-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+.overview-card {
+  position: relative;
+  overflow: hidden;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-shadow);
+  padding: 18px 20px 16px;
+  cursor: pointer;
+  text-align: left;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font: inherit;
+  color: inherit;
+}
+.overview-card::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 4px;
+  background: var(--overview-accent, var(--accent));
+}
+.overview-card:hover { box-shadow: 0 6px 20px rgba(16, 24, 40, 0.14); transform: translateY(-2px); }
+.overview-card:focus-visible { outline: 2px solid var(--overview-accent, var(--accent)); outline-offset: 2px; }
+.overview-card-top { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; }
+.overview-card-icon { font-size: 22px; }
+.overview-card-value { font-size: 30px; font-weight: 700; color: var(--text-primary); line-height: 1.1; }
+.overview-card-value.is-empty { color: var(--text-muted); font-size: 19px; font-weight: 600; }
+.overview-card-label { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+.overview-card-desc { font-size: 11.5px; color: var(--text-muted); line-height: 1.4; }
+.overview-card-go { font-size: 11px; color: var(--overview-accent, var(--accent)); font-weight: 600; margin-top: auto; padding-top: 4px; }
+
+.overview-charts-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+.overview-chart-card { flex: 1 1 340px; min-width: 300px; }
+.overview-pie-wrap { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.overview-pie-wrap canvas { flex: none; }
+.overview-pie-wrap .chart-legend { flex-direction: column; flex: 1 1 140px; margin-top: 0; }
+.overview-empty-state { font-size: 12.5px; color: var(--text-muted); padding: 30px 0; text-align: center; }
+
 /* ---- Dashboard: Data Quality card ---- */
 .quality-flags {
   display: flex;
@@ -1065,18 +1211,38 @@ button { font-family: inherit; }
 
 /* ---------------- Dark content theme ---------------- */
 :root[data-theme="dark"] {
-  --content-bg: #14151f;
-  --card-bg: #1b1d29;
-  --card-border: #2a2c3a;
-  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --content-bg: #0c0e17;
+  --card-bg: #161829;
+  --card-border: #2a2c46;
+  /* A faint accent-tinted glow instead of a flat black shadow - this is
+     the single biggest driver of the "futuristic glass panel" read in
+     dark mode, and every .card already uses --card-shadow as-is. */
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(99, 102, 241, 0.06), 0 12px 32px rgba(6, 182, 212, 0.08);
 
-  --text-primary: #e8e9ee;
-  --text-secondary: #9aa0b4;
-  --text-muted: #6b7280;
+  --text-primary: #eef0ff;
+  --text-secondary: #9aa0c0;
+  --text-muted: #6b7290;
 
-  --accent-bg-soft: #1e2352;
+  --accent: #6d7cff;
+  --accent-hover: #8b97ff;
+  --accent-2: #22d3ee;
+  --accent-bg-soft: #1c2050;
+  --gradient-accent: linear-gradient(135deg, var(--accent), var(--accent-2));
+  --glow-accent: 0 0 0 1px rgba(109, 124, 255, 0.25), 0 0 24px rgba(34, 211, 238, 0.22);
 
   color-scheme: dark;
+}
+/* Atmospheric wash behind the whole content area in dark mode - same
+   soft-radial-glow idea the login screen already uses, just fainter and
+   fixed so it reads as ambient lighting rather than a busy background.
+   Purely decorative (pointer-events none via z-index ordering - it's a
+   background-image on .content, not an overlay element) so nothing about
+   scrolling/click targets changes. */
+:root[data-theme="dark"] .content {
+  background:
+    radial-gradient(900px circle at 85% -10%, rgba(109, 124, 255, 0.10), transparent 55%),
+    radial-gradient(700px circle at -10% 90%, rgba(34, 211, 238, 0.08), transparent 50%),
+    var(--content-bg);
 }
 :root[data-theme="dark"] .text-input,
 :root[data-theme="dark"] .chart-canvas { background: #14151f; color: var(--text-primary); border-color: var(--card-border); }
@@ -1084,7 +1250,7 @@ button { font-family: inherit; }
 :root[data-theme="dark"] .btn-secondary:hover:not(:disabled) { background: #2f3143; }
 :root[data-theme="dark"] .btn-pill,
 :root[data-theme="dark"] .btn-pill-sm { background: #1b1d29; }
-:root[data-theme="dark"] .data-grid thead th { background: #21232f; }
+:root[data-theme="dark"] .data-grid thead th { background: linear-gradient(180deg, rgba(109, 124, 255, 0.14), rgba(109, 124, 255, 0.02)), #21232f; border-bottom-color: var(--accent-bg-soft); }
 :root[data-theme="dark"] .data-grid td.preview-col { background: #1a1c2e; color: #a5b4fc; }
 :root[data-theme="dark"] .data-grid tr.row-multi-period td { background: #4a2f0f; }
 :root[data-theme="dark"] .data-grid tr.row-multi-period td:first-child { border-left: 3px solid #fb923c; }
@@ -1125,3 +1291,124 @@ button { font-family: inherit; }
 :root[data-theme="dark"] .kind-badge[data-kind="categorical"] { background: #2c2410; color: #fbbf24; }
 :root[data-theme="dark"] .kind-badge[data-kind="empty"] { background: #2c1414; color: #fca5a5; }
 :root[data-theme="dark"] .completeness-bar-track { background: #2a2c3a; }
+
+/* Reading Validation/Modif table (RJ, 2026-09-23: "use alternating
+   colors for each row (again i want modern design)" + click-to-highlight
+   the id_reading/id_last_reading chain, then RJ, same day, 2nd round:
+   "change the row color for the referencing rows, and a different color
+   for readings and dates"). Zebra striping is a plain :nth-child rule
+   scoped to #rv-table only, so it doesn't touch any other .data-grid in
+   the app. Three distinct highlight colors, chosen to read clearly
+   against each other and against zebra striping:
+     - rv-row-selected (the clicked row itself): indigo/accent, matches
+       the app's own accent color so "this is the row you clicked" reads
+       as the primary selection.
+     - rv-row-linked (the referencing/referenced row on the other end of
+       the id_reading/id_last_reading chain): violet, a clearly different
+       hue from both the indigo selection and the two cell colors below.
+     - rv-cell-linked-date (reading_date <-> reading_prev_date pair):
+       amber.
+     - rv-cell-linked-value (reading <-> prev_value pair): teal/green.
+   !important on cell backgrounds is needed so a highlighted cell reads
+   clearly even on an odd (already zebra-tinted) row. */
+#rv-table tbody tr:nth-child(even) td { background: var(--accent-bg-soft); }
+#rv-table tbody tr:hover td { background: #eef1ff; }
+#rv-table tbody tr.rv-row-selected td { background: var(--accent-bg-soft) !important; box-shadow: inset 0 0 0 9999px rgba(109, 124, 255, 0.16); border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); }
+#rv-table tbody tr.rv-row-selected td:first-child { border-left: 3px solid var(--accent); }
+#rv-table tbody tr.rv-row-linked td { box-shadow: inset 0 0 0 9999px rgba(139, 92, 246, 0.18); border-top: 2px solid #8b5cf6; border-bottom: 2px solid #8b5cf6; }
+#rv-table tbody tr.rv-row-linked td:first-child { border-left: 3px solid #8b5cf6; }
+/* RJ, 2026-09-23 (3rd round): "make it also grid to better distinguish" -
+   a solid outline around each linked cell (not just a background fill),
+   so the specific date/value cell that's part of the chain is boxed off
+   from its neighbors just like the row borders above, on every side. */
+#rv-table tbody td.rv-cell-linked-date { background: #f59e0b !important; color: #1a1206 !important; font-weight: 600; outline: 2px solid #b45309; outline-offset: -2px; }
+#rv-table tbody td.rv-cell-linked-value { background: #10b981 !important; color: #042f21 !important; font-weight: 600; outline: 2px solid #047857; outline-offset: -2px; }
+#rv-table tbody tr { cursor: pointer; }
+:root[data-theme="dark"] #rv-table tbody tr:nth-child(even) td { background: #1a1c29; }
+:root[data-theme="dark"] #rv-table tbody tr:hover td { background: #21232f; }
+:root[data-theme="dark"] #rv-table tbody tr.rv-row-selected td { box-shadow: inset 0 0 0 9999px rgba(109, 124, 255, 0.22); }
+:root[data-theme="dark"] #rv-table tbody tr.rv-row-linked td { box-shadow: inset 0 0 0 9999px rgba(167, 139, 250, 0.22); }
+:root[data-theme="dark"] #rv-table tbody tr.rv-row-linked td:first-child { border-left-color: #a78bfa; }
+:root[data-theme="dark"] #rv-table tbody td.rv-cell-linked-date { outline-color: #fbbf24; }
+:root[data-theme="dark"] #rv-table tbody td.rv-cell-linked-value { outline-color: #34d399; }
+:root[data-theme="dark"] #rv-table tbody td.rv-cell-linked-date { background: #d97706 !important; color: #1a1206 !important; }
+:root[data-theme="dark"] #rv-table tbody td.rv-cell-linked-value { background: #059669 !important; color: #eafff5 !important; }
+
+/* Inline editing (RJ, 2026-09-25: "I want to be able to update the
+   following columns..."). An editable cell gets a light-blue tint so
+   it's visually distinct from a read-only one at a glance, before any
+   edit has even been made; a row with at least one pending edit gets a
+   left accent bar (rv-row-dirty), independent of - and layered on top
+   of - the chain-highlight/zebra colors above. The input/select inside
+   an editable cell is borderless and transparent by default so it reads
+   like plain text until focused, at which point the normal text-input
+   focus ring (var(--accent)) makes it obvious it's live. */
+#rv-table tbody td.rv-cell-editable { background: #f0f7ff; }
+#rv-table tbody .rv-edit-input,
+#rv-table tbody .rv-edit-select {
+  width: 100%; border: 1px solid transparent; background: transparent; font: inherit; color: inherit;
+  padding: 2px 4px; border-radius: 4px; cursor: text;
+}
+#rv-table tbody .rv-edit-select { cursor: pointer; }
+#rv-table tbody .rv-edit-input:hover,
+#rv-table tbody .rv-edit-select:hover { border-color: var(--card-border); }
+#rv-table tbody .rv-edit-input:focus,
+#rv-table tbody .rv-edit-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-bg-soft); background: var(--card-bg); }
+#rv-table tbody tr.rv-row-dirty td:first-child { border-left: 3px solid var(--warning, #f59e0b); }
+#rv-table tbody tr.rv-row-dirty td.rv-cell-editable { background: #fff4d6; }
+:root[data-theme="dark"] #rv-table tbody td.rv-cell-editable { background: #182234; }
+:root[data-theme="dark"] #rv-table tbody tr.rv-row-dirty td.rv-cell-editable { background: #3a2c10; }
+:root[data-theme="dark"] #rv-table tbody .rv-edit-input:focus,
+:root[data-theme="dark"] #rv-table tbody .rv-edit-select:focus { background: #14151f; }
+
+/* TNB CYCLE/DISC Analysis (2026-09-25): cycle and disconnection column
+   groups tinted differently so the two readings on one row are easy to
+   tell apart; a Terminated Not Billed status cell gets a red pill. */
+#tcd-table thead tr.tcd-group-row th { text-align: center; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+#tcd-table th.tcd-group-cycle { background: #dbeafe; color: #1e3a8a; }
+#tcd-table th.tcd-group-disc { background: #fde68a; color: #78350f; }
+#tcd-table th.tcd-col-cycle { background: #eff6ff; }
+#tcd-table th.tcd-col-disc { background: #fffbeb; }
+#tcd-table td.tcd-cell-cycle { background: #f5f9ff; }
+#tcd-table td.tcd-cell-disc { background: #fffdf5; }
+#tcd-table tbody tr:nth-child(even) td.tcd-cell-cycle { background: #eaf2ff; }
+#tcd-table tbody tr:nth-child(even) td.tcd-cell-disc { background: #fff7e0; }
+#tcd-table td.tcd-tnb { color: #b91c1c; font-weight: 700; }
+#tcd-table td:nth-child(5), #tcd-table tr.tcd-col-row th:nth-child(5) { border-left: 2px solid #93c5fd; }
+#tcd-table td:nth-child(15), #tcd-table tr.tcd-col-row th:nth-child(15) { border-left: 2px solid #fbbf24; }
+#tcd-table td.tcd-in-contract { color: #047857; font-weight: 600; }
+#tcd-table td.tcd-no-contract { color: #b91c1c; font-weight: 700; }
+:root[data-theme="dark"] #tcd-table td.tcd-in-contract { color: #34d399; }
+:root[data-theme="dark"] #tcd-table td.tcd-no-contract { color: #f87171; }
+:root[data-theme="dark"] #tcd-table th.tcd-group-cycle { background: #1e3a8a; color: #dbeafe; }
+:root[data-theme="dark"] #tcd-table th.tcd-group-disc { background: #78350f; color: #fde68a; }
+:root[data-theme="dark"] #tcd-table th.tcd-col-cycle { background: #172554; }
+:root[data-theme="dark"] #tcd-table th.tcd-col-disc { background: #3b2a0a; }
+:root[data-theme="dark"] #tcd-table td.tcd-cell-cycle { background: #111c33; }
+:root[data-theme="dark"] #tcd-table td.tcd-cell-disc { background: #241c0c; }
+:root[data-theme="dark"] #tcd-table tbody tr:nth-child(even) td.tcd-cell-cycle { background: #152241; }
+:root[data-theme="dark"] #tcd-table tbody tr:nth-child(even) td.tcd-cell-disc { background: #2d230f; }
+:root[data-theme="dark"] #tcd-table td.tcd-tnb { color: #f87171; }
+
+/* RJ, 2026-09-25 (follow-up round): "make the values that are updated
+   to be know, maybe make it bold and change the color to mark it as
+   modified" - a per-CELL marker (rv-edit-dirty, set in app.js's
+   rvRenderCell) distinct from the whole-row rv-row-dirty tint above, so
+   you can tell exactly WHICH field on a dirty row actually changed. */
+#rv-table tbody .rv-edit-input.rv-edit-dirty,
+#rv-table tbody .rv-edit-select.rv-edit-dirty {
+  font-weight: 700;
+  color: #b45309;
+  border-color: #f59e0b;
+  background: #fff1c9;
+}
+#rv-table tbody .rv-edit-input.rv-edit-dirty:focus,
+#rv-table tbody .rv-edit-select.rv-edit-dirty:focus { background: #fff1c9; }
+:root[data-theme="dark"] #rv-table tbody .rv-edit-input.rv-edit-dirty,
+:root[data-theme="dark"] #rv-table tbody .rv-edit-select.rv-edit-dirty {
+  color: #fbbf24;
+  border-color: #f59e0b;
+  background: #4a3410;
+}
+:root[data-theme="dark"] #rv-table tbody .rv-edit-input.rv-edit-dirty:focus,
+:root[data-theme="dark"] #rv-table tbody .rv-edit-select.rv-edit-dirty:focus { background: #4a3410; }

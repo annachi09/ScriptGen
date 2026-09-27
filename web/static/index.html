@@ -63,7 +63,10 @@
       </div>
 
       <nav class="nav">
-        <button class="nav-item is-active" data-page="workspace" title="Workspace">
+        <button class="nav-item is-active" data-page="overview" title="Overview">
+          <span class="nav-icon">🏠</span><span class="nav-label">Overview</span>
+        </button>
+        <button class="nav-item" data-page="workspace" title="Workspace">
           <span class="nav-icon">📝</span><span class="nav-label">Workspace</span>
         </button>
         <button class="nav-item" data-page="script" title="Script">
@@ -84,8 +87,20 @@
         <button class="nav-item" data-page="hierarchy" title="Hierarchy Analysis">
           <span class="nav-icon">🗂️</span><span class="nav-label">Hierarchy Analysis</span>
         </button>
+        <button class="nav-item" data-page="readingvalidation" title="Reading Validation/Modif">
+          <span class="nav-icon">📏</span><span class="nav-label">Reading Validation/Modif</span>
+        </button>
+        <button class="nav-item" data-page="tnbcycledisc" title="TNB CYCLE/DISC Analysis">
+          <span class="nav-icon">🔌</span><span class="nav-label">TNB CYCLE/DISC Analysis</span>
+        </button>
+        <button class="nav-item" data-page="wrongstuckhierarchy" title="Wrong Stuck in Hierarchy ITB">
+          <span class="nav-icon">🪜</span><span class="nav-label">Wrong Stuck in Hierarchy ITB</span>
+        </button>
         <button class="nav-item" data-page="billissuance" title="Bill Issuance Validator">
           <span class="nav-icon">🧾</span><span class="nav-label">Bill Issuance Validator</span>
+        </button>
+        <button class="nav-item" data-page="incorrectbillingperiod" title="Incorrect Billing Period">
+          <span class="nav-icon">📆</span><span class="nav-label">Incorrect Billing Period</span>
         </button>
         <button class="nav-item" data-page="bulkchecker" title="Bulk Checker">
           <span class="nav-icon">📋</span><span class="nav-label">Bulk Checker</span>
@@ -125,8 +140,42 @@
 
     <main class="content">
 
+      <!-- ===== Overview page (home dashboard across every menu) ===== -->
+      <section class="page is-active" id="page-overview">
+        <header class="page-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+          <div>
+            <h1>Overview</h1>
+            <p class="page-subtitle">A live snapshot across every tool in ScriptGen — click any card or chart to jump straight in.</p>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span class="hint-text" id="overview-last-updated"></span>
+            <button type="button" class="btn btn-pill" id="overview-refresh-btn">🔄 Refresh</button>
+          </div>
+        </header>
+
+        <div class="hint-text" id="overview-connection-note" style="margin-bottom:14px;" hidden></div>
+
+        <div class="overview-grid" id="overview-cards"></div>
+
+        <div class="overview-charts-row">
+          <div class="card overview-chart-card">
+            <div class="card-header"><h2>Open Items by Area</h2></div>
+            <p class="hint-text">Live count of what's actually outstanding right now in each tool. Click a slice (or its legend) to open that tool.</p>
+            <div class="overview-pie-wrap">
+              <canvas id="overview-pie-canvas" width="240" height="150"></canvas>
+              <div class="chart-legend" id="overview-pie-canvas-legend"></div>
+            </div>
+          </div>
+          <div class="card overview-chart-card">
+            <div class="card-header"><h2>Bill Issuance Validator — By Case</h2></div>
+            <p class="hint-text">Same live count, broken down by case. Click a bar to open that case.</p>
+            <canvas id="overview-trend-canvas" width="480" height="240"></canvas>
+          </div>
+        </div>
+      </section>
+
       <!-- ===== Workspace page ===== -->
-      <section class="page is-active" id="page-workspace">
+      <section class="page" id="page-workspace">
         <header class="page-header">
           <h1>Workspace</h1>
           <p class="page-subtitle">Run a query, edit results, and every changed row gets its own live preview.</p>
@@ -785,6 +834,204 @@
              before </main>, for the actual markup. -->
       </section>
 
+      <!-- ===== Reading Validation/Modif page ===== -->
+      <section class="page" id="page-readingvalidation">
+        <header class="page-header">
+          <h1>Reading Validation/Modif</h1>
+          <p class="page-subtitle">Every meter reading recorded for one sector supply — look it up by NISS/sector supply, or search by account to pick from that account's own supplies (water/electricity).</p>
+        </header>
+
+        <div class="card">
+          <div class="card-header"><h2>Search</h2></div>
+          <div class="key-panel-row">
+            <label class="field-label">Sector Supply / NISS</label>
+            <input id="rv-supply-input" class="text-input text-input-sm" placeholder="e.g. 10008283-301 or a raw sector supply id" style="width:240px;" />
+            <button type="button" class="btn btn-primary" id="rv-supply-search-btn">▶ Search</button>
+          </div>
+          <div class="key-panel-row">
+            <label class="field-label">Account</label>
+            <input id="rv-account-input" class="text-input text-input-sm" placeholder="Account number" style="width:200px;" />
+            <button type="button" class="btn btn-pill" id="rv-account-search-btn">🔎 Search by account</button>
+          </div>
+          <div class="editor-status" id="rv-search-status">No search run yet.</div>
+          <nav class="da-subnav" id="rv-supply-tabs" aria-label="Supplies found for this account" hidden></nav>
+        </div>
+
+        <div class="card" id="rv-results-card" hidden>
+          <div class="card-header">
+            <h2>Readings <span id="rv-results-niss" class="hint-text"></span></h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="rv-export-csv-btn">⬇ CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="rv-filtered-count"></div>
+
+          <div class="key-panel-row" style="flex-wrap:wrap;">
+            <label class="field-label">Billing period</label>
+            <select id="rv-filter-billing-period" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Reading date from</label>
+            <input id="rv-filter-date-from" class="text-input text-input-sm" type="date" />
+            <label class="field-label">to</label>
+            <input id="rv-filter-date-to" class="text-input text-input-sm" type="date" />
+            <label class="field-label">Reading type</label>
+            <select id="rv-filter-reading-type" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Read status</label>
+            <select id="rv-filter-read-status" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Consumption type</label>
+            <select id="rv-filter-usage-type" class="text-input text-input-sm"><option value="">All</option></select>
+          </div>
+          <div class="key-panel-row">
+            <label class="field-label">Search</label>
+            <input id="rv-search-box" class="text-input text-input-sm" placeholder="Search all columns…" style="width:220px;" />
+            <button type="button" class="btn btn-pill-sm" id="rv-filter-clear-btn">✕ Clear filters</button>
+            <div class="field-label" style="display:flex;align-items:center;gap:10px;margin-left:auto;" role="radiogroup" aria-label="Detail level">
+              Detail:
+              <label style="display:flex;align-items:center;gap:4px;font-weight:normal;">
+                <input type="radio" name="rv-detail-level" value="important" /> Important
+              </label>
+              <label style="display:flex;align-items:center;gap:4px;font-weight:normal;">
+                <input type="radio" name="rv-detail-level" value="medium" checked /> Medium
+              </label>
+              <label style="display:flex;align-items:center;gap:4px;font-weight:normal;">
+                <input type="radio" name="rv-detail-level" value="full" /> Full
+              </label>
+            </div>
+          </div>
+          <div class="key-panel-row">
+            <div class="field-label" style="display:flex;align-items:center;gap:10px;" role="radiogroup" aria-label="Reference mode">
+              Reference mode:
+              <label style="display:flex;align-items:center;gap:4px;font-weight:normal;">
+                <input type="radio" name="rv-reference-mode" value="id" checked /> ID Reading / ID Last Reading
+              </label>
+              <label style="display:flex;align-items:center;gap:4px;font-weight:normal;">
+                <input type="radio" name="rv-reference-mode" value="order" /> Row Order
+              </label>
+            </div>
+          </div>
+          <p class="hint-text">Click a column header to sort. Click a row to highlight its reading chain (previous/next reading, per the reference mode above). Editable cells (Prev. Date, Reading Date, Reading Type, Prev. Value, Reading, Metered Usage, Corrected Usage, Bill Ready Usage) have a light-blue background — edit one, then Tab or click away to apply it; date/value edits automatically update the linked reading too.</p>
+
+          <div class="grid-wrap">
+            <table class="data-grid" id="rv-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" id="rv-script-card" hidden>
+          <div class="card-header"><h2>Generate Update Script</h2></div>
+          <p class="hint-text">Builds an UPDATE GCGT_RE_READING statement for every edited row, keyed by ID_READING with the ORIGINAL value of each changed column also in the WHERE clause.</p>
+          <div class="hint-text" id="rv-dirty-count">No pending edits.</div>
+          <div class="key-panel-row" style="margin:10px 0;">
+            <label class="field-label">Jira / Program #</label>
+            <input id="rv-program" class="text-input text-input-sm" value="JIRAXXXX" style="width:200px;" />
+            <label class="field-label">Audit user</label>
+            <input id="rv-audit-user" class="text-input text-input-sm" value="RMA" style="width:100px;" />
+            <button type="button" class="btn btn-primary" id="rv-generate-btn" disabled title="Edit a cell in the table above to enable Generate">📝 Generate Update Script</button>
+            <button type="button" class="btn btn-pill-sm" id="rv-reset-edits-btn">↺ Reset edits</button>
+          </div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" id="rv-script-copy-btn">📋 Copy</button>
+            <button type="button" class="btn btn-pill" id="rv-script-download-btn">⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" id="rv-script-output">No update script generated yet — edit a cell above, then Generate.</pre>
+        </div>
+      </section>
+
+      <!-- ===== TNB CYCLE/DISC Analysis page ===== -->
+      <section class="page" id="page-tnbcycledisc">
+        <header class="page-header">
+          <h1>TNB CYCLE/DISC Analysis</h1>
+          <p class="page-subtitle">Sector supplies with a Cycle reading and a Disconnection reading on the same reading date, where at least one of the two is Terminated Not Billed — one row per pair, cycle and disconnection side by side.</p>
+        </header>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Cycle / Disconnection Pairs</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="tcd-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="tcd-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="tcd-summary">Click Scan to load (takes ~20–30s — it scans every reading).</div>
+
+          <div class="key-panel-row" id="tcd-filter-row" hidden>
+            <label class="field-label">Billing period</label>
+            <select id="tcd-filter-bp" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">NISS</label>
+            <input id="tcd-filter-niss" class="text-input text-input-sm" placeholder="NISS (partial ok)…" style="width:180px;" />
+            <label class="field-label">TNB side</label>
+            <select id="tcd-filter-tnb" class="text-input text-input-sm">
+              <option value="">Either</option>
+              <option value="cycle">Cycle is TNB</option>
+              <option value="disc">Disconnection is TNB</option>
+              <option value="both">Both TNB</option>
+            </select>
+            <label class="field-label">In contract</label>
+            <select id="tcd-filter-contract" class="text-input text-input-sm">
+              <option value="">All</option>
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
+            </select>
+            <button type="button" class="btn btn-pill-sm" id="tcd-filter-clear-btn">✕ Clear filters</button>
+          </div>
+          <div class="hint-text" id="tcd-filtered-count"></div>
+
+          <div class="grid-wrap" style="margin-top:14px;">
+            <table class="data-grid" id="tcd-table">
+              <thead>
+                <tr class="tcd-group-row">
+                  <th colspan="4"></th>
+                  <th colspan="10" class="tcd-group-cycle">Cycle reading</th>
+                  <th colspan="10" class="tcd-group-disc">Disconnection reading</th>
+                </tr>
+                <tr class="tcd-col-row"></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Wrong Stuck in Hierarchy ITB page ===== -->
+      <section class="page" id="page-wrongstuckhierarchy">
+        <header class="page-header">
+          <h1>Wrong Stuck in Hierarchy ITB</h1>
+          <p class="page-subtitle">Hierarchy but billed primary: secondary items to bill still held in hierarchy (STTOBILL09) whose main measuring point's item is already billed (STTOBILL07) in the same billing period. Scans every billing period at once; each row is checked against its own period.</p>
+        </header>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Stuck Secondaries</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="wsh-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="wsh-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="wsh-summary">Click Scan to list every stuck item across all billing periods.</div>
+
+          <div class="key-panel-row" id="wsh-filter-row" hidden>
+            <label class="field-label">Billing period</label>
+            <select id="wsh-filter-period" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Search</label>
+            <input id="wsh-filter-search" class="text-input text-input-sm" placeholder="Account, NISS, ITB id…" style="width:180px;" />
+            <label class="field-label">Main MP</label>
+            <input id="wsh-filter-mainmp" class="text-input text-input-sm" placeholder="ID_MAIN_MP" style="width:130px;" />
+            <label class="field-label">Service 190 ITB status</label>
+            <select id="wsh-filter-status190" class="text-input text-input-sm"><option value="">All</option></select>
+            <button type="button" class="btn btn-pill-sm" id="wsh-filter-clear-btn">✕ Clear filters</button>
+          </div>
+          <div class="hint-text" id="wsh-filtered-count"></div>
+
+          <div class="grid-wrap" style="margin-top:14px;">
+            <table class="data-grid" id="wsh-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- ===== Bill Issuance Validator page ===== -->
       <section class="page" id="page-billissuance">
         <header class="page-header">
@@ -1087,6 +1334,79 @@
           </div>
         </div>
         </div><!-- /biss-subpage: case4 -->
+      </section>
+
+      <!-- ===== Incorrect Billing Period page ===== -->
+      <section class="page" id="page-incorrectbillingperiod">
+        <header class="page-header">
+          <h1>Incorrect Billing Period</h1>
+          <p class="page-subtitle">Open GCCOM_ANOMALOUS records whose LAST_BILLING_DATE has drifted past BILLING_DATE (RATE INCORRECT BILLING PERIOD) — grouped by offered service.</p>
+        </header>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Detected Anomalies</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="ibp-detect-btn">🔍 Scan</button>
+            </div>
+          </div>
+          <div class="hint-text" id="ibp-summary"></div>
+          <div class="hint-text" id="ibp-filtered-count"></div>
+
+          <div class="key-panel-row" id="ibp-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <input id="ibp-search" class="text-input text-input-sm" placeholder="Account, NISS, anomaly id…" style="width:180px;" />
+            <label class="field-label">Offered service</label>
+            <select id="ibp-service-filter" class="text-input text-input-sm"><option value="">All</option></select>
+            <button type="button" class="btn btn-pill-sm" id="ibp-filter-clear-btn">✕ Clear filters</button>
+          </div>
+
+          <div class="grid-wrap" style="margin-top:14px;">
+            <table class="data-grid" id="ibp-table">
+              <thead><tr>
+                <th><input type="checkbox" id="ibp-select-all" title="Select all visible rows" /></th>
+                <th>ID_ANOMALOUS</th>
+                <th>Anomalous status</th>
+                <th>Account</th>
+                <th>NISS</th>
+                <th>Last billing date</th>
+                <th>Billing date</th>
+                <th>Billing period</th>
+                <th>ID_ITEM_TO_BILL</th>
+                <th>Item status</th>
+                <th>ID_READING</th>
+                <th>Read status</th>
+                <th>Reading type</th>
+                <th>Ready usage</th>
+                <th>Reading prev. date</th>
+                <th>Reading date</th>
+                <th>NISS (at reading)</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>Generate Correction Script</h2></div>
+          <p class="hint-text">Cancels (ANOMALOUS_STATUS → ESTAN00005) only the anomalies checked above — RJ's own exact UPDATE template.</p>
+          <p class="hint-text" id="ibp-selection-hint" style="font-weight:600; color: var(--text-secondary);">☝️ Check one or more rows in the table above to enable Generate.</p>
+          <div class="key-panel-row" style="margin:10px 0;">
+            <label class="field-label">Jira / Program #</label>
+            <input id="ibp-program" class="text-input text-input-sm" value="RATE_INCORRECT_BILLPERIOD" style="width:200px;" />
+            <label class="field-label">Audit user</label>
+            <input id="ibp-audit-user" class="text-input text-input-sm" value="RMA" style="width:100px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input type="checkbox" id="ibp-clean-toggle" /> Clean script (no comments)
+            </label>
+            <button type="button" class="btn btn-primary" id="ibp-generate-btn" disabled title="Check at least one row in the table above">📝 Generate Correction Script</button>
+          </div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" id="ibp-copy-btn">📋 Copy</button>
+            <button type="button" class="btn btn-pill" id="ibp-download-btn">⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" id="ibp-output">No correction script generated yet — Scan, check anomalies, then Generate.</pre>
+        </div>
       </section>
 
       <!-- ===== Bulk Checker page ===== -->

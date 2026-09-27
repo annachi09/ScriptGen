@@ -105,6 +105,9 @@ function showApp() {
   refreshConnectionStatus();
   refreshSidebarConnectionName();
   loadRecentQueries();
+  loadOverview(); // Overview is the default landing page - its own nav
+  // click handler only fires on a manual click, so the initial render on
+  // login/session-restore has to be kicked off here instead.
 }
 
 // Least-privilege UI: hides/disables the specific actions each role can't
@@ -123,6 +126,7 @@ const EDITOR_ONLY_IDS = [
   "ai-suggest-btn", "ai-optimize-btn", "ai-review-btn", "ai-where-btn",
   "da-generate-btn", "da-batch-run-btn", "da-cleanup-generate-btn",
   "biss2-generate-btn", "billiss-release-generate-btn",
+  "ibp-generate-btn",
 ];
 
 function applyRolePermissionsToUI() {
@@ -220,6 +224,208 @@ $("#sign-out-btn").addEventListener("click", async () => {
   showLogin();
 });
 
+// ---------------- Overview (home dashboard across every menu) ----------------
+// RJ, 2026-09-23, verbatim: "for the whole scriptgen, create a dashboard
+// for all our menu, bulk checker, diffdates, bill validator, etc.. i
+// want a good dashboard with modern graphs, pie chart... also when the
+// graph or dashboard is clicked it will redirect you to the
+// details/menu." NOT the same page as "Dashboard" (data-page="dashboard"
+// - that one profiles the CURRENT query result grid via _dashboardStats/
+// loadDashboard below) - this is the new default landing page, one card
+// per other menu plus two charts built from GET /api/overview/stats,
+// reusing this file's existing canvas-chart helpers (drawBarChart,
+// _categoricalColor, _chartTooltip) rather than a new charting library -
+// see drawPieChart below for the one genuinely new chart type this adds.
+// `group` is the sidebar menu each card belongs to (RJ: "i like it to be
+// grouped base on the menu") - overviewRenderCards renders one section per
+// distinct group, in the order groups first appear here, so Bill
+// Issuance's 3 cases land together under one "Bill Issuance Validator"
+// heading instead of reading as 3 cards flatly mixed with unrelated areas.
+const OVERVIEW_CARDS = [
+  {
+    key: "dateanomaly", icon: "🩹", label: "DIFF DATES Anomaly", color: "#3b5bfd",
+    desc: "Open billing/reading date anomalies system-wide.",
+    page: "dateanomaly", subAttr: "data-da-sub", subValue: "detectall",
+    group: "DIFF DATES Anomaly",
+  },
+  {
+    key: "hierarchy", icon: "🗂️", label: "Hierarchy Analysis", color: "#8b5cf6",
+    desc: "Pending primary measuring points awaiting review.",
+    page: "hierarchy",
+    group: "Hierarchy Analysis",
+  },
+  {
+    key: "billissuance_case1", icon: "🧾", label: "Case 1", color: "#f59e0b",
+    desc: "Rate bill matches: Stuck Bill + New Contract Match.",
+    page: "billissuance", subAttr: "data-biss-sub", subValue: "case1",
+    group: "Bill Issuance Validator",
+  },
+  {
+    key: "billissuance_case2", icon: "🧾", label: "Case 2", color: "#f59e0b",
+    desc: "Terminated accounts needing a billing-period fix.",
+    page: "billissuance", subAttr: "data-biss-sub", subValue: "case2",
+    group: "Bill Issuance Validator",
+  },
+  {
+    key: "billissuance_case3", icon: "🧾", label: "Case 3", color: "#f59e0b",
+    desc: "Accounts flagged: all contract status, bills complete.",
+    page: "billissuance", subAttr: "data-biss-sub", subValue: "case3",
+    group: "Bill Issuance Validator",
+  },
+  {
+    key: "bulkchecker", icon: "📋", label: "Bulk Checker", color: "#10b981",
+    desc: "Searches run from this workstation.",
+    page: "bulkchecker", localValue: (s) => s.bulk_checker_search_count,
+    group: "Bulk Checker",
+  },
+  {
+    key: "history", icon: "🕓", label: "Script History", color: "#06b6d4",
+    desc: "Scripts generated/released, all tools combined.",
+    page: "history", localValue: (s) => s.script_total,
+    group: "History",
+  },
+];
+
+// Clicks the sidebar nav button for `page` (same as a real user click -
+// runs whatever page-specific load logic that click handler already
+// does), then optionally clicks a sub-nav button inside it so the
+// analyst lands on the exact case/tab the card was about, not just the
+// page's own default sub-tab.
+function overviewNavigateTo(page, subAttr, subValue) {
+  const navBtn = document.querySelector(`.nav-item[data-page="${page}"]`);
+  if (!navBtn) return;
+  if (navBtn.hidden) { showToast("You don't have access to that page."); return; }
+  navBtn.click();
+  if (subAttr && subValue) {
+    const subBtn = document.querySelector(`[${subAttr}="${subValue}"]`);
+    if (subBtn) subBtn.click();
+  }
+}
+
+function overviewRenderCards(stats) {
+  const grid = $("#overview-cards");
+  const groups = []; // preserves first-appearance order from OVERVIEW_CARDS
+  OVERVIEW_CARDS.forEach((c) => {
+    let g = groups.find((x) => x.name === c.group);
+    if (!g) { g = { name: c.group, cards: [] }; groups.push(g); }
+    g.cards.push(c);
+  });
+  grid.innerHTML = groups.map((g) => {
+    const cardsHtml = g.cards.map((c) => {
+      const value = c.localValue ? c.localValue(stats) : (stats.live || {})[c.key];
+      const valueHtml = (value === null || value === undefined)
+        ? `<span class="overview-card-value is-empty">—</span>`
+        : `<span class="overview-card-value">${value}</span>`;
+      return (
+        `<button type="button" class="overview-card" style="--overview-accent:${c.color}" data-overview-card="${c.key}">` +
+        `<div class="overview-card-top"><span class="overview-card-icon">${c.icon}</span>${valueHtml}</div>` +
+        `<div class="overview-card-label">${escapeHtml(c.label)}</div>` +
+        `<div class="overview-card-desc">${escapeHtml(c.desc)}</div>` +
+        `<div class="overview-card-go">Open →</div>` +
+        `</button>`
+      );
+    }).join("");
+    return (
+      `<div class="overview-group">` +
+      `<h3 class="overview-group-title">${escapeHtml(g.name)}</h3>` +
+      `<div class="overview-group-grid">${cardsHtml}</div>` +
+      `</div>`
+    );
+  }).join("");
+  OVERVIEW_CARDS.forEach((c) => {
+    const el = grid.querySelector(`[data-overview-card="${c.key}"]`);
+    if (el) el.addEventListener("click", () => overviewNavigateTo(c.page, c.subAttr, c.subValue));
+  });
+}
+
+// RJ: "i am more interested on the data not on the number of runs" - both
+// charts below now plot the same live open-item counts the cards already
+// show (stats.live, straight from each area's own query), NOT script_kind_
+// counts/script_trend (those count how many times someone clicked
+// Generate - a usage metric, not the actual backlog). script_kind_counts/
+// script_trend are still returned by the API and still drive History's
+// own page - just no longer charted here.
+function overviewRenderPie(stats) {
+  const canvas = $("#overview-pie-canvas");
+  const live = stats.live || {};
+  const billTotal = [live.billissuance_case1, live.billissuance_case2, live.billissuance_case3]
+    .filter((v) => v !== null && v !== undefined)
+    .reduce((a, b) => a + b, 0);
+  const areas = [
+    { label: "DIFF DATES Anomaly", value: live.dateanomaly, page: "dateanomaly", subAttr: "data-da-sub", subValue: "detectall" },
+    { label: "Hierarchy Analysis", value: live.hierarchy, page: "hierarchy" },
+    { label: "Bill Issuance Validator", value: billTotal, page: "billissuance", subAttr: "data-biss-sub", subValue: "case1" },
+  ].filter((a) => a.value !== null && a.value !== undefined);
+
+  const labels = areas.map((a) => a.label);
+  const values = areas.map((a) => a.value);
+  const onSliceClick = (label) => {
+    const area = areas.find((a) => a.label === label);
+    if (area) overviewNavigateTo(area.page, area.subAttr, area.subValue);
+  };
+  // RJ: "graphs and pie chart that are very modern like half moon loading" -
+  // drawGaugeChart is the half-moon/speedometer variant (drop-in swap for
+  // drawPieChart, same labels/values/options contract).
+  drawGaugeChart(canvas, labels, values, { colors: labels.map((lab) => _categoricalColor(lab)), onSliceClick });
+
+  const legendEl = $("#overview-pie-canvas-legend");
+  if (!labels.length) {
+    legendEl.innerHTML = `<span class="hint-text">No database connection yet.</span>`;
+    return;
+  }
+  legendEl.innerHTML = labels.map((lab, i) => `
+    <span class="chart-legend-item" data-legend-label="${escapeHtml(lab)}">
+      <span class="chart-legend-swatch" style="background:${_categoricalColor(lab)}"></span>${escapeHtml(lab)} (${values[i]})
+    </span>
+  `).join("");
+  legendEl.querySelectorAll("[data-legend-label]").forEach((el) => {
+    el.addEventListener("click", () => onSliceClick(el.dataset.legendLabel));
+  });
+}
+
+function overviewRenderTrend(stats) {
+  const canvas = $("#overview-trend-canvas");
+  const live = stats.live || {};
+  const cases = [
+    { label: "Case 1", value: live.billissuance_case1, subValue: "case1" },
+    { label: "Case 2", value: live.billissuance_case2, subValue: "case2" },
+    { label: "Case 3", value: live.billissuance_case3, subValue: "case3" },
+  ].filter((c) => c.value !== null && c.value !== undefined);
+  drawBarChart(canvas, cases.map((c) => c.label), cases.map((c) => c.value), {
+    colors: cases.map((c) => _categoricalColor(c.label)),
+    onBarClick: (label) => {
+      const c = cases.find((x) => x.label === label);
+      if (c) overviewNavigateTo("billissuance", "data-biss-sub", c.subValue);
+    },
+  });
+}
+
+async function loadOverview() {
+  const grid = $("#overview-cards");
+  const refreshBtn = $("#overview-refresh-btn");
+  const wasEmpty = !grid.children.length;
+  if (wasEmpty) grid.innerHTML = `<div class="overview-empty-state">Loading…</div>`;
+  if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = "🔄 Refreshing…"; }
+  try {
+    const stats = await api("/api/overview/stats");
+    $("#overview-connection-note").hidden = !!stats.has_connection;
+    if (!stats.has_connection) {
+      $("#overview-connection-note").textContent =
+        "No database connection configured yet — connect one in Settings to see live counts for DIFF DATES, Hierarchy Analysis, and Bill Issuance.";
+    }
+    overviewRenderCards(stats);
+    overviewRenderPie(stats);
+    overviewRenderTrend(stats);
+    const lastUpdated = $("#overview-last-updated");
+    if (lastUpdated) lastUpdated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  } catch (err) {
+    grid.innerHTML = `<div class="overview-empty-state">Couldn't load overview: ${escapeHtml(err.message || "unknown error")}</div>`;
+  } finally {
+    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = "🔄 Refresh"; }
+  }
+}
+$("#overview-refresh-btn")?.addEventListener("click", () => loadOverview());
+
 // ---------------- Nav ----------------
 $$(".nav-item[data-page]").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -228,6 +434,7 @@ $$(".nav-item[data-page]").forEach((btn) => {
     const page = btn.dataset.page;
     $$(".page").forEach((p) => p.classList.remove("is-active"));
     $(`#page-${page}`).classList.add("is-active");
+    if (page === "overview") loadOverview();
     if (page === "history") loadHistory();
     if (page === "dashboard") loadDashboard();
     if (page === "ai") loadAIPage();
@@ -2692,6 +2899,205 @@ function drawBarChart(canvas, labels, values, options = {}) {
   ctx.fillText(String(maxVal), 2, padT + 8);
 }
 
+// Pie-slice equivalent of _bindChartInteractivity above - separate
+// because hit-testing a slice is angle/radius-based, not the rectangular
+// box test drawBarChart's bars use. Reads canvas._slices/_pieCenter,
+// last set by drawPieChart. Bound once per canvas (guarded the same way).
+function _bindPieInteractivity(canvas, onSliceClick) {
+  canvas._onSliceClick = onSliceClick || null;
+  if (canvas._pieInteractiveBound) return;
+  canvas._pieInteractiveBound = true;
+  const tooltip = _chartTooltip();
+
+  function sliceAt(evtX, evtY) {
+    const center = canvas._pieCenter;
+    if (!center) return null;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width, scaleY = canvas.height / rect.height;
+    const x = (evtX - rect.left) * scaleX, y = (evtY - rect.top) * scaleY;
+    const dx = x - center.cx, dy = y - center.cy;
+    if (Math.sqrt(dx * dx + dy * dy) > center.r) return null;
+    let angle = Math.atan2(dy, dx);
+    if (angle < -Math.PI / 2) angle += Math.PI * 2; // match drawPieChart's slice range: [-PI/2, 3PI/2)
+    return (canvas._slices || []).find((s) => angle >= s.start && angle < s.end);
+  }
+
+  canvas.addEventListener("mousemove", (e) => {
+    const slice = sliceAt(e.clientX, e.clientY);
+    canvas.style.cursor = slice && canvas._onSliceClick ? "pointer" : "default";
+    if (!slice) { tooltip.hidden = true; return; }
+    tooltip.hidden = false;
+    tooltip.textContent = `${slice.label}: ${slice.value}`;
+    tooltip.style.left = `${e.clientX + 12}px`;
+    tooltip.style.top = `${e.clientY + 12}px`;
+  });
+  canvas.addEventListener("mouseleave", () => { tooltip.hidden = true; canvas.style.cursor = "default"; });
+  canvas.addEventListener("click", (e) => {
+    if (!canvas._onSliceClick) return;
+    const slice = sliceAt(e.clientX, e.clientY);
+    if (slice) canvas._onSliceClick(slice.label, slice.value);
+  });
+}
+
+// options.colors: array, one fill color per slice (categorical - see
+// _categoricalColor, same convention drawBarChart's own options.colors
+// uses). options.onSliceClick(label, value): optional click-to-navigate
+// callback (see the Overview page's own use of this, below).
+function drawPieChart(canvas, labels, values, options = {}) {
+  const ctx = _clearCanvas(canvas);
+  const colors = _canvasColors();
+  const W = canvas.width, H = canvas.height;
+  const cx = W / 2, cy = H / 2;
+  const r = Math.min(W, H) / 2 - 8;
+  const total = values.reduce((a, b) => a + b, 0);
+
+  if (!total) {
+    canvas._slices = [];
+    canvas._pieCenter = { cx, cy, r };
+    _bindPieInteractivity(canvas, options.onSliceClick);
+    ctx.fillStyle = colors.text;
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("No data yet", cx, cy);
+    return;
+  }
+
+  let start = -Math.PI / 2; // 12 o'clock
+  const slices = [];
+  labels.forEach((lab, i) => {
+    const value = values[i];
+    const end = start + (value / total) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, start, end);
+    ctx.closePath();
+    ctx.fillStyle = (options.colors && options.colors[i]) || colors.bar;
+    ctx.fill();
+    slices.push({ label: String(lab), value, start, end });
+    start = end;
+  });
+  canvas._slices = slices;
+  canvas._pieCenter = { cx, cy, r };
+  _bindPieInteractivity(canvas, options.onSliceClick);
+}
+
+// Ring-band hit-testing for drawGaugeChart - same idea as
+// _bindPieInteractivity but the hit test is an annulus (distance from
+// center within half the ring's stroke width of the radius) rather than
+// "anywhere inside r", since a gauge is a stroked arc band, not a filled
+// wedge. Angle convention matches drawPieChart (0 = 3 o'clock, increasing
+// clockwise); the gauge only ever occupies [PI, 2*PI) (the top half), so
+// clicks on the empty bottom half simply match no slice.
+function _bindGaugeInteractivity(canvas, onSliceClick) {
+  canvas._onSliceClick = onSliceClick || null;
+  if (canvas._gaugeInteractiveBound) return;
+  canvas._gaugeInteractiveBound = true;
+  const tooltip = _chartTooltip();
+
+  function sliceAt(evtX, evtY) {
+    const center = canvas._gaugeCenter;
+    if (!center) return null;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width, scaleY = canvas.height / rect.height;
+    const x = (evtX - rect.left) * scaleX, y = (evtY - rect.top) * scaleY;
+    const dx = x - center.cx, dy = y - center.cy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (Math.abs(dist - center.r) > center.ringWidth / 2 + 2) return null;
+    let angle = Math.atan2(dy, dx);
+    if (angle < 0) angle += Math.PI * 2; // normalize into [0, 2*PI)
+    return (canvas._slices || []).find((s) => angle >= s.start && angle < s.end);
+  }
+
+  canvas.addEventListener("mousemove", (e) => {
+    const slice = sliceAt(e.clientX, e.clientY);
+    canvas.style.cursor = slice && canvas._onSliceClick ? "pointer" : "default";
+    if (!slice) { tooltip.hidden = true; return; }
+    tooltip.hidden = false;
+    tooltip.textContent = `${slice.label}: ${slice.value}`;
+    tooltip.style.left = `${e.clientX + 12}px`;
+    tooltip.style.top = `${e.clientY + 12}px`;
+  });
+  canvas.addEventListener("mouseleave", () => { tooltip.hidden = true; canvas.style.cursor = "default"; });
+  canvas.addEventListener("click", (e) => {
+    if (!canvas._onSliceClick) return;
+    const slice = sliceAt(e.clientX, e.clientY);
+    if (slice) canvas._onSliceClick(slice.label, slice.value);
+  });
+}
+
+// "Half moon" gauge chart - a modern speedometer-style ring spanning the
+// top 180 degrees only (from 9 o'clock, over 12 o'clock, to 3 o'clock),
+// each category drawn as a rounded-cap arc segment proportional to its
+// share of the total, with the running total shown as a big number in
+// the center. Same options.colors/options.onSliceClick contract as
+// drawPieChart, so the two are drop-in swappable at call sites.
+function drawGaugeChart(canvas, labels, values, options = {}) {
+  const ctx = _clearCanvas(canvas);
+  const colors = _canvasColors();
+  const W = canvas.width, H = canvas.height;
+  const cx = W / 2, cy = H - 14;
+  const r = Math.max(20, Math.min(W / 2, H) - 18);
+  const ringWidth = Math.max(12, r * 0.34);
+  const total = values.reduce((a, b) => a + b, 0);
+
+  // Background track for the full half-circle, faint, drawn first so
+  // segments layer cleanly on top of it.
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, Math.PI, Math.PI * 2, false);
+  ctx.lineWidth = ringWidth;
+  ctx.lineCap = "round";
+  ctx.strokeStyle = colors.axis;
+  ctx.globalAlpha = 0.35;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  canvas._gaugeCenter = { cx, cy, r, ringWidth };
+
+  if (!total) {
+    canvas._slices = [];
+    _bindGaugeInteractivity(canvas, options.onSliceClick);
+    ctx.fillStyle = colors.text;
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("No data yet", cx, cy - r / 2);
+    return;
+  }
+
+  const gap = labels.length > 1 ? 0.035 : 0; // small visual seam between segments
+  let start = Math.PI; // 9 o'clock
+  const slices = [];
+  labels.forEach((lab, i) => {
+    const value = values[i];
+    const end = start + (value / total) * Math.PI;
+    const isFirst = i === 0, isLast = i === labels.length - 1;
+    const drawStart = start + (isFirst ? 0 : gap / 2);
+    const drawEnd = end - (isLast ? 0 : gap / 2);
+    if (drawEnd > drawStart) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, drawStart, drawEnd, false);
+      ctx.lineWidth = ringWidth;
+      ctx.lineCap = "round";
+      ctx.strokeStyle = (options.colors && options.colors[i]) || colors.bar;
+      ctx.stroke();
+    }
+    slices.push({ label: String(lab), value, start, end });
+    start = end;
+  });
+  canvas._slices = slices;
+  _bindGaugeInteractivity(canvas, options.onSliceClick);
+
+  // Center readout: total across all segments, the number a "how much
+  // is outstanding right now" gauge is really answering.
+  ctx.textAlign = "center";
+  ctx.fillStyle = colors.text;
+  ctx.font = "bold 20px sans-serif";
+  ctx.fillText(String(total), cx, cy - ringWidth - 6);
+  ctx.font = "10px sans-serif";
+  ctx.globalAlpha = 0.75;
+  ctx.fillText("total open", cx, cy - ringWidth + 10);
+  ctx.globalAlpha = 1;
+}
+
 function drawScatter(canvas, points) {
   const ctx = _clearCanvas(canvas);
   const colors = _canvasColors();
@@ -4447,6 +4853,1171 @@ async function loadServerInfo() {
     if (sidebarEl) sidebarEl.textContent = text;
   } catch (_) { /* not fatal - just no diagnostic line shown */ }
 }
+
+// ---------------- Incorrect Billing Period ----------------
+// RJ, 2026-09-23, own SQL (RATE INCORRECT BILLING PERIOD) - see
+// app/core/incorrect_billing_period.py's module docstring for the full
+// query and correction-script provenance. Grouped by ID_OFFERED_SERVICE
+// (RJ: "Group it with id_offered_service, and can be filtered with
+// ID_OFFERED_SERVICE description") via group-divider rows inserted right
+// into the one flat <table> - same select-all-visible/filter/checkbox
+// machinery as da-cleanup-table, just with a divider row wherever the
+// group changes instead of a second nested table.
+let ibpGroups = [];          // raw groups from the API: [{id_offered_service, offered_service_desc, anomalies:[...]}]
+let ibpRows = [];            // flattened anomalies, each carrying its own offered_service_desc
+const ibpSelected = new Set(); // selected id_anomalous values, as strings
+const IBP_COL_COUNT = 17;
+
+function ibpFlattenGroups() {
+  const out = [];
+  ibpGroups.forEach((g) => {
+    (g.anomalies || []).forEach((a) => out.push({ ...a, offered_service_desc: g.offered_service_desc || "(none)" }));
+  });
+  return out;
+}
+
+function ibpVisibleRows() {
+  const service = $("#ibp-service-filter").value;
+  const search = $("#ibp-search").value.trim().toLowerCase();
+  return ibpRows.filter((r) => {
+    if (service && r.offered_service_desc !== service) return false;
+    if (search) {
+      const hay = `${r.account || ""} ${r.niss || ""} ${r.id_anomalous || ""}`.toLowerCase();
+      if (!hay.includes(search)) return false;
+    }
+    return true;
+  });
+}
+
+function ibpUpdateGenerateEnabled() {
+  $("#ibp-generate-btn").disabled = ibpSelected.size === 0 || state.role === "viewer";
+  $("#ibp-selection-hint").textContent = ibpSelected.size
+    ? `${ibpSelected.size} anomaly(ies) selected.`
+    : "☝️ Check one or more rows in the table above to enable Generate.";
+}
+
+function ibpRenderTable() {
+  const tbody = document.querySelector("#ibp-table tbody");
+  const visible = ibpVisibleRows();
+  let lastGroup = null;
+  const parts = [];
+  visible.forEach((r) => {
+    if (r.offered_service_desc !== lastGroup) {
+      lastGroup = r.offered_service_desc;
+      const count = visible.filter((x) => x.offered_service_desc === lastGroup).length;
+      parts.push(`<tr class="ibp-group-row"><td colspan="${IBP_COL_COUNT}">${escapeHtml(lastGroup)} (${count})</td></tr>`);
+    }
+    const idStr = String(r.id_anomalous);
+    const checked = ibpSelected.has(idStr) ? "checked" : "";
+    parts.push(
+      `<tr data-ibp-id="${escapeHtml(idStr)}">` +
+      `<td><input type="checkbox" class="ibp-row-check" ${checked} /></td>` +
+      `<td>${escapeHtml(r.id_anomalous ?? "")}</td>` +
+      `<td>${escapeHtml(r.anomalous_status ?? "")}</td>` +
+      `<td>${escapeHtml(r.account ?? "")}</td>` +
+      `<td>${escapeHtml(r.niss ?? "")}</td>` +
+      `<td>${escapeHtml(r.last_billing_date ?? "")}</td>` +
+      `<td>${escapeHtml(r.billing_date ?? "")}</td>` +
+      `<td>${escapeHtml(r.id_billing_period ?? "")}</td>` +
+      `<td>${escapeHtml(r.id_item_to_bill ?? "")}</td>` +
+      `<td>${escapeHtml(r.item_status ?? "")}</td>` +
+      `<td>${escapeHtml(r.id_reading ?? "")}</td>` +
+      `<td>${escapeHtml(r.read_status ?? "")}</td>` +
+      `<td>${escapeHtml(r.reading_type ?? "")}</td>` +
+      `<td>${escapeHtml(r.ready_usage ?? "")}</td>` +
+      `<td>${escapeHtml(r.reading_prev_date ?? "")}</td>` +
+      `<td>${escapeHtml(r.reading_date ?? "")}</td>` +
+      `<td>${escapeHtml(r.niss_at_reading ?? "")}</td>` +
+      `</tr>`
+    );
+  });
+  tbody.innerHTML = parts.join("") ||
+    `<tr><td colspan="${IBP_COL_COUNT}" class="hint-text">No anomalies match the current filters.</td></tr>`;
+  tbody.querySelectorAll(".ibp-row-check").forEach((cb) => {
+    cb.addEventListener("change", (e) => {
+      const id = e.target.closest("tr").dataset.ibpId;
+      if (e.target.checked) ibpSelected.add(id); else ibpSelected.delete(id);
+      ibpUpdateGenerateEnabled();
+      $("#ibp-select-all").checked = visible.length > 0 && visible.every((r) => ibpSelected.has(String(r.id_anomalous)));
+    });
+  });
+  $("#ibp-select-all").checked = visible.length > 0 && visible.every((r) => ibpSelected.has(String(r.id_anomalous)));
+  renderFilteredCount("#ibp-filtered-count", visible.length, ibpRows.length);
+}
+
+$("#ibp-select-all").addEventListener("change", (e) => {
+  ibpVisibleRows().forEach((r) => {
+    const idStr = String(r.id_anomalous);
+    if (e.target.checked) ibpSelected.add(idStr); else ibpSelected.delete(idStr);
+  });
+  ibpUpdateGenerateEnabled();
+  ibpRenderTable();
+});
+$("#ibp-service-filter").addEventListener("change", ibpRenderTable);
+$("#ibp-search").addEventListener("input", ibpRenderTable);
+$("#ibp-filter-clear-btn").addEventListener("click", () => {
+  $("#ibp-service-filter").value = "";
+  $("#ibp-search").value = "";
+  ibpRenderTable();
+});
+
+async function ibpDetect() {
+  const btn = $("#ibp-detect-btn");
+  btn.disabled = true;
+  $("#ibp-summary").textContent = "Scanning…";
+  try {
+    const data = await api("/api/incorrect-billing-period/detect", { method: "POST" });
+    ibpGroups = data.groups || [];
+    ibpRows = ibpFlattenGroups();
+    ibpSelected.clear();
+
+    const serviceSel = $("#ibp-service-filter");
+    const current = serviceSel.value;
+    const descs = [...new Set(ibpGroups.map((g) => g.offered_service_desc || "(none)"))];
+    serviceSel.innerHTML = `<option value="">All</option>` +
+      descs.map((d) => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join("");
+    if (descs.includes(current)) serviceSel.value = current;
+
+    $("#ibp-filter-row").hidden = ibpRows.length === 0;
+    $("#ibp-summary").textContent = data.possibly_truncated
+      ? `${data.anomaly_count} anomaly(ies) found (capped at ${data.limit} - refine or re-run if you expect more).`
+      : `${data.anomaly_count} anomaly(ies) found across ${ibpGroups.length} offered service(s).`;
+    ibpUpdateGenerateEnabled();
+    ibpRenderTable();
+  } catch (err) {
+    $("#ibp-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("#ibp-detect-btn").addEventListener("click", ibpDetect);
+
+$("#ibp-generate-btn").addEventListener("click", async () => {
+  if (!ibpSelected.size) return;
+  const program = $("#ibp-program").value.trim();
+  if (!program) { showToast("Enter the Jira/Program # this change is for.", true); return; }
+  const audit_user = $("#ibp-audit-user").value.trim();
+  const clean = $("#ibp-clean-toggle").checked;
+  const btn = $("#ibp-generate-btn");
+  btn.disabled = true;
+  try {
+    const result = await api("/api/incorrect-billing-period/generate", {
+      method: "POST",
+      body: { anomaly_ids: [...ibpSelected], program, audit_user, clean },
+    });
+    $("#ibp-output").textContent = result.sql_text;
+    let msg = `Correction script generated: ${result.anomaly_count} anomaly(ies).`;
+    if (result.warnings.length) msg += `  ${result.warnings.length} warning(s) - see comments at the top of the script.`;
+    showToast(msg);
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = state.role === "viewer";
+  }
+});
+
+$("#ibp-copy-btn").addEventListener("click", async () => {
+  const text = $("#ibp-output").textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("Correction script copied to clipboard.");
+  } catch (_) {
+    showToast("Couldn't copy - select and copy manually.", true);
+  }
+});
+
+$("#ibp-download-btn").addEventListener("click", () => {
+  const text = $("#ibp-output").textContent;
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "incorrect_billing_period_correction.sql";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------- TNB CYCLE/DISC Analysis ----------------
+// RJ, 2026-09-25 - see app/core/tnb_cycle_disc.py for the query. One scan
+// (POST /api/tnb-cycle-disc/detect), then billing period / NISS / TNB-side
+// filtering and sorting all client-side.
+const TCD_TNB_CODE = "8000STSRED";
+const TCD_SIDE_COLS = [
+  ["id_reading", "ID Reading"],
+  ["reading_type", "Reading Type"],
+  ["reading_prev_date", "Prev. Date"],
+  ["reading_date", "Reading Date"],
+  ["prev_value", "Prev. Value"],
+  ["value", "Value"],
+  ["reading_usage", "Reading Usage"],
+  ["corrected_usage", "Corrected Usage"],
+  ["ready_usage", "Ready Usage"],
+  ["read_status", "Read Status"],
+];
+const TCD_COLUMNS = [
+  { key: "niss", label: "NISS" },
+  { key: "billing_period", label: "Billing Period" },
+  { key: "usage_name", label: "Usage" },
+  { key: "in_contract", label: "In Contract" },
+  ...TCD_SIDE_COLS.map(([k, l]) => ({ key: `c_${k}`, label: l, side: "c" })),
+  ...TCD_SIDE_COLS.map(([k, l]) => ({ key: `d_${k}`, label: l, side: "d" })),
+];
+const TCD_DATE_KEYS = new Set(["c_reading_prev_date", "c_reading_date", "d_reading_prev_date", "d_reading_date"]);
+let tcdRows = [];
+let tcdSortKey = null;
+let tcdSortDir = 1;
+
+function tcdFmt(key, v) {
+  if (key === "in_contract") return String(v) === "1" ? "Yes" : "No";
+  const s = v ?? "";
+  return TCD_DATE_KEYS.has(key) && typeof s === "string" ? s.replace(/ 00:00:00$/, "") : s;
+}
+
+function tcdVisibleRows() {
+  const bp = $("#tcd-filter-bp").value;
+  const niss = $("#tcd-filter-niss").value.trim().toLowerCase();
+  const tnb = $("#tcd-filter-tnb").value;
+  const contract = $("#tcd-filter-contract").value;
+  let rows = tcdRows.filter((r) => {
+    if (contract === "yes" && String(r.in_contract) !== "1") return false;
+    if (contract === "no" && String(r.in_contract) === "1") return false;
+    if (bp && r.billing_period !== bp && r.c_billing_period !== bp && r.d_billing_period !== bp) return false;
+    if (niss && !String(r.niss ?? "").toLowerCase().includes(niss)) return false;
+    const cT = r.c_read_status_code === TCD_TNB_CODE;
+    const dT = r.d_read_status_code === TCD_TNB_CODE;
+    if (tnb === "cycle" && !cT) return false;
+    if (tnb === "disc" && !dT) return false;
+    if (tnb === "both" && !(cT && dT)) return false;
+    return true;
+  });
+  if (tcdSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[tcdSortKey], b[tcdSortKey], tcdSortDir));
+  return rows;
+}
+
+function tcdRenderHeader() {
+  const tr = document.querySelector("#tcd-table thead tr.tcd-col-row");
+  tr.innerHTML = TCD_COLUMNS.map((c) => {
+    const arrow = tcdSortKey === c.key ? `<span class="stats-table-sort-arrow">${tcdSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    const cls = c.side === "c" ? " tcd-col-cycle" : c.side === "d" ? " tcd-col-disc" : "";
+    return `<th class="stats-table-th-sortable${cls}" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  tr.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    tcdSortDir = tcdSortKey === k ? -tcdSortDir : 1;
+    tcdSortKey = k;
+    tcdRenderTable();
+  }));
+}
+
+function tcdRenderTable() {
+  tcdRenderHeader();
+  const rows = tcdVisibleRows();
+  const tbody = document.querySelector("#tcd-table tbody");
+  tbody.innerHTML = rows.length
+    ? rows.map((r) => "<tr>" + TCD_COLUMNS.map((c) => {
+        const classes = [];
+        if (c.side === "c") classes.push("tcd-cell-cycle");
+        if (c.side === "d") classes.push("tcd-cell-disc");
+        if (c.key === "c_read_status" && r.c_read_status_code === TCD_TNB_CODE) classes.push("tcd-tnb");
+        if (c.key === "d_read_status" && r.d_read_status_code === TCD_TNB_CODE) classes.push("tcd-tnb");
+        if (c.key === "in_contract") classes.push(String(r.in_contract) === "1" ? "tcd-in-contract" : "tcd-no-contract");
+        return `<td${classes.length ? ` class="${classes.join(" ")}"` : ""}>${escapeHtml(tcdFmt(c.key, r[c.key]))}</td>`;
+      }).join("") + "</tr>").join("")
+    : `<tr><td colspan="${TCD_COLUMNS.length}" class="hint-text">No pairs match the current filters.</td></tr>`;
+  renderFilteredCount("#tcd-filtered-count", rows.length, tcdRows.length);
+}
+
+async function tcdDetect() {
+  const btn = $("#tcd-detect-btn");
+  btn.disabled = true;
+  $("#tcd-summary").textContent = "Scanning… (~20–30s)";
+  try {
+    const data = await api("/api/tnb-cycle-disc/detect", { method: "POST" });
+    tcdRows = data.rows || [];
+    const sel = $("#tcd-filter-bp");
+    const current = sel.value;
+    // Billing periods newest first (by id), shown in words.
+    const periods = new Map();
+    tcdRows.forEach((r) => {
+      [[r.billing_period, r.id_billing_period], [r.c_billing_period, r.c_id_billing_period], [r.d_billing_period, r.d_id_billing_period]]
+        .forEach(([name, id]) => { if (name && !periods.has(name)) periods.set(name, Number(id) || 0); });
+    });
+    const names = [...periods.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n);
+    sel.innerHTML = `<option value="">All</option>` + names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+    if (names.includes(current)) sel.value = current;
+    $("#tcd-filter-row").hidden = tcdRows.length === 0;
+    $("#tcd-export-btn").disabled = tcdRows.length === 0;
+    const outside = tcdRows.filter((r) => String(r.in_contract) !== "1").length;
+    $("#tcd-summary").textContent = `${data.count} cycle/disconnection pair(s) across ${data.supply_count} sector supply(ies) — ${outside} with the reading date outside any non-cancelled contracted service.`;
+    tcdRenderTable();
+  } catch (err) {
+    $("#tcd-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("#tcd-detect-btn").addEventListener("click", tcdDetect);
+$("#tcd-filter-bp").addEventListener("change", tcdRenderTable);
+$("#tcd-filter-tnb").addEventListener("change", tcdRenderTable);
+$("#tcd-filter-contract").addEventListener("change", tcdRenderTable);
+$("#tcd-filter-niss").addEventListener("input", tcdRenderTable);
+$("#tcd-filter-clear-btn").addEventListener("click", () => {
+  $("#tcd-filter-contract").value = "";
+  $("#tcd-filter-bp").value = "";
+  $("#tcd-filter-niss").value = "";
+  $("#tcd-filter-tnb").value = "";
+  tcdRenderTable();
+});
+$("#tcd-export-btn").addEventListener("click", () => {
+  const rows = tcdVisibleRows();
+  if (!rows.length) return;
+  const header = TCD_COLUMNS.map((c) => (c.side === "c" ? "Cycle " : c.side === "d" ? "Disc " : "") + c.label);
+  const lines = [header.map((h) => `"${h}"`).join(",")];
+  rows.forEach((r) => lines.push(TCD_COLUMNS.map((c) => `"${String(tcdFmt(c.key, r[c.key]) ?? "").replace(/"/g, '""')}"`).join(",")));
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "tnb_cycle_disc.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+tcdRenderHeader();
+
+// ---------------- Wrong Stuck in Hierarchy ITB ----------------
+// RJ, 2026-09-25 - see app/core/wrong_stuck_hierarchy.py. One scan with
+// no parameters covers every billing period ("initial search should not
+// have any param"); billing period / search / main MP / service-190
+// status are all filters applied client-side afterwards.
+const WSH_COLUMNS = [
+  { key: "reference", label: "Account" },
+  { key: "niss", label: "NISS" },
+  { key: "id_item_to_bill", label: "ID Item To Bill (stuck)" },
+  { key: "id_main_mp", label: "ID Main MP" },
+  { key: "description", label: "Billing Period" },
+  { key: "id_item_to_bill_190", label: "ID Item To Bill (service 190)" },
+  { key: "status_190", label: "Status (service 190)" },
+];
+let wshRows = [];
+let wshSortKey = null;
+let wshSortDir = 1;
+
+function wshVisibleRows() {
+  const period = $("#wsh-filter-period").value;
+  const q = $("#wsh-filter-search").value.trim().toLowerCase();
+  const mainMp = $("#wsh-filter-mainmp").value.trim();
+  const st = $("#wsh-filter-status190").value;
+  let rows = wshRows.filter((r) => {
+    if (period && String(r.id_billing_period) !== period) return false;
+    if (q && ![r.reference, r.niss, r.id_item_to_bill, r.id_item_to_bill_190].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    if (mainMp && !String(r.id_main_mp ?? "").includes(mainMp)) return false;
+    if (st === "__none__" && r.status_190) return false;
+    if (st && st !== "__none__" && r.status_190 !== st) return false;
+    return true;
+  });
+  if (wshSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[wshSortKey], b[wshSortKey], wshSortDir));
+  return rows;
+}
+
+function wshRenderTable() {
+  const head = document.querySelector("#wsh-table thead tr");
+  head.innerHTML = WSH_COLUMNS.map((c) => {
+    const arrow = wshSortKey === c.key ? `<span class="stats-table-sort-arrow">${wshSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    wshSortDir = wshSortKey === k ? -wshSortDir : 1;
+    wshSortKey = k;
+    wshRenderTable();
+  }));
+  const rows = wshVisibleRows();
+  document.querySelector("#wsh-table tbody").innerHTML = rows.length
+    ? rows.map((r) => "<tr>" + WSH_COLUMNS.map((c) => {
+        const v = r[c.key] ?? "";
+        const cls = c.key === "status_190" && !v ? ' class="hint-text"' : "";
+        return `<td${cls}>${escapeHtml(c.key === "status_190" && !v ? "(none)" : v)}</td>`;
+      }).join("") + "</tr>").join("")
+    : `<tr><td colspan="${WSH_COLUMNS.length}" class="hint-text">${wshRows.length ? "No rows match the current filters." : "No stuck secondaries for this period."}</td></tr>`;
+  renderFilteredCount("#wsh-filtered-count", rows.length, wshRows.length);
+}
+
+$("#wsh-detect-btn").addEventListener("click", async () => {
+  const btn = $("#wsh-detect-btn");
+  btn.disabled = true;
+  $("#wsh-summary").textContent = "Scanning all billing periods…";
+  try {
+    const data = await api("/api/wrong-stuck-hierarchy/detect", { method: "POST", body: {} });
+    wshRows = data.rows || [];
+    // Billing period filter: newest first, labelled in words.
+    const periods = new Map();
+    wshRows.forEach((r) => { if (r.id_billing_period && !periods.has(r.id_billing_period)) periods.set(r.id_billing_period, r.description || r.id_billing_period); });
+    const pSel = $("#wsh-filter-period");
+    const pCur = pSel.value;
+    const pIds = [...periods.keys()].sort((a, b) => Number(b) - Number(a));
+    pSel.innerHTML = `<option value="">All</option>` + pIds.map((id) => {
+      const n = wshRows.filter((r) => r.id_billing_period === id).length;
+      return `<option value="${escapeHtml(id)}">${escapeHtml(periods.get(id))} (${n})</option>`;
+    }).join("");
+    if (pIds.includes(pCur)) pSel.value = pCur;
+    const statuses = [...new Set(wshRows.map((r) => r.status_190).filter(Boolean))].sort();
+    const hasNone = wshRows.some((r) => !r.status_190);
+    const sel = $("#wsh-filter-status190");
+    sel.innerHTML = `<option value="">All</option>` +
+      statuses.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("") +
+      (hasNone ? `<option value="__none__">(none)</option>` : "");
+    $("#wsh-filter-row").hidden = wshRows.length === 0;
+    $("#wsh-export-btn").disabled = wshRows.length === 0;
+    $("#wsh-summary").textContent = `${data.count} stuck item(s) across ${data.period_count} billing period(s), ${data.account_count} account(s), ${data.main_mp_count} main MP(s).`;
+    wshRenderTable();
+  } catch (err) {
+    $("#wsh-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+["#wsh-filter-search", "#wsh-filter-mainmp"].forEach((id) => $(id).addEventListener("input", wshRenderTable));
+$("#wsh-filter-status190").addEventListener("change", wshRenderTable);
+$("#wsh-filter-period").addEventListener("change", wshRenderTable);
+$("#wsh-filter-clear-btn").addEventListener("click", () => {
+  $("#wsh-filter-period").value = "";
+  $("#wsh-filter-search").value = "";
+  $("#wsh-filter-mainmp").value = "";
+  $("#wsh-filter-status190").value = "";
+  wshRenderTable();
+});
+$("#wsh-export-btn").addEventListener("click", () => {
+  const rows = wshVisibleRows();
+  if (!rows.length) return;
+  const lines = [WSH_COLUMNS.map((c) => `"${c.label}"`).join(",")];
+  rows.forEach((r) => lines.push(WSH_COLUMNS.map((c) => `"${String(r[c.key] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "wrong_stuck_hierarchy_itb.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------- Reading Validation/Modif ----------------
+// RJ, 2026-09-23, own SQL - see app/core/reading_validation.py's module
+// docstring for the full query provenance. Phase 1 scope only (RJ: "this
+// is the main query for now"): display, filter, sort - no edit/modif
+// capability yet despite the menu's own name.
+let rvRows = [];              // raw rows from the last detect call (already display-formatted server-side)
+let rvSortKey = null;
+let rvSortDir = 1;
+let rvSupplies = [];          // from search-account: [{id_sector_supply, niss, offered_service_desc, contract_status}]
+let rvActiveSupply = null;    // the id_sector_supply currently loaded (string)
+let rvDetailLevel = "medium"; // "important" | "medium" | "full" - RJ, 2026-09-23: "we will have
+                               // 3 option for the detail, the full option, medium option (what we
+                               // display now by defualt) and important detail" - medium stays the
+                               // default, same as before this 3-tier round.
+let rvSelectedIdReading = null;  // id_reading of the last-clicked row (chain-highlight anchor)
+let rvRowByIdReading = new Map(); // id_reading (string) -> row object, rebuilt on every load
+let rvReferenceMode = "id";      // "id" (default) | "order" - RJ, 2026-09-23 (4th round): "add a
+                                  // new referencing mode ... by row order" - see rvFindChainRows.
+
+// Inline editing (RJ, 2026-09-25: "I want to be able to update the
+// following columns reading prev date, reading date, reading_type
+// (dropdown, id not description), prev_value, value, reading_usage,
+// corrected_usage, ready usage. Only this columns."). Mirrors app/core/
+// reading_validation.py's EDITABLE_COLUMNS / CASCADING_COLUMNS - the
+// server is the authority for which DB column each key maps to and
+// which kind it coerces to, this is just the client-side column set
+// used to decide which cells render as inputs and which edits cascade.
+const RV_EDITABLE_COLUMNS = new Set([
+  "reading_prev_date", "reading_date", "reading_type",
+  "prev_value", "reading", "metered_usage", "corrected_usage", "bill_ready_usage",
+]);
+const RV_CASCADE_COLUMNS = new Set(["reading_prev_date", "reading_date", "prev_value", "reading"]);
+let rvOriginalByIdReading = new Map(); // id_reading -> {col: original display string}, snapshot at load
+let rvDirtyIds = new Set();            // id_reading of every row with at least one pending edit
+let rvReadingTypeOptions = [];         // [{code, description}], fetched once and cached
+let rvReadingTypeOptionsLoaded = false;
+
+// RJ, 2026-09-25 (follow-up round): "the dates, remove the :0000" - every
+// reading_prev_date/reading_date in this app's real data is always a
+// midnight timestamp (the time-of-day portion never carries real
+// information), so displaying " 00:00:00" on every single row is just
+// noise. Stripped once here, at row-ingestion time (rvSetRows), rather
+// than only at render time, so the STRIPPED string is what ends up in
+// rvOriginalByIdReading's snapshot too - keeps the original-vs-edited
+// diffing, the cascade, and what's ultimately sent as old_value/new_value
+// to /api/reading-validation/generate-script all consistent with what's
+// on screen. A row with a genuine non-midnight time (none seen in this
+// app's own data, but just in case) is left completely alone - the
+// regex only matches an exact " 00:00:00" suffix.
+function rvStripMidnightTime(v) {
+  if (typeof v !== "string") return v;
+  return v.replace(/ 00:00:00$/, "");
+}
+
+// RJ, 2026-09-25 (follow-up round): "the corrected usage, reading usage
+// and ready usage should automatically be updated as well if you change
+// the value. for reading usage, it is equal to the value - prev_value,
+// for [corrected usage and ready usage] it is equal to the value - prev
+// value, multiplied by the multiplier column". Recomputes all three
+// usage columns on ONE row from its current reading/prev_value/
+// usage_multiplier - called after any direct edit to reading/prev_value
+// AND after rvCascadeEdit propagates a new reading/prev_value onto a
+// linked row, so the usage columns stay correct however the value
+// actually changed. usage_multiplier comes straight from build_readings_
+// query's own GCGT_ME_USAGE_TYPE_METER join (see reading_validation.py);
+// missing/non-numeric multiplier falls back to 1 (no scaling) rather than
+// blanking the usage columns out.
+function rvFormatUsageNumber(n) {
+  if (!Number.isFinite(n)) return "";
+  const rounded = Math.round(n * 1e6) / 1e6; // guard against float noise (0.1+0.2 style)
+  return String(rounded);
+}
+
+function rvRecalcUsage(row) {
+  const val = parseFloat(row.reading);
+  const prev = parseFloat(row.prev_value);
+  if (Number.isNaN(val) || Number.isNaN(prev)) return;
+  const diff = val - prev;
+  const multiplierRaw = parseFloat(row.usage_multiplier);
+  const multiplier = Number.isFinite(multiplierRaw) ? multiplierRaw : 1;
+  row.metered_usage = rvFormatUsageNumber(diff);
+  row.corrected_usage = rvFormatUsageNumber(diff * multiplier);
+  row.bill_ready_usage = rvFormatUsageNumber(diff * multiplier);
+}
+
+function rvVisibleIndices() {
+  const billingPeriod = $("#rv-filter-billing-period").value;
+  const dateFrom = $("#rv-filter-date-from").value;
+  const dateTo = $("#rv-filter-date-to").value;
+  const readingType = $("#rv-filter-reading-type").value;
+  const readStatus = $("#rv-filter-read-status").value;
+  const usageType = $("#rv-filter-usage-type").value;
+  const search = $("#rv-search-box").value.trim().toLowerCase();
+  return rvRows
+    .map((r, i) => [r, i])
+    .filter(([r]) => {
+      if (billingPeriod && String(r.billing_period ?? "") !== billingPeriod) return false;
+      if (readingType && (r.reading_type ?? "") !== readingType) return false;
+      if (readStatus && (r.read_status ?? "") !== readStatus) return false;
+      if (usageType && (r.usage_name ?? "") !== usageType) return false;
+      if (dateFrom || dateTo) {
+        // reading_date arrives already display-formatted (diff_engine.
+        // cell_display), which for a date/datetime column is "YYYY-MM-DD"
+        // or "YYYY-MM-DD HH:MM:SS" - a plain string compare against an
+        // ISO <input type=date> value works fine either way since both
+        // start with YYYY-MM-DD.
+        const rd = String(r.reading_date ?? "");
+        if (!rd) return false;
+        if (dateFrom && rd < dateFrom) return false;
+        if (dateTo && rd.slice(0, 10) > dateTo) return false;
+      }
+      if (search) {
+        const hay = Object.values(r).join(" ").toLowerCase();
+        if (!hay.includes(search)) return false;
+      }
+      return true;
+    })
+    .map(([, i]) => i);
+}
+
+// Column definitions, in display order, each tagged with the smallest
+// detail tier it appears in - a column shows at its own tier AND every
+// wider one ("important" < "medium" < "full"). RJ, 2026-09-23 (2nd
+// round): "we will have 3 option for the detail, the full option,
+// medium option (what we display now by defualt) and important detail
+// which will be: [his own explicit, smaller column list]". So "medium"
+// is exactly the column set this page already defaulted to before this
+// round (still the default), "important" is RJ's new, smaller list
+// (verbatim order), and "full" is everything, including the columns
+// that were already "all details"-only. id_last_reading is deliberately
+// NOT a visible column at any tier - it exists purely so the click-to-
+// highlight chain logic below can look it up per row.
+const RV_COLUMN_DEFS = [
+  { key: "niss", label: "NISS", tier: "important" },
+  { key: "id_reading", label: "ID Reading", tier: "important" },
+  { key: "company_meter_num", label: "Meter #", tier: "important" },
+  { key: "reading_type", label: "Reading Type", tier: "important", editable: "dropdown" },
+  { key: "reading_prev_date", label: "Prev. Date", tier: "important", editable: "text" },
+  { key: "reading_date", label: "Reading Date", tier: "important", editable: "text" },
+  { key: "usage_name", label: "Consumption Type", tier: "important" },
+  { key: "read_status", label: "Read Status", tier: "important" },
+  { key: "prev_value", label: "Prev. Value", tier: "important", editable: "text" },
+  { key: "reading", label: "Reading", tier: "important", editable: "text" },
+  { key: "metered_usage", label: "Metered Usage", tier: "important", editable: "text" },
+  { key: "corrected_usage", label: "Corrected Usage", tier: "important", editable: "text" },
+  { key: "bill_ready_usage", label: "Bill Ready Usage", tier: "important", editable: "text" },
+  { key: "ind_estimate", label: "Estimated?", tier: "important" },
+  { key: "billing_period", label: "Billing Period", tier: "important" },
+  { key: "id_sector_supply", label: "Sector Supply", tier: "medium" },
+  { key: "id_measuring_point", label: "Measuring Point", tier: "medium" },
+  { key: "id_device", label: "ID Device", tier: "medium" },
+  { key: "model_name", label: "Model", tier: "medium" },
+  { key: "usage_code", label: "Usage Code", tier: "medium" },
+  { key: "reading_unit", label: "Unit", tier: "medium" },
+  { key: "corrected_unit", label: "Corrected Unit", tier: "medium" },
+  { key: "bill_unit", label: "Bill Unit", tier: "medium" },
+  { key: "ind_negative_usage", label: "Negative?", tier: "medium" },
+  { key: "reading_time_ts", label: "Reading Time", tier: "full" },
+  { key: "update_user", label: "Update User", tier: "full" },
+  { key: "power_factor", label: "Power Factor", tier: "full" },
+  { key: "ind_modreb", label: "Modif. Reb.?", tier: "full" },
+  { key: "reader_name", label: "Reader", tier: "full" },
+  { key: "reading_origin", label: "Origin", tier: "full" },
+  { key: "digitizer", label: "Digitizer", tier: "full" },
+];
+const RV_TIER_RANK = { important: 0, medium: 1, full: 2 };
+
+function rvColumnDefs() {
+  const rank = RV_TIER_RANK[rvDetailLevel] ?? RV_TIER_RANK.medium;
+  return RV_COLUMN_DEFS.filter((c) => RV_TIER_RANK[c.tier] <= rank);
+}
+
+// Header is rebuilt on every render (detail-level toggle changes the
+// column set) - same "rebuild + rewire each time" approach bcState's
+// dynamic-column tables already use (see bcWireSortableHeaders above),
+// rather than the wire-once hierWireSortableHeaders pattern the old
+// static header used.
+function rvRenderTableHeader() {
+  const headRow = document.querySelector("#rv-table thead tr");
+  headRow.innerHTML = rvColumnDefs().map((c) => {
+    const arrow = rvSortKey === c.key ? `<span class="stats-table-sort-arrow">${rvSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  headRow.querySelectorAll("th[data-sort]").forEach((th) => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.sort;
+      rvSortDir = rvSortKey === key ? -rvSortDir : 1;
+      rvSortKey = key;
+      rvRenderTable();
+    });
+  });
+}
+
+// Reading-chain highlight (RJ, 2026-09-23: "each reading is being
+// referenced by id_reading and id_last_reading, so the id_reading of a
+// row, is the id_last reading of the next row ... highlight the
+// reference if a row is clicked, same with the reading date ... and
+// value reference from a prev_value of the previous row"). Clicking a
+// row highlights: the row it chains FROM (its own id_last_reading ==
+// that row's id_reading) and the row that chains FROM it (whose
+// id_last_reading == this row's id_reading) - plus the specific
+// date/value cells that carry that relationship on both rows.
+// RJ, 2026-09-23 (2nd round): "change the row color for the referencing
+// rows, and a different color for readings and dates" - so the linked
+// ROW gets its own color (rv-row-linked, distinct from rv-row-selected),
+// and the two kinds of linked CELL get their own separate colors too:
+// rv-cell-linked-date for the reading_date/reading_prev_date pair,
+// rv-cell-linked-value for the reading/prev_value pair (see styles.css).
+//
+// RJ, 2026-09-23 (4th round): "add a new referencing mode ... by row
+// order, the idea is the first row is referencing to its lower row that
+// it is following, for example row 1 reading prev date and prev value,
+// references row 2 reading date and value". So there are now two ways
+// to find the "prev"/"next" linked row for a click, chosen by
+// rvReferenceMode ("id", the default, or "order"):
+//   - "id": via the real ID_READING/ID_LAST_READING FK chain, same as
+//     before - independent of whatever order the table happens to be
+//     sorted/filtered into.
+//   - "order": purely positional - whichever row is physically the next
+//     <tr> below the clicked one in the CURRENTLY RENDERED table (so it
+//     respects the active sort/filter) is treated as the row the
+//     clicked one's prev_date/prev_value refer to, and the row directly
+//     above is treated as the row that refers to the clicked one. This
+//     is a plain DOM-sibling lookup, not a data lookup, precisely
+//     because "row order" means screen position, not any DB relationship.
+// Once prevTr/nextTr are found, the actual cell-highlighting is
+// identical for both modes.
+//
+// Takes the id_reading straight off `selRow` itself (data-id-reading)
+// rather than the globally-selected/clicked row, so this same function
+// can also drive edit cascading (rvCascadeEdit) for ANY row - not only
+// whichever one the user last clicked to highlight.
+function rvFindChainRows(selRow) {
+  const idReading = selRow.dataset.idReading;
+  if (rvReferenceMode === "order") {
+    return { prevTr: selRow.nextElementSibling?.hasAttribute("data-id-reading") ? selRow.nextElementSibling : null,
+             nextTr: selRow.previousElementSibling?.hasAttribute("data-id-reading") ? selRow.previousElementSibling : null };
+  }
+  const tbody = document.querySelector("#rv-table tbody");
+  const cur = rvRowByIdReading.get(idReading);
+  let prevTr = null;
+  if (cur) {
+    const prevKey = cur.id_last_reading !== null && cur.id_last_reading !== undefined ? String(cur.id_last_reading) : null;
+    if (prevKey && rvRowByIdReading.has(prevKey)) {
+      prevTr = tbody.querySelector(`tr[data-id-reading="${CSS.escape(prevKey)}"]`);
+    }
+  }
+  const nextTr = tbody.querySelector(`tr[data-id-last-reading="${CSS.escape(idReading)}"]`);
+  return { prevTr, nextTr };
+}
+
+function rvApplyChainHighlight() {
+  const tbody = document.querySelector("#rv-table tbody");
+  tbody.querySelectorAll("tr[data-id-reading]").forEach((tr) => {
+    tr.classList.remove("rv-row-selected", "rv-row-linked");
+    tr.querySelectorAll("td[data-col]").forEach((td) => td.classList.remove("rv-cell-linked-date", "rv-cell-linked-value"));
+  });
+  if (rvSelectedIdReading === null) return;
+  const selRow = tbody.querySelector(`tr[data-id-reading="${CSS.escape(rvSelectedIdReading)}"]`);
+  if (!selRow) return;
+  selRow.classList.add("rv-row-selected");
+
+  const { prevTr, nextTr } = rvFindChainRows(selRow);
+
+  // The row this one refers FROM (its own prev_date/prev_value == that
+  // row's reading_date/reading).
+  if (prevTr) {
+    prevTr.classList.add("rv-row-linked");
+    selRow.querySelector('td[data-col="reading_prev_date"]')?.classList.add("rv-cell-linked-date");
+    prevTr.querySelector('td[data-col="reading_date"]')?.classList.add("rv-cell-linked-date");
+    selRow.querySelector('td[data-col="prev_value"]')?.classList.add("rv-cell-linked-value");
+    prevTr.querySelector('td[data-col="reading"]')?.classList.add("rv-cell-linked-value");
+  }
+  // The row that refers TO this one (its reading_date/reading == this
+  // row's prev_date/prev_value).
+  if (nextTr) {
+    nextTr.classList.add("rv-row-linked");
+    nextTr.querySelector('td[data-col="reading_prev_date"]')?.classList.add("rv-cell-linked-date");
+    selRow.querySelector('td[data-col="reading_date"]')?.classList.add("rv-cell-linked-date");
+    nextTr.querySelector('td[data-col="prev_value"]')?.classList.add("rv-cell-linked-value");
+    selRow.querySelector('td[data-col="reading"]')?.classList.add("rv-cell-linked-value");
+  }
+}
+
+// Renders one <td>'s contents for a given column def + row - a plain
+// escaped text node for a display-only column, or an input/select for
+// an editable one (RJ, 2026-09-25). The dropdown's selected value is
+// the row's RAW reading_type_code (never the translated reading_type
+// description it sits next to in the column - see EDITABLE_COLUMNS'
+// own comment in reading_validation.py for why).
+// RJ, 2026-09-25 (follow-up round): "make the values that are updated to
+// be know, maybe make it bold and change the color to mark it as
+// modified" - `dirty` marks THIS specific cell as changed from its
+// original snapshot value (not just "this row has some edit somewhere",
+// which rv-row-dirty already covers) - see rv-edit-dirty in styles.css
+// for the actual bold+color treatment.
+function rvRenderCell(c, r, rowIdx, dirty) {
+  const dirtyClass = dirty ? " rv-edit-dirty" : "";
+  if (c.editable === "dropdown") {
+    const currentCode = r.reading_type_code ?? "";
+    const options = rvReadingTypeOptions.length
+      ? rvReadingTypeOptions
+      : (currentCode ? [{ code: currentCode, description: r[c.key] ?? currentCode }] : []);
+    const optionsHtml = options.map((o) => {
+      const sel = String(o.code) === String(currentCode) ? " selected" : "";
+      return `<option value="${escapeHtml(o.code)}"${sel}>${escapeHtml(o.description)}</option>`;
+    }).join("");
+    return `<select class="rv-edit-select${dirtyClass}" data-col="${c.key}" data-row-idx="${rowIdx}">${optionsHtml}</select>`;
+  }
+  if (c.editable === "text") {
+    return `<input type="text" class="rv-edit-input${dirtyClass}" data-col="${c.key}" data-row-idx="${rowIdx}" value="${escapeHtml(r[c.key] ?? "")}" />`;
+  }
+  return escapeHtml(r[c.key] ?? "");
+}
+
+function rvRenderTable() {
+  rvRenderTableHeader();
+  const cols = rvColumnDefs();
+  let indices = rvVisibleIndices();
+  if (rvSortKey) {
+    indices = [...indices].sort((a, b) => _hierCompareValues(rvRows[a][rvSortKey], rvRows[b][rvSortKey], rvSortDir));
+  }
+  const tbody = document.querySelector("#rv-table tbody");
+  tbody.innerHTML = indices.length
+    ? indices.map((i) => {
+        const r = rvRows[i];
+        const idReading = r.id_reading !== null && r.id_reading !== undefined ? String(r.id_reading) : "";
+        const idLastReading = r.id_last_reading !== null && r.id_last_reading !== undefined ? String(r.id_last_reading) : "";
+        const rowDirty = rvDirtyIds.has(idReading);
+        const dirtyClass = rowDirty ? " rv-row-dirty" : "";
+        const original = rowDirty ? rvOriginalByIdReading.get(idReading) : null;
+        return `<tr class="${dirtyClass.trim()}" data-row-idx="${i}" data-id-reading="${escapeHtml(idReading)}" data-id-last-reading="${escapeHtml(idLastReading)}">` +
+          cols.map((c) => {
+            const cellDirty = c.editable && original
+              ? String(rvEditableFieldValue(r, c.key)) !== String(original[c.key] ?? "")
+              : false;
+            return `<td data-col="${c.key}"${c.editable ? ' class="rv-cell-editable"' : ""}>${rvRenderCell(c, r, i, cellDirty)}</td>`;
+          }).join("") +
+          `</tr>`;
+      }).join("")
+    : `<tr><td colspan="${cols.length}" class="hint-text">No readings match the current filters.</td></tr>`;
+  renderFilteredCount("#rv-filtered-count", indices.length, rvRows.length);
+  rvApplyChainHighlight();
+  rvUpdateDirtyUI();
+}
+
+document.querySelector("#rv-table tbody").addEventListener("click", (ev) => {
+  if (ev.target.closest(".rv-edit-input, .rv-edit-select")) return; // editing, not selecting
+  const tr = ev.target.closest("tr[data-id-reading]");
+  if (!tr) return;
+  const idReading = tr.dataset.idReading;
+  if (!idReading) return;
+  rvSelectedIdReading = rvSelectedIdReading === idReading ? null : idReading;
+  rvApplyChainHighlight();
+});
+
+// --- Inline editing (RJ, 2026-09-25) ----------------------------------
+
+function rvEditableFieldValue(row, col) {
+  return col === "reading_type" ? (row.reading_type_code ?? "") : (row[col] ?? "");
+}
+
+function rvMarkDirty(row) {
+  const idReading = row.id_reading !== null && row.id_reading !== undefined ? String(row.id_reading) : "";
+  if (!idReading) return;
+  const original = rvOriginalByIdReading.get(idReading);
+  if (!original) return;
+  const stillDirty = [...RV_EDITABLE_COLUMNS].some((col) => String(rvEditableFieldValue(row, col)) !== String(original[col] ?? ""));
+  if (stillDirty) rvDirtyIds.add(idReading);
+  else rvDirtyIds.delete(idReading);
+}
+
+function rvUpdateDirtyUI() {
+  const scriptCard = $("#rv-script-card");
+  if (!scriptCard) return;
+  scriptCard.hidden = rvRows.length === 0;
+  $("#rv-dirty-count").textContent = rvDirtyIds.size
+    ? `${rvDirtyIds.size} row(s) with pending edits.`
+    : "No pending edits.";
+  $("#rv-generate-btn").disabled = rvDirtyIds.size === 0;
+}
+
+// Cascades an edited date/value cell to the linked row (RJ, 2026-09-25:
+// "Any update in the dates and reading values ... should reflect on the
+// referenced value"). Single hop only - reuses rvFindChainRows (now
+// keyed off the EDITED row, not necessarily the clicked/selected one),
+// so it automatically follows whichever reference mode (ID chain or row
+// order) is currently active, matching both of RJ's own examples.
+function rvCascadeEdit(row, col, newVal) {
+  if (!RV_CASCADE_COLUMNS.has(col)) return;
+  const idReading = row.id_reading !== null && row.id_reading !== undefined ? String(row.id_reading) : "";
+  const tbody = document.querySelector("#rv-table tbody");
+  const selRow = tbody.querySelector(`tr[data-id-reading="${CSS.escape(idReading)}"]`);
+  if (!selRow) return;
+  const { prevTr, nextTr } = rvFindChainRows(selRow);
+  const prevRow = prevTr ? rvRows[Number(prevTr.dataset.rowIdx)] : null;
+  const nextRow = nextTr ? rvRows[Number(nextTr.dataset.rowIdx)] : null;
+
+  if (col === "reading_prev_date" && prevRow) { prevRow.reading_date = newVal; rvMarkDirty(prevRow); }
+  if (col === "prev_value" && prevRow) { prevRow.reading = newVal; rvRecalcUsage(prevRow); rvMarkDirty(prevRow); }
+  if (col === "reading_date" && nextRow) { nextRow.reading_prev_date = newVal; rvMarkDirty(nextRow); }
+  if (col === "reading" && nextRow) { nextRow.prev_value = newVal; rvRecalcUsage(nextRow); rvMarkDirty(nextRow); }
+}
+
+document.querySelector("#rv-table tbody").addEventListener("change", (ev) => {
+  const el = ev.target;
+  const isInput = el.classList.contains("rv-edit-input");
+  const isSelect = el.classList.contains("rv-edit-select");
+  if (!isInput && !isSelect) return;
+  const rowIdx = Number(el.dataset.rowIdx);
+  const col = el.dataset.col;
+  const row = rvRows[rowIdx];
+  if (!row) return;
+
+  if (col === "reading_type") {
+    const opt = rvReadingTypeOptions.find((o) => String(o.code) === String(el.value));
+    row.reading_type_code = el.value;
+    row.reading_type = opt ? opt.description : el.value;
+  } else {
+    row[col] = el.value;
+  }
+  if (col === "reading" || col === "prev_value") rvRecalcUsage(row);
+  rvMarkDirty(row);
+  rvCascadeEdit(row, col, el.value);
+  rvRenderTable();
+});
+
+async function rvLoadReadingTypeOptionsOnce() {
+  if (rvReadingTypeOptionsLoaded) return;
+  try {
+    const data = await api("/api/reading-validation/reading-types");
+    rvReadingTypeOptions = data.reading_types || [];
+    rvReadingTypeOptionsLoaded = true;
+  } catch (err) {
+    showToast("Couldn't load Reading Type options: " + err.message, true);
+  }
+}
+
+// Snapshots the current (just-loaded) value of every editable column per
+// row, keyed by id_reading - the ORIGINAL values rvMarkDirty compares
+// against and, ultimately, what the generated script's WHERE clause
+// guards on (RJ: "in the where clause, we need to put the original
+// values").
+function rvSnapshotOriginals() {
+  rvOriginalByIdReading = new Map();
+  rvDirtyIds = new Set();
+  for (const row of rvRows) {
+    const idReading = row.id_reading !== null && row.id_reading !== undefined ? String(row.id_reading) : "";
+    if (!idReading) continue;
+    const snapshot = {};
+    for (const col of RV_EDITABLE_COLUMNS) snapshot[col] = rvEditableFieldValue(row, col);
+    rvOriginalByIdReading.set(idReading, snapshot);
+  }
+}
+
+function rvResetEdits() {
+  for (const row of rvRows) {
+    const idReading = row.id_reading !== null && row.id_reading !== undefined ? String(row.id_reading) : "";
+    const original = rvOriginalByIdReading.get(idReading);
+    if (!original) continue;
+    for (const col of RV_EDITABLE_COLUMNS) {
+      if (col === "reading_type") {
+        row.reading_type_code = original.reading_type;
+        const opt = rvReadingTypeOptions.find((o) => String(o.code) === String(original.reading_type));
+        row.reading_type = opt ? opt.description : row.reading_type;
+      } else {
+        row[col] = original[col];
+      }
+    }
+  }
+  rvDirtyIds = new Set();
+  rvRenderTable();
+}
+$("#rv-reset-edits-btn").addEventListener("click", rvResetEdits);
+
+$("#rv-generate-btn").addEventListener("click", async () => {
+  if (!rvDirtyIds.size) return;
+  const program = $("#rv-program").value.trim();
+  if (!program) { showToast("Enter the Jira/Program # this change is for.", true); return; }
+  const auditUser = $("#rv-audit-user").value.trim();
+  const rowsPayload = [];
+  for (const idReading of rvDirtyIds) {
+    const row = rvRows.find((r) => String(r.id_reading) === idReading);
+    const original = rvOriginalByIdReading.get(idReading);
+    if (!row || !original) continue;
+    const edits = [];
+    for (const col of RV_EDITABLE_COLUMNS) {
+      const oldVal = original[col] ?? "";
+      const newVal = rvEditableFieldValue(row, col);
+      if (String(oldVal) !== String(newVal)) edits.push({ column: col, old_value: String(oldVal), new_value: String(newVal) });
+    }
+    if (edits.length) rowsPayload.push({ id_reading: idReading, edits });
+  }
+  if (!rowsPayload.length) { showToast("No changes to generate a script for.", true); return; }
+
+  const btn = $("#rv-generate-btn");
+  btn.disabled = true;
+  try {
+    const result = await api("/api/reading-validation/generate-script", {
+      method: "POST",
+      body: { rows: rowsPayload, program, audit_user: auditUser, kind: "update" },
+    });
+    $("#rv-script-output").textContent = result.sql_text;
+    let msg = `Update script generated: ${result.statement_count} statement(s).`;
+    if (result.warning_count) msg += `  ${result.warning_count} warning(s) - see comments at the top of the script.`;
+    showToast(msg);
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = rvDirtyIds.size === 0;
+  }
+});
+
+$("#rv-script-copy-btn").addEventListener("click", async () => {
+  const text = $("#rv-script-output").textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("Update script copied to clipboard.");
+  } catch (_) {
+    showToast("Couldn't copy - select and copy manually.", true);
+  }
+});
+
+$("#rv-script-download-btn").addEventListener("click", () => {
+  const text = $("#rv-script-output").textContent;
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "reading_validation_update.sql";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+document.querySelectorAll('input[name="rv-detail-level"]').forEach((radio) => {
+  radio.addEventListener("change", (ev) => {
+    if (!ev.target.checked) return;
+    rvDetailLevel = ev.target.value;
+    rvRenderTable();
+  });
+});
+
+document.querySelectorAll('input[name="rv-reference-mode"]').forEach((radio) => {
+  radio.addEventListener("change", (ev) => {
+    if (!ev.target.checked) return;
+    rvReferenceMode = ev.target.value;
+    rvApplyChainHighlight();
+  });
+});
+
+// Populates a <select> filter with the distinct values found in rvRows
+// for one column, preserving the current selection when it's still a
+// valid option - same convention as ibpDetect's own offered-service
+// filter dropdown.
+function rvPopulateFilter(selectId, column) {
+  const sel = $(selectId);
+  const current = sel.value;
+  const values = [...new Set(rvRows.map((r) => r[column]).filter((v) => v !== null && v !== undefined && v !== ""))]
+    .sort((a, b) => String(a).localeCompare(String(b)));
+  sel.innerHTML = `<option value="">All</option>` +
+    values.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+  if (values.includes(current)) sel.value = current;
+}
+
+function rvPopulateAllFilters() {
+  rvPopulateFilter("#rv-filter-billing-period", "billing_period");
+  rvPopulateFilter("#rv-filter-reading-type", "reading_type");
+  rvPopulateFilter("#rv-filter-read-status", "read_status");
+  rvPopulateFilter("#rv-filter-usage-type", "usage_name");
+}
+
+["#rv-filter-billing-period", "#rv-filter-reading-type", "#rv-filter-read-status", "#rv-filter-usage-type"].forEach((id) => {
+  $(id).addEventListener("change", rvRenderTable);
+});
+$("#rv-filter-date-from").addEventListener("change", rvRenderTable);
+$("#rv-filter-date-to").addEventListener("change", rvRenderTable);
+$("#rv-search-box").addEventListener("input", rvRenderTable);
+$("#rv-filter-clear-btn").addEventListener("click", () => {
+  $("#rv-filter-billing-period").value = "";
+  $("#rv-filter-reading-type").value = "";
+  $("#rv-filter-read-status").value = "";
+  $("#rv-filter-usage-type").value = "";
+  $("#rv-filter-date-from").value = "";
+  $("#rv-filter-date-to").value = "";
+  $("#rv-search-box").value = "";
+  rvRenderTable();
+});
+
+// Common "new result set just arrived" bookkeeping - rebuilds the
+// id_reading lookup map the chain-highlight feature needs and clears
+// any highlight/sort left over from the previous supply, since row
+// indices and id_reading values from a different supply are meaningless
+// once you've switched supplies.
+function rvSetRows(rows) {
+  rvRows = rows || [];
+  for (const row of rvRows) {
+    row.reading_prev_date = rvStripMidnightTime(row.reading_prev_date);
+    row.reading_date = rvStripMidnightTime(row.reading_date);
+  }
+  rvRowByIdReading = new Map(
+    rvRows
+      .filter((r) => r.id_reading !== null && r.id_reading !== undefined)
+      .map((r) => [String(r.id_reading), r])
+  );
+  rvSelectedIdReading = null;
+  rvSortKey = null;
+  rvSortDir = 1;
+  rvSnapshotOriginals();
+}
+
+async function rvLoadSupply(idSectorSupply, nissLabel) {
+  $("#rv-search-status").textContent = "Loading readings…";
+  await rvLoadReadingTypeOptionsOnce();
+  try {
+    const data = await api("/api/reading-validation/detect", {
+      method: "POST",
+      body: { id_sector_supply: String(idSectorSupply) },
+    });
+    rvActiveSupply = String(idSectorSupply);
+    rvSetRows(data.rows);
+    rvPopulateAllFilters();
+    $("#rv-results-card").hidden = false;
+    $("#rv-results-niss").textContent = nissLabel ? `— ${nissLabel} (sector supply ${idSectorSupply})` : `— sector supply ${idSectorSupply}`;
+    $("#rv-search-status").textContent = `${rvRows.length} reading(s) found.`;
+    rvRenderTable();
+  } catch (err) {
+    $("#rv-search-status").textContent = "";
+    showToast(err.message, true);
+  }
+}
+
+function rvRenderSupplyTabs() {
+  const nav = $("#rv-supply-tabs");
+  if (rvSupplies.length < 1) { nav.hidden = true; nav.innerHTML = ""; return; }
+  nav.hidden = false;
+  nav.innerHTML = rvSupplies.map((s) => {
+    const label = `${s.niss || s.id_sector_supply}${s.offered_service_desc ? " — " + s.offered_service_desc : ""}`;
+    const active = String(s.id_sector_supply) === rvActiveSupply ? "is-active" : "";
+    return `<button type="button" class="da-subnav-btn ${active}" data-rv-supply="${escapeHtml(String(s.id_sector_supply))}">${escapeHtml(label)}</button>`;
+  }).join("");
+  nav.querySelectorAll("[data-rv-supply]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      nav.querySelectorAll(".da-subnav-btn").forEach((b) => b.classList.remove("is-active"));
+      btn.classList.add("is-active");
+      const supply = rvSupplies.find((s) => String(s.id_sector_supply) === btn.dataset.rvSupply);
+      rvLoadSupply(btn.dataset.rvSupply, supply?.niss);
+    });
+  });
+}
+
+$("#rv-supply-search-btn").addEventListener("click", async () => {
+  const raw = $("#rv-supply-input").value.trim();
+  if (!raw) { showToast("Enter a sector supply id or NISS.", true); return; }
+  rvSupplies = [];
+  rvRenderSupplyTabs();
+  const body = /^\d+$/.test(raw) ? { id_sector_supply: raw } : { niss: raw };
+  const btn = $("#rv-supply-search-btn");
+  btn.disabled = true;
+  await rvLoadReadingTypeOptionsOnce();
+  try {
+    const data = await api("/api/reading-validation/detect", { method: "POST", body });
+    rvActiveSupply = String(data.id_sector_supply);
+    rvSetRows(data.rows);
+    rvPopulateAllFilters();
+    $("#rv-results-card").hidden = false;
+    $("#rv-results-niss").textContent = `— sector supply ${data.id_sector_supply}`;
+    $("#rv-search-status").textContent = `${rvRows.length} reading(s) found.`;
+    rvRenderTable();
+  } catch (err) {
+    $("#rv-search-status").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$("#rv-account-search-btn").addEventListener("click", async () => {
+  const account = $("#rv-account-input").value.trim();
+  if (!account) { showToast("Enter an account number.", true); return; }
+  const btn = $("#rv-account-search-btn");
+  btn.disabled = true;
+  $("#rv-search-status").textContent = "Searching…";
+  try {
+    const data = await api("/api/reading-validation/search-account", { method: "POST", body: { account_number: account } });
+    rvSupplies = data.supplies || [];
+    if (!rvSupplies.length) {
+      $("#rv-search-status").textContent = `No sector supply found for account ${account}.`;
+      rvRenderSupplyTabs();
+      return;
+    }
+    rvActiveSupply = String(rvSupplies[0].id_sector_supply);
+    rvRenderSupplyTabs();
+    $("#rv-search-status").textContent = `${rvSupplies.length} supply(ies) found for account ${account}.`;
+    await rvLoadSupply(rvSupplies[0].id_sector_supply, rvSupplies[0].niss);
+  } catch (err) {
+    $("#rv-search-status").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$("#rv-export-csv-btn").addEventListener("click", () => {
+  const indices = rvVisibleIndices();
+  if (!indices.length) return;
+  const csvKeys = rvColumnDefs().map((c) => c.key);
+  const lines = [csvKeys.join(",")];
+  indices.forEach((i) => {
+    const r = rvRows[i];
+    lines.push(csvKeys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(","));
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "reading_validation.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
 
 // ---------------- Bulk Checker ----------------
 // Ported from the standalone EWA Bulk Checker project (2026-09-12, RJ's

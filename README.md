@@ -2073,6 +2073,92 @@ bill(s)") - a new `statement_count` field is the actual raw SQL statement count,
 `update_count` since each bill touches both tables. Kept as two separate fields rather than
 `update_count` silently doubling, so the frontend's own "N bill(s)" wording doesn't change meaning.
 
+## Overview home dashboard (2026-09-23)
+
+RJ, verbatim: "for the whole scriptgen, create a dashboard for all our menu, bulk checker,
+diffdates, bill validator, etc.. i want a good dashboard with modern graphs, pie chart, up to you
+make it look good and functional, also when the graph or dashboard is clicked it will redirect you
+to the details/menu."
+
+New "Overview" page (`data-page="overview"`, `🏠`) is now the app's default landing page - a single
+screen aggregating a live/local snapshot of every other menu, so an analyst logging in sees what
+needs attention before picking a page. It is a separate feature from the existing "Dashboard" tab
+(that one stays scoped to ad-hoc query results/snapshots; Overview is scoped to the app's own
+menus) - confirmed no naming collision by grepping the existing "dashboard" routes before building.
+
+**Backend:** new `GET /api/overview/stats` route in `web/server.py`. Returns:
+- `script_kind_counts` / `script_total` / `script_trend` - from the existing local
+  `script_history.list_history()` (every user's entries, last 1000), bucketed by kind label and by
+  day for the last 14 days. No live DB query needed for this part.
+- `live` - one count per area (`dateanomaly`, `hierarchy`, `billissuance_case1/2/3`), each its own
+  live query reusing the exact same builder functions their own pages already call
+  (`date_anomaly.build_detect_all_anomalies_query`, `hierarchy_analysis.build_pending_primaries_
+  query`, `bill_issuance_validator.build_stuck_bills_query` + `build_new_contract_match_query`
+  (summed, matching Case 1's merged table), `build_terminated_period_mismatch_query` (grouped via
+  the existing `_case2_group_rows_by_account`, counting incomplete accounts), `build_bills_complete_
+  query`). Each area is wrapped in its own `try/except` so one slow/unreachable query renders `null`
+  (shown as "—") instead of blanking the whole page - same resilience pattern Case 4 "Unclassified"
+  already uses internally. Case 4 itself is deliberately NOT included (it already re-runs Cases 1-3's
+  queries a second time internally; including it here would roughly double this route's live-query
+  cost for a metric other cards already cover).
+- `bulk_checker_search_count` - cheap local count from `bulk_checker_db.list_search_history()`.
+- `has_connection` - whether a DB connection is configured at all; the frontend shows "Connect a
+  database" in place of the live cards when this is false rather than five "—"s.
+
+**Frontend:** `web/static/app.js` adds `OVERVIEW_CARDS` (one clickable card per area, each mapped to
+its nav page + optional sub-nav tab via `overviewNavigateTo`), a categorical pie chart of `script_
+kind_counts` (script activity by type), and a 14-day bar trend of script activity - both built on
+the app's existing hand-rolled canvas chart system (`_canvasColors`, `_categoricalColor`,
+`_chartTooltip`, `drawBarChart`), since this app has zero external JS dependencies by design and
+that wasn't going to change for one page. New `drawPieChart`/`_bindPieInteractivity` pair added
+alongside the existing `drawBarChart`/`_bindChartInteractivity` pair, same shape: hover tooltip,
+click-to-navigate (clicking a card, a pie slice, or its legend swatch all call `overviewNavigateTo`,
+which clicks the target nav button and, for Bill Issuance/DIFF DATES, the right sub-nav tab too).
+`loadOverview()` is called once from `showApp()` so the page has data the moment login/session-
+restore lands on it, and again from the nav click handler when the user returns to it.
+
+Registered as a new menu id: `"overview"` prepended to `MENU_IDS`/`MENU_LABELS` in `web/menu_
+access.py`. Existing saved per-role menu configs are unaffected by default (a role with a
+previously-customized list won't show it until an admin re-saves via the Menu Access panel and
+checks it - same trade-off already documented in that module's own docstring for any future menu
+addition); a fresh install or an unmodified role sees it immediately since `default_access()` always
+returns every `MENU_IDS` entry.
+
+RJ, follow-up: "i want the dashboard to be the first thing to open, and on first open to pre load
+the data, and an option to refresh." Overview was already the first page rendered (its `<section>`/
+nav button are the only ones marked `is-active` in the static HTML) and already pre-loaded its data
+on login/session-restore (`loadOverview()` from `showApp()`) - both were already in place from the
+initial build. Added: a `🔄 Refresh` button in the page header (`#overview-refresh-btn`) that re-
+calls `loadOverview()` on demand, disables itself and shows "Refreshing…" while in flight, and a
+`#overview-last-updated` timestamp next to it. A manual refresh no longer blanks the cards to a
+"Loading…" placeholder first (only the very first load does that) - it just swaps the numbers in
+place once the new data lands, so re-clicking Refresh doesn't flash the page empty.
+
+RJ, follow-up: "i like it to be grouped base on the menu." `OVERVIEW_CARDS` entries now carry a
+`group` field (the sidebar menu area each card belongs to), and `overviewRenderCards` renders one
+titled `.overview-group` section per distinct group, in first-appearance order, instead of one flat
+grid - so Bill Issuance Validator's Case 1/2/3 read as one "Bill Issuance Validator" section (each
+case's card label shortened to just "Case 1"/"Case 2"/"Case 3" since the group heading now carries
+the tool name) rather than 3 cards mixed flatly with DIFF DATES/Hierarchy/Bulk Checker/History.
+
+Also found and fixed while live-verifying this: Overview's own nav button and page were getting
+hidden by a stale Menu Access config saved before "overview" existed (see `web/menu_access.py`'s
+`ALWAYS_VISIBLE_MENU` - every role's saved config now always keeps it, both on load and on save) -
+this is what was actually causing "i want the dashboard to be the first page" to not take effect
+even after the page markup itself was already correct.
+
+RJ, follow-up: "i am more interested on the data not on the number of runs." Both Overview charts
+were plotting `script_kind_counts`/`script_trend` - how many times someone clicked Generate, a usage
+metric - not the actual backlog. Both now plot `stats.live` instead (the exact same live counts the
+cards already show, no backend change needed): the pie ("Open Items by Area") shows DIFF DATES
+Anomaly / Hierarchy Analysis / Bill Issuance Validator (its 3 cases summed) as a proportion of the
+whole; the bar ("Bill Issuance Validator — By Case") breaks that Bill Issuance slice down into Case
+1/2/3, since that's the one area with real internal structure worth a second look. `script_kind_
+counts`/`script_trend` are still returned by `/api/overview/stats` and still used by History's own
+page - just no longer charted on Overview. Bulk Checker and History itself stayed off both charts on
+purpose (their only available count - local search/script runs - is exactly the "number of runs"
+RJ said he didn't want charted); their exact numbers are still right there on their own cards.
+
 ## Case 2: CSV export now includes bill/status detail (2026-09-14, same day)
 
 RJ, verbatim: "for case 2, i need the bills and status to be included in the export, now it only
@@ -2155,6 +2241,577 @@ if a specific heavier query (Case 2, Hierarchy Analysis, Detect All) still needs
 New `tests/test_mssql.py` (7 tests, monkeypatched fake connection/cursor - no real DB needed)
 locks in that a `TimeoutError`/plain `OSError` during query execution now wraps as
 `ConnectionError_` with a helpful message, same as a genuine `pytds.Error`.
+
+## Incorrect Billing Period (new menu, 2026-09-23)
+
+RJ, verbatim, own SQL (RATE INCORRECT BILLING PERIOD):
+
+    select AN.ANOMALOUS_STATUS, rr.id_billing_period, cs.ID_OFFERED_SERVICE, an.ID_ANOMALOUS,
+           AN.ID_BILLING_SERVICE, ss.niss, an.last_billing_date, an.billing_date,
+           itb.id_item_to_bill, ITB.ID_BILLING_SERVICE, itb.status, rr.id_reading, rr.read_status,
+           rr.reading_type, rr.READY_USAGE, rr.READING_PREV_DATE, rr.READING_DATE, ss1.niss,
+           BS1.ID_BILLING_SERVICE
+    from GCCOM_ANOMALOUS an
+      join GCCOM_BILLING_SERVICE bs on bs.ID_BILLING_SERVICE = an.ID_BILLING_SERVICE
+      join GCCOM_CONTRACTED_SERVICE cs on cs.ID_CONTRACTED_SERVICE = bs.ID_CONTRACTED_SERVICE
+      join GCCOM_SECTOR_SUPPLY ss on ss.ID_SECTOR_SUPPLY = cs.ID_SECTOR_SUPPLY
+      left join GCCOM_ITEMS_TO_BILL itb on itb.ID_ITEM_TO_BILL = an.id_item_to_bill
+      left join GCCOM_READINGS_ITEMSTOBILL rit on rit.id_item_to_bill = itb.id_item_to_bill
+      left join GCGT_RE_READING rr on rr.ID_READING = rit.id_reading
+      left join GCCOM_SECTOR_SUPPLY ss1 on ss1.ID_SECTOR_SUPPLY = rr.ID_SECTOR_SUPPLY
+      left join GCCOM_CONTRACTED_SERVICE cs1 on cs1.id_Sector_SUPPLY = RR.ID_sECTOR_SUPPLY
+                AND RR.READING_DATE = CS1.END_DATE
+      LEFT JOIN GCCOM_BILLING_SERVICE BS1 ON BS1.ID_CONTRACTED_SERVICE = CS1.ID_CONTRACTED_SERVICE
+    where an.LAST_BILLING_DATE > an.BILLING_DATE
+      and ANOMALOUS_STATUS not in ('ESTAN00004', 'ESTAN00005', 'ESTAN00008', 'ESTAN00003');
+
+Finds open `GCCOM_ANOMALOUS` records whose `LAST_BILLING_DATE` has drifted past `BILLING_DATE`.
+Follow-up, same message: "Group it with id_offered_service, and can be filtered with ID_OFFERED_
+SERVICE description", and the correction script:
+
+    update GCCOM_ANOMALOUS SET UPDATE_DATE=GETDATE(), UPDATE_USER='RMA',
+    UPDATE_PROGRAM='RATE_INCORRECT_BILLPERIOD', ANOMALOUS_STATUS = 'ESTAN00005'
+    where ID_ANOMALOUS in ("ID_ANOMALOUS HERE") and ANOMALOUS_STATUS in ('ESTAN00001', 'ESTAN00009');
+
+"and can generate script base on the selected anomalies from the list only."
+
+**New module:** `app/core/incorrect_billing_period.py` - `build_detect_query()` reproduces RJ's
+join chain verbatim (only additions: a `GCCOM_PAYMENT_FORM.REFERENCE` LEFT JOIN for the account
+number, and `GCCOM_COMPANY_OFFERED_SERVICE.NAME_TYPE` for the offered-service description - same
+lookup table `bill_issuance_validator.py` already uses for this). Several of RJ's own column names
+collide once actually run (`AN`/`ITB`/`BS1` all have their own `ID_BILLING_SERVICE`; `SS`/`SS1` both
+have `NISS`) - each gets its own alias (`ANOMALY_BILLING_SERVICE`/`ITEM_BILLING_SERVICE`/`NEXT_
+BILLING_SERVICE`, `NISS`/`NISS_AT_READING`) so this app's `dict(zip(columns, row))` row-shaping
+doesn't silently collapse one onto another. `build_correction_script(anomaly_ids, ...)` emits RJ's
+exact UPDATE as ONE batched statement over an analyst-picked `IN (...)` list - same one-statement
+shape as `bill_issuance_validator.build_release_notice_script`, including RJ's own fixed
+`UPDATE_PROGRAM`/`UPDATE_USER` template as the real (not `JIRAXXXX`-placeholder) defaults, same
+precedent as that function's own `RELEASE_SCRIPT_DEFAULT_PROGRAM`/`USER`.
+
+**New web routes:** `POST /api/incorrect-billing-period/detect` (stateless, re-runs fresh every
+call; groups rows by `ID_OFFERED_SERVICE` via a new `_group_rows_by_offered_service` in
+`web/server.py`, same "one function per grouping" convention as Case 2's own `_case2_group_rows_by_
+account`) and `POST /api/incorrect-billing-period/generate` (re-runs detect fresh, keeps only the
+rows whose `ID_ANOMALOUS` was in the analyst's selection - RJ: "generate script base on the selected
+anomalies from the list only" - there is deliberately no "nothing selected = act on everything"
+default here, unlike Case 2's own generate route).
+
+**New menu:** `"incorrectbillingperiod"` added to `MENU_IDS`/`MENU_LABELS` in `web/menu_access.py`
+and a new nav item/page in `index.html`, between Bill Issuance Validator and Bulk Checker. One flat
+table (`#ibp-table`) with a group-divider row (`.ibp-group-row`) inserted wherever the offered
+service changes - same select-all-visible/search/filter machinery the Detect All table already uses,
+just without a second nested table - plus an offered-service filter dropdown (RJ's own "filtered
+with ID_OFFERED_SERVICE description" ask) and the usual checkbox-select → Generate → Copy/Download
+script flow. Existing saved Menu Access configs won't show this new menu automatically (same
+documented trade-off `ALWAYS_VISIBLE_MENU`'s own comment already covers for a *new* menu id - this
+one isn't force-included since, unlike Overview, it isn't the app's landing page) - an admin may
+need to re-check it in Settings → Menu Access the first time.
+
+## Futuristic full-app redesign (2026-09-23)
+
+RJ, on Overview: "the overview does not look good, make it more futuristic, use graphs and pie
+cjart that are very moder like half moon loading, make it look futuristic, the whole theme of this
+application" — then picked **"Full app-wide redesign"** over an Overview-only or Overview+shared-
+tokens scope, so this round is a CSS-token/shared-component reskin rather than a one-page change.
+
+**Why tokens+components, not a per-page rewrite**: nearly every page is already built from the same
+handful of classes (`.card`, `.btn`, `.nav-item`, `.data-grid`, `.sidebar`). Changing those classes
+and the CSS custom properties they read from cascades the new look to every existing and future
+page for a small, auditable diff in `web/static/styles.css` — the alternative (touching each page's
+own markup) would have meant re-doing this for Workspace, Script, History, Dashboard, DIFF DATES,
+Hierarchy, Bill Issuance, Bulk Checker, and Incorrect Billing Period individually.
+
+**Token additions** (`:root` and `:root[data-theme="dark"]`): `--accent-2` (a cyan complement to
+the existing indigo `--accent`), `--gradient-accent` (indigo→cyan), `--glow-accent` (a soft outer
+glow used on hover/active states). Dark mode also got a richer "deep space" palette (`--content-bg:
+#0c0e17`, `--card-bg: #161829`, etc., replacing the old flat dark greys) plus a radial-gradient
+atmosphere glow behind `.content` in dark mode only (light mode stays flat/clean on purpose — the
+glow effect reads as murky rather than futuristic on a white background).
+
+**Component changes**: `.card` gets a thin gradient bar across its top edge and a soft glow on
+hover; `.btn-primary` fills with the indigo→cyan gradient instead of a flat color; `.nav-item.is-
+active` gets a gradient wash plus a glowing left-edge bar instead of a flat highlight; `.sidebar`
+gets the same layered radial-gradient glow treatment the login screen already had; `.data-grid
+thead th` gets a subtle gradient tint. One bug caught and fixed before it shipped: an early draft
+added `overflow: hidden` to `.card` to keep the new top gradient bar's corners rounded, but
+`.dropdown-menu` (e.g. Workspace's "Recent" query list) is an absolutely-positioned child that
+pops *outside* its `.card`'s bounds — that would have clipped every dropdown living inside a card.
+Fixed by rounding only the gradient bar's own top corners instead of clipping the whole card;
+re-verified live afterward that the Workspace "Recent" dropdown still renders unclipped.
+
+**The literal "half moon" ask**: added `drawGaugeChart()` to `web/static/app.js` (right after the
+existing `drawPieChart`/`_bindPieInteractivity` pair, same `options.colors`/`options.onSliceClick`
+contract, so it's a drop-in swap) — a speedometer-style ring spanning only the top 180°, each
+category drawn as a rounded-cap arc segment sized to its share of the total, with the running total
+printed in the center. Its own `_bindGaugeInteractivity` does ring-band hit-testing (distance from
+center within half the stroke width, not "anywhere inside the radius" like the full-pie version)
+so hover/click still work per segment. Overview's `overviewRenderPie()` now calls `drawGaugeChart`
+instead of `drawPieChart` for the "Open Items by Area" chart; the `#overview-pie-canvas` element's
+height dropped from 240 to 150 to match the half-circle's aspect ratio instead of wasting the
+bottom half of a square canvas on empty space.
+
+**Live-verified** (browser, both themes): Overview's gauge renders correctly in light and dark
+mode with the real tunnel DB's live counts (963 total open items across DIFF DATES/Hierarchy/Bill
+Issuance, matching the cards' own numbers exactly); Workspace's card/button/nav styling picked up
+the new look with no layout breakage; the dropdown-clipping fix above was confirmed live, not just
+reasoned about.
+
+**Not done in this round**: no other chart type (bar/line/scatter/histogram/boxplot) was converted
+to the gauge style — those stay as-is since RJ's ask was specifically about Overview's own pie/
+trend charts. Revisit if the futuristic treatment should extend to Dashboard's or DIFF DATES
+Detect All's charts too.
+
+## Reading Validation/Modif (new menu, 2026-09-23)
+
+RJ, verbatim, own SQL (parameter placeholders are RJ's own `:PARAMn` bind-
+style syntax - `:PARAM0` = the sector supply id, the other four are an
+optional measuring-point/device narrowing pair each):
+
+    SELECT
+        1 AS ind_detail, r.id_sector_supply, r.id_measuring_point, r.id_reading,
+        r.id_device, MOD.model_name, d.serial_num AS company_meter_num,
+        rtype.description AS reading_type, r.reading_prev_date, r.reading_date,
+        r.reading_time_ts, r.usage_type AS usage_code, consum.name_type AS usage_name,
+        st.description AS read_status, r.prev_value, r.VALUE AS reading,
+        u.name_type AS reading_unit, cu.name_type AS corrected_unit,
+        bu.name_type AS bill_unit, r.reading_usage AS metered_usage, r.corrected_usage,
+        r.ready_usage AS bill_ready_usage, r.ind_estimate, r.ind_negative_usage,
+        bp.description as billing_period, ss.niss, ss.id_sector_supply, ss.id_supply,
+        COALESCE(..., R.UPDATE_USER) AS UPDATE_USER,
+        (a correlated subquery against OUC_COMMON_ADMIN.GCCOM_READING_FACTOR) AS POWER_FACTOR,
+        CASE WHEN r.ID_REBILLING_ACTIVITY IS NOT NULL THEN 1 ELSE 0 END AS IND_MODREB,
+        rr.name as reader_name, rst.NAME_TYPE as reading_origin, e.name as digitizer
+    FROM gcgt_re_reading r
+    inner join gcgt_re_reading_type rtype on rtype.cod_develop = r.reading_type
+    inner join gccom_consum_type consum on consum.cod_develop = r.usage_type
+    inner join gcgt_re_read_status st on st.cod_develop = r.read_status
+    left join GCGT_RE_READING_SOURCE_TYPE rst on rst.COD_DEVELOP = r.READING_SOURCE
+    left join gccom_sector_supply ss on ss.id_sector_supply = r.id_sector_supply
+    left join gcgt_me_device d on d.id_device = r.id_device
+    left join gcgt_me_device_model MOD on MOD.id_model = d.id_model
+    left join gccom_units u/cu/bu on ... (reading/corrected/bill unit lookups)
+    left join gccom_billing_period bp on bp.id_billing_period = r.ID_BILLING_PERIOD
+    left join gcgt_re_route rt on rt.id_route = r.ID_ROUTE
+    left join gcgt_re_reader rr on rr.ID_READER = rt.ID_READER
+    left join gcxs_users_shadow usd on CONVERT(varchar(10), usd.USER_ID) = r.UPDATE_USER
+    left join (select ... max(reading_date) ... group by id_device) t on t.id_device = r.id_device
+    left join gccb_employee e on e.id_employee_cb = r.digitizer
+    WHERE (r.id_sector_supply = :PARAM0)
+      AND ((0 = :PARAM1) OR (r.id_measuring_point = :PARAM2))
+      AND ((0 = :PARAM3) OR (r.id_device = :PARAM4))
+      AND (consum.ind_load_curve is null or consum.ind_load_curve = 0)
+    ORDER BY r.reading_date DESC, T.max_date DESC, r.reading_time_ts desc, d.comp_serial_num desc, r.usage_type
+
+(see `app/core/reading_validation.py`'s own module docstring for the full,
+un-abbreviated version - the README copy above is trimmed for length.)
+
+Every reading recorded for one sector supply - "we will filter primarily
+by sector supply or GCCOM_SECTOR_SUPPLY.NISS, it will show all the
+readings. Add filter on billing period, reading date from and to,
+reading_type, reading status, consumption types" - plus, separately:
+"we will add a search by account, which will lead to create 2 tabs, we
+expect to have 1 or 2 niss for this, either water or electricity when
+searching by account".
+
+**New module:** `app/core/reading_validation.py` - `build_readings_query()`
+reproduces RJ's join chain, the UPDATE_USER COALESCE lookup, and the
+correlated POWER_FACTOR subquery verbatim (including that subquery's own
+odd correlated reference to the outer alias inside its inner MAX() -
+left as-is rather than "corrected", same standing rule this app follows
+for every analyst-supplied query). Two changes from RJ's original, both
+mechanical: (1) RJ's `:PARAMn` bind-style optional filters become this
+app's usual "only add the AND clause when a value is actually given"
+convention, since this app builds inline literal SQL text rather than
+binding parameters; (2) `ss.id_sector_supply` is aliased `SS_ID_SECTOR_
+SUPPLY` - RJ's own SELECT list has both it and `r.id_sector_supply`
+unaliased, which is harmless in SSMS but would silently collapse into
+one column under this app's `dict(zip(columns, row))` row-shaping (same
+fix already applied to Incorrect Billing Period's own duplicate ID_
+BILLING_SERVICE/NISS columns). `build_account_niss_query()` is new (not
+part of RJ's pasted SQL) - the account -> NISS lookup behind "search by
+account", walking PAYMENT_FORM -> CONTRACTED_SERVICE -> SECTOR_SUPPLY
+forward from an account (same chain date_anomaly.py's own build_niss_
+account_query already walks backward from a NISS), returning one row per
+distinct sector supply with its offered-service description so each
+tab can be labeled "Water"/"Electricity" instead of a bare service code.
+
+**New web routes:** `POST /api/reading-validation/detect` (accepts
+either `id_sector_supply` directly or a `niss` to resolve first via a
+small lookup query - same "generic lookup, no core builder needed"
+convention as `bill_issuance_case3_billing_periods`; optional `id_
+measuring_point`/`id_device` narrow further, matching RJ's own :PARAM1-4)
+and `POST /api/reading-validation/search-account` (account -> the
+supplies for its own tabs, deduped by ID_SECTOR_SUPPLY). Both `require_
+login` only - read-only Phase 1.
+
+**New menu:** `"readingvalidation"` in `MENU_IDS`/`MENU_LABELS`, nav item
+between Hierarchy Analysis and Bill Issuance Validator. Billing period,
+reading type, read status, and consumption type filters are populated
+dynamically from the distinct values in whatever the detect call
+returned (same convention as Incorrect Billing Period's offered-service
+filter) and applied **client-side**, along with the reading-date-range
+and free-text search, rather than as extra server round-trips - one
+supply's own reading history is never large enough to need that, and it
+keeps every filter change instant. Columns are click-to-sort, reusing
+`hierWireSortableHeaders`/`_hierCompareValues` as-is (both were already
+written generically despite their `hier`-prefixed names).
+
+**Phase 1 scope only** (RJ: "this is the main query for now") - display,
+filter, sort, CSV export. No UPDATE/MODIF capability yet despite the
+menu's own name; that's a deliberately separate, later round, same
+incremental-rounds pattern every other menu in this app was built in.
+
+### English-only descriptions, detail toggle, zebra striping, reading chain (2026-09-23)
+
+RJ, verbatim: "try to show always english description, you can use table
+GCTS_DICTIONARY with LOCALE = 'EN', also for reading validation, add
+option to show all details or only important details, initially to show
+only important details ... then use alternating colors for each row
+(again i want modern design), each reading is being referenced by
+id_reading and id_last_reading, so the id_reading of a row, is the
+id_last reading of the next row, i want you to show this relation, by
+hilighting the reference if a row is clicked, same with the reading
+date, is referencing with a prev reading date, and value reference from
+a prev_value of the previous row".
+
+**English-only descriptions.** Every `/*i18n*/`-marked column in RJ's
+original query (`reading_type`, `usage_name`, `read_status`, `reading_
+unit`, `corrected_unit`, `bill_unit`, `billing_period`) now `LEFT JOIN`s
+`GCTS_DICTIONARY` filtered to `LOCALE = 'EN'`, same pattern `bulk_
+checker.build_bill_detail_sql` already established (`d.id = <col>.
+NAME_TYPE_XI18N AND LOCALE = 'EN'` -> `d.TEXT`). The exact XI18N
+companion column on each lookup table was confirmed **live**, via this
+app's own Workspace page (`INFORMATION_SCHEMA.COLUMNS`) against the
+tunnel DB - not assumed - since only two of the seven
+(`GCCOM_CONSUM_TYPE.NAME_TYPE_XI18N`, `GCCOM_BILLING_PERIOD.PERIOD_NAME_
+XI18N`) were already documented in `docs/db_schema_reference.md`. Every
+join is a `LEFT JOIN` (never `INNER`) and every selected column is
+`COALESCE(dict.text, original)`, so a reading with no matching
+`GCTS_DICTIONARY` row still shows its native-locale text instead of
+going blank. One wrinkle: `GCCOM_BILLING_PERIOD` has no `DESCRIPTION_
+XI18N` companion at all, only `PERIOD_NAME_XI18N` - confirmed live - so
+`billing_period`'s English lookup is keyed off that column even though
+the value actually selected is still `bp.description`.
+
+**Reading chain.** `r.id_last_reading` (a real, self-referencing FK -
+`GCGT_RE_READING.ID_LAST_READING -> GCGT_RE_READING.ID_READING`,
+confirmed via `docs/db_schema_reference.md`) is now selected, purely so
+the frontend can compute the chain client-side; it was not in RJ's
+original SELECT list at all and is never shown as its own column.
+
+**Detail level: important/medium/full (revised same day, 2nd round).**
+RJ's first ask was a two-way "important details only vs all details"
+toggle; a follow-up message replaced it with three tiers: "we will have
+3 option for the detail, the full option, medium option (what we
+display now by defualt) and important detail which will be: [RJ's own,
+smaller, explicit column list]". `web/static/app.js`'s `RV_COLUMN_DEFS`
+now tags every column with a `tier` (`"important"`, `"medium"`, or
+`"full"`) instead of a boolean - a column shows at its own tier and
+every wider one, so "important" is a strict subset of "medium", which is
+a strict subset of "full". "medium" is exactly the column set this page
+already defaulted to before this round (unchanged default, per RJ's own
+"what we display now by defualt"); "important" is RJ's new, smaller,
+verbatim-ordered list (niss, id_reading, company_meter_num, reading_
+type, reading_prev_date, reading_date, usage_name, read_status, prev_
+value, reading, metered_usage, corrected_usage, bill_ready_usage, ind_
+estimate, billing_period); "full" is everything, including the columns
+that were "all details"-only under the old two-way toggle (reading_
+time_ts, update_user, power_factor, ind_modreb, reader_name, reading_
+origin, digitizer). The three-way control is now a radio group ("Detail:
+Important / Medium / Full") instead of a checkbox. The table header
+itself is rebuilt on every render (`rvRenderTableHeader`) rather than
+static HTML, since the column set changes with the tier - same "rebuild
++ rewire each render" approach Bulk Checker's own dynamic-column tables
+already use, instead of the old wire-once `hierWireSortableHeaders` call
+this table used before it had a variable column set. CSV export also
+now follows whichever tier is currently showing.
+
+**Zebra striping.** Plain CSS `:nth-child(even)` on `#rv-table tbody`,
+scoped to that one table id (`styles.css`) so no other `.data-grid` in
+the app is affected, with a dark-theme variant alongside it (same
+scoping convention Case 2's own `#biss2-table` redesign used).
+
+**Click-to-highlight chain, with distinct colors per RJ's follow-up**
+("change the row color for the referencing rows, and a different color
+for readings and dates"). Clicking a row (`rvApplyChainHighlight` in
+app.js) looks up, via an `id_reading -> row` map built on every load
+(`rvRowByIdReading`): the row this one chains *from* (whose `id_reading`
+equals the clicked row's `id_last_reading`) and the row that chains
+*from* this one (whose `id_last_reading` equals the clicked row's
+`id_reading`). Three separate colors, chosen to read distinctly against
+each other and against zebra striping (`styles.css`):
+- the clicked row itself (`rv-row-selected`) - indigo/accent, the app's
+  usual selection color;
+- the referencing/referenced row on the other end of the chain
+  (`rv-row-linked`) - violet, deliberately a different hue from both the
+  selection color and the two cell colors below;
+- the `reading_date`/`reading_prev_date` cell pair (`rv-cell-linked-
+  date`) - amber;
+- the `reading`/`prev_value` cell pair (`rv-cell-linked-value`) - teal/
+  green.
+
+Clicking the same row again clears the highlight.
+
+**Two reference modes (4th round).** RJ: "add a new referencing mode,
+the first mode is what we have now which is by id reading and id_last
+reading, the new referencing mode is by row order, the idea is the
+first row is referencing to its lower row that it is following, for
+example row 1 reading prev date and prev value, references row 2
+reading date and value, make this a toggle a radio button ... by
+default will be the id reading and id_last reading mode". A second
+radio group ("Reference mode: ID Reading / ID Last Reading" vs "Row
+Order") now sits above the table, defaulting to the original FK-based
+mode. `rvFindChainRows(selRow)` in app.js picks how the linked "prev"/
+"next" row is found:
+- **ID Reading / ID Last Reading** (default, unchanged): the real
+  `ID_READING`/`ID_LAST_READING` chain, via `rvRowByIdReading` - a data
+  relationship, independent of how the table happens to be sorted or
+  filtered.
+- **Row Order**: purely positional - whichever `<tr>` is physically the
+  next sibling below the clicked row *in the currently rendered table*
+  is treated as the row the clicked row's `reading_prev_date`/`prev_
+  value` refer to, and the row directly above is treated as the row
+  that refers to the clicked one. This is a plain DOM-sibling lookup
+  (`selRow.nextElementSibling`/`previousElementSibling`), not a data
+  lookup, so it automatically respects whatever sort or filter is
+  currently active, and needs no server round-trip.
+
+Both modes share the exact same cell-highlighting logic once `prevTr`/
+`nextTr` are found - only how those two rows are located differs.
+
+### Inline editing + Generate Update Script (2026-09-25)
+
+RJ: "on the same reading update menu, I want to be able to update the
+following columns reading prev date, reading date, reading_type (make
+it as dropdown, and in the update script you will use the id not the
+description), prev_value, value, reading_usage, corrected_usage, ready
+usage. Only this columns. Any update in the dates and reading values
+(the one we have referencing) should reflect on the referenced value
+... once the values are update, we will generate an update script for
+GCGT_RE_READING, with the updated values, in the where clause, we need
+to put the original values."
+
+**Editable columns.** Exactly the eight RJ named - `app/core/reading_
+validation.py`'s `EDITABLE_COLUMNS` maps each UI column key to the real
+GCGT_RE_READING column name and a coercion "kind":
+
+| UI column        | DB column          | kind     |
+|-------------------|---------------------|----------|
+| reading_prev_date | READING_PREV_DATE   | datetime |
+| reading_date      | READING_DATE        | datetime |
+| reading_type      | READING_TYPE        | code     |
+| prev_value        | PREV_VALUE          | decimal  |
+| reading           | VALUE               | decimal  |
+| metered_usage     | READING_USAGE       | decimal  |
+| corrected_usage   | CORRECTED_USAGE     | decimal  |
+| bill_ready_usage  | READY_USAGE         | decimal  |
+
+Every other column stays read-only. Editable cells get a light-blue
+background (`rv-cell-editable` in styles.css) so they're visually
+distinct before any edit is made.
+
+**Reading Type is a dropdown, keyed by code, not description.**
+`build_readings_query` now also selects `r.reading_type AS reading_
+type_code` (the raw code) alongside the existing translated `reading_
+type` description column - the dropdown (populated once per session
+from the new `build_reading_types_query()` / `GET /api/reading-
+validation/reading-types`) is keyed by that raw code, and it's the raw
+code that travels into the diff/update script, per RJ's own "use the id
+not the description". Selecting a new option also updates the row's
+display description in-memory so the two stay in sync visually.
+
+**Cascading edits.** Only the four columns RJ called "the one we have
+referencing" cascade - `reading_prev_date`, `reading_date`, `prev_
+value`, `reading` (matching `app/core/reading_validation.py`'s
+`CASCADING_COLUMNS`); `reading_type` and the three usage columns never
+cascade. `rvCascadeEdit` in app.js reuses `rvFindChainRows` - the exact
+same function the click-to-highlight feature already uses - so a
+cascade follows whichever **reference mode** (ID Reading/ID Last
+Reading, or Row Order) is currently selected, matching both of RJ's own
+examples ("if by row ... it should affect the upper row" / "by
+reference of id_last reading ... the next upper row should have..."):
+editing a row's `reading_prev_date`/`prev_value` updates the linked
+row's `reading_date`/`reading` to match, and editing a row's `reading_
+date`/`reading` updates the linked row's `reading_prev_date`/`prev_
+value` to match - a single hop, not a chain of further cascades.
+(`rvFindChainRows` itself was generalized in this round to read the
+id_reading off whichever row element is passed to it, rather than only
+the globally-clicked one, so it could be reused for editing any row,
+not just the currently-highlighted one.)
+
+**Dirty tracking.** `rvOriginalByIdReading` snapshots every editable
+column's value per row at load time; `rvDirtyIds` is recomputed after
+every edit by comparing current vs. snapshot (a cell edited back to its
+original value un-marks the row). A dirty row gets a left accent bar and
+its editable cells get a warm highlight; a "N row(s) with pending edits"
+line and the Generate button track `rvDirtyIds.size`. "Reset edits"
+restores every row to its snapshot.
+
+**Generate Update Script.** `POST /api/reading-validation/generate-
+script` (require_editor, same permission tier as the generic `/api/
+script/generate`) takes the dirty rows' `{id_reading, edits: [{column,
+old_value, new_value}]}` and builds `diff_engine.RowChange`/`CellChange`
+objects directly (Reading Validation keeps its own separate result set
+from the last `/detect` call, not the single shared Workspace
+`QueryState` the generic script route depends on, so this builds
+`RowChange`s from what the frontend posts instead of reusing that
+session-bound endpoint) - then calls the SAME `script_generator.
+generate_update_script`/`generate_rollback_script` every other menu's
+"Generate Script" button already uses. That gets RJ's own requirement
+for free: `build_update_statements`' WHERE clause already guards every
+changed column on its **original** value (`_where_predicate_with_
+changed_columns`), on top of the `ID_READING` key - exactly "in the
+where clause, we need to put the original values" - and stamps the
+usual `update_program`/`update_date`/`update_user` audit columns. Each
+value is coerced server-side via `reading_validation.coerce_edit_value`
+(decimal/datetime/raw-code, mirroring `diff_engine.coerce_edited_value`
+but scoped to this page's fixed, known column set) before being handed
+to `sql_format.format_sql_literal`, so numbers and dates come out of the
+generated script correctly typed (unquoted numbers, `'YYYY-MM-DD ...'`
+date literals) rather than as quoted strings. Generated scripts are also
+recorded in Script History (`table_name="GCGT_RE_READING"`), same as
+every other script-generating menu.
+
+### Modified-cell highlighting, date display, auto-calculated usage (2026-09-25 follow-up)
+
+RJ: "make the values that are updated to be know, maybe make it bold and
+change the color to mark it as modified. Also the dates, remove the
+:0000, then the corrected usage, reading usage and ready usage should
+automatically be updated as well if you change the value. for reading
+usage, it is equal to the value - prev_value, for [corrected usage and
+ready usage] it is equal to the value - prev value, multiplied by the
+multiplier column in gcgt_me_usage_type meter using the id_device of
+the re_reading and the usage_type."
+
+**Per-cell modified marker.** `rv-row-dirty` already tinted a whole row
+that had ANY pending edit; this round adds a per-CELL marker
+(`rv-edit-dirty` in styles.css, set in `rvRenderTable`/`rvRenderCell`)
+that bolds and re-colors only the specific input/select whose value
+differs from `rvOriginalByIdReading`'s snapshot for that column - so on
+a dirty row you can tell at a glance exactly which field(s) changed, not
+just that the row has some edit somewhere.
+
+**Dates display without the midnight time-of-day.** Every `reading_
+prev_date`/`reading_date` in this app's real data is a midnight
+timestamp, so `app.js`'s new `rvStripMidnightTime` strips a trailing
+`" 00:00:00"` off both columns once, at row-ingestion time (`rvSetRows`)
+- not just at render time - so the stripped string is also what ends up
+in the original-value snapshot, the cascade, and what's ultimately sent
+to `/api/reading-validation/generate-script` as `old_value`/`new_value`.
+A row with a genuine non-midnight time (none seen in this app's own
+data) is left untouched, since the strip only matches an exact
+`" 00:00:00"` suffix; `coerce_edit_value`'s existing date-only fallback
+format already parses the stripped `"YYYY-MM-DD"` string back correctly
+server-side, no backend change needed for this part.
+
+**Usage multiplier.** `build_readings_query` now also LEFT JOINs
+`GCGT_ME_USAGE_TYPE_METER` (RJ's own "gcgt_me_usage_type meter" -
+live-confirmed via this app's own Workspace `INFORMATION_SCHEMA.COLUMNS`
+query against the tunnel DB, 2026-09-25) on `(ID_DEVICE, COD_USAGE_TYPE)`
+matched to the reading's own `id_device`/`usage_type`, selecting its
+`MULTIPLIER` column as `usage_multiplier`. Live-confirmed 1:1 (no
+fan-out) against several real readings before wiring it in.
+
+**Auto-calculated usage columns.** `app.js`'s `rvRecalcUsage(row)`
+recomputes all three usage columns from the row's current `reading`/
+`prev_value`/`usage_multiplier` whenever `reading` or `prev_value`
+changes - by direct edit (the table's `change` listener) or by cascade
+propagation onto a linked row (`rvCascadeEdit`), matching RJ's "should
+automatically be updated as well if you change the value" for BOTH
+paths:
+- `metered_usage = reading - prev_value`
+- `corrected_usage = bill_ready_usage = (reading - prev_value) * usage_multiplier`
+
+A missing/non-numeric multiplier falls back to `1` (no scaling) rather
+than blanking the usage columns. The three usage columns stay editable
+by hand too (RJ never asked to lock them) - a manual edit simply gets
+overwritten the next time `reading`/`prev_value` changes again, same as
+any other cascade-driven field.
+
+## TNB CYCLE/DISC Analysis (2026-09-25)
+
+RJ: "display all re_reading, which have a cycle reading and a
+disconnection reading having the same reading date and one of them is in
+status Terminated not billed. this will be 1 row grouped by id_sector
+supply ... NISS, BILLING PERIOD IN WORDS, details of cycle ... now same
+columns for Disconnection reading. Add the filters by billing period and
+niss".
+
+- **Query:** `app/core/tnb_cycle_disc.py` - `build_tnb_cycle_disc_query()`.
+  Codes live-confirmed against the tunnel DB: Cycle = `TIPTL00003`,
+  Disconnection = `TIPTL00010`, Terminated Not Billed = `8000STSRED`.
+- **Shape:** one row per cycle/disconnection pair, cycle columns (`c_*`)
+  and disconnection columns (`d_*`) side by side: ID Reading, Reading
+  Type, Prev. Date, Reading Date, Prev. Value, Value, Reading Usage,
+  Corrected Usage, Ready Usage, Read Status. Headline columns: NISS,
+  Billing Period (English, via GCTS_DICTIONARY), Usage.
+- **Ready usage condition (added same day):** at least one of the cycle
+  or disconnection must have a non-zero READY_USAGE (NULL counts as
+  zero); the partner may be zero. Live: 3,773 pairs across 3,679
+  supplies, scan ~13s.
+- **In Contract indicator:** `in_contract` = 1 when any non-cancelled
+  (`STATUS <> 'ESTSC00005'`) row in
+  `OUC_COMMON_ADMIN.GCCOM_CONTRACTED_SERVICE` for the same
+  `ID_SECTOR_SUPPLY` has `FROM_DATE <= reading_date` and `END_DATE`
+  empty or `>= reading_date`. Shown as a Yes/No column with its own
+  filter. Live: 53 of the 3,773 pairs are outside any contract.
+- **Matching:** same `id_sector_supply` + same `reading_date` + same
+  `usage_type`. usage_type stops multi-register electricity supplies
+  (kWh + kW demand) from cross-joining every cycle with every
+  disconnection. Live: 5,567 pairs across 5,368 supplies, so a few
+  supplies have more than one row (several registers, or the pattern on
+  another date).
+- **Performance:** a `tnb` CTE first narrows to the (supply, date,
+  usage_type) keys with a TNB cycle/disconnection reading, then joins
+  both readings: about 23s live, down from about 46s for the naive
+  self-join.
+- **Route:** `POST /api/tnb-cycle-disc/detect` (require_login, read-only)
+  returns `{rows, count, supply_count}`.
+- **Page:** menu id `tnbcycledisc`. Scan once, then filter client-side by
+  Billing Period (newest first; matches the row's period or either
+  side's own period), NISS (partial match) and "TNB side" (either /
+  cycle / disconnection / both). Sortable columns, CSV export of the
+  filtered rows, and a red status cell on whichever side is TNB.
+- **Menu Access fix (same day):** after the first restart the page didn't
+  show. RJ's saved Menu Access config predated the new id, and the old
+  rule kept unknown ids hidden. `web/menu_access.py` now saves
+  `known_ids` alongside each config: any page added after the last save
+  appears for every role automatically, while a page the admin saw and
+  unticked stays hidden. Configs saved before this change are treated as
+  knowing every id except those in `MENU_IDS_ADDED_BEFORE_TRACKING`.
+
+## Wrong Stuck in Hierarchy ITB (2026-09-25)
+
+RJ's "HIERARCHY BUT BILLED PRIMARY" query. First built one period per
+scan, then changed the same day ("list all the items without providing
+the billing period, so initial search should not have any param"): one
+scan now covers every period, and each row is still checked against its
+own period because the billed primary and the service-190 item are
+joined on `ID_BILLING_PERIOD = itb.ID_BILLING_PERIOD` instead of a
+hard-coded id.
+
+- **What it finds:** secondary items to bill still held in hierarchy
+  (`STTOBILL09`) whose measuring point's main MP (`ID_MAIN_MP`) belongs to
+  a supply whose item in the same period is already billed
+  (`STTOBILL07`). Contract status limited to Active / Pending termination
+  / Suspended (`ESTSC00002/3/7`) on both sides, exactly as RJ wrote it.
+  The account's offered-service-190 item for the same period is shown
+  alongside (left join, may be empty).
+- **Query:** `app/core/wrong_stuck_hierarchy.py`. Mechanical changes from
+  RJ's text: the period is a parameter (used in all 3 places), duplicate
+  output names aliased (`ID_ITEM_TO_BILL_190`, `STATUS_190`), and the
+  `ID_MAIN_MP IN (subquery)` is a join to a `DISTINCT` CTE of the same
+  subquery - same rows, written that way because the literal version
+  ran past the 120s timeout on the first live try.
+- **Route:** `POST /api/wrong-stuck-hierarchy/detect` - no parameters
+  needed; optional `{id_billing_period}` narrows to one period.
+- **Page:** menu id `wrongstuckhierarchy`. Scan (no inputs), then filter
+  client-side by billing period (newest first, with row counts), search
+  (account / NISS / ITB id), main MP, and service-190 ITB status
+  (including "(none)"). Sortable columns, CSV export.
+- **Menu Access:** legacy saved configs (no `known_ids`) are now upgraded
+  in place on first load, so pages added after this one appear without
+  touching `MENU_IDS_ADDED_BEFORE_TRACKING` again.
 
 ## Security note on stored credentials
 

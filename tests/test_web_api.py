@@ -3693,6 +3693,563 @@ def test_dashboard_trend_filters_by_table(client, monkeypatch):
     assert resp.json()["points"] == []
 
 
+# ---------------- Overview (home dashboard aggregating every menu) ----
+
+def test_overview_stats_requires_login(client):
+    resp = client.get("/api/overview/stats")
+    assert resp.status_code == 401
+
+
+def test_overview_stats_live_counts_and_shape(client, monkeypatch):
+    """One fake QueryResult, reused for every live query the route fires -
+    dateanomaly/hierarchy/case1/case3 only care about row count, and its
+    columns (ID_PAYMENT_FORM/REFERENCE/TARGET_PERIOD/ACCOUNT_HAS_ISSUE)
+    are exactly what _case2_group_rows_by_account needs for case2, so one
+    fixture covers all five live areas: 2 accounts (100 has an open
+    issue via 2 rows, 200 is complete), so case2's "needs action" count
+    should be 1, and every row-count area should be 3."""
+    import web.server as server_mod
+
+    fake_result = QueryResult(
+        columns=["ID_PAYMENT_FORM", "REFERENCE", "TARGET_PERIOD", "ACCOUNT_HAS_ISSUE"],
+        rows=[["100", "REF1", "202601", 1], ["100", "REF1", "202601", 1], ["200", "REF2", "202602", 0]],
+        elapsed_ms=1.0, source_table="x", source_schema="dbo",
+    )
+    monkeypatch.setattr(server_mod.mssql, "run_query", lambda conn, sql: fake_result)
+    _login(client)
+
+    resp = client.get("/api/overview/stats")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_connection"] is True
+    assert body["live"] == {
+        "dateanomaly": 3, "hierarchy": 3,
+        "billissuance_case1": 6, "billissuance_case2": 1, "billissuance_case3": 3,
+    }
+    assert body["bulk_checker_search_count"] == 0
+    assert body["script_total"] == 0
+    assert body["script_kind_counts"] == {}
+    assert len(body["script_trend"]) == 14
+
+
+def test_overview_stats_degrades_gracefully_when_live_queries_fail(client, monkeypatch):
+    """Each live area is wrapped in its own try/except in the route - one
+    area failing (or all of them) must not blank the whole response."""
+    import web.server as server_mod
+
+    def _boom(conn, sql):
+        raise RuntimeError("tunnel down")
+
+    monkeypatch.setattr(server_mod.mssql, "run_query", _boom)
+    _login(client)
+
+    resp = client.get("/api/overview/stats")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_connection"] is True
+    assert body["live"] == {
+        "dateanomaly": None, "hierarchy": None,
+        "billissuance_case1": None, "billissuance_case2": None, "billissuance_case3": None,
+    }
+
+
+def test_overview_stats_script_kind_counts_and_trend(client, monkeypatch):
+    import web.server as server_mod
+    import app.db.script_history as script_history
+
+    monkeypatch.setattr(server_mod.mssql, "run_query", lambda conn, sql: QueryResult(
+        columns=[], rows=[], elapsed_ms=1.0, source_table="x", source_schema="dbo",
+    ))
+    _login(client)
+    config = server_mod.load_config()
+    script_history.record_script(config.internal_db_path, "admin", script_history.KIND_UPDATE, "dbo", "T1", "ScriptGen", 1, 0, "UPDATE T1 SET x=1;")
+    script_history.record_script(config.internal_db_path, "admin", script_history.KIND_BILL_ISSUANCE, "dbo", "T2", "ScriptGen", 2, 0, "UPDATE T2 SET y=1;")
+
+    resp = client.get("/api/overview/stats")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["script_total"] == 2
+    assert body["script_kind_counts"] == {"Workspace Update": 1, "Bill Issuance": 1}
+    from datetime import datetime, timezone
+    assert body["script_trend"][-1]["date"] == datetime.now(timezone.utc).date().isoformat()
+    assert body["script_trend"][-1]["count"] == 2
+
+
+# ---------------- Incorrect Billing Period ----------------
+_IBP_COLS = [
+    "ID_ANOMALOUS", "ANOMALOUS_STATUS", "ID_OFFERED_SERVICE", "OFFERED_SERVICE_DESC",
+    "ACCOUNT", "NISS", "LAST_BILLING_DATE", "BILLING_DATE", "ID_BILLING_PERIOD",
+    "ID_ITEM_TO_BILL", "ITEM_STATUS",
+]
+_IBP_ROW_RATE_1 = [101, "ESTAN00001", 176, "Rate", "3427021", "NISS001", "2026-05-01", "2026-04-01", "10000000230", 5001, "STTOBILL00"]
+_IBP_ROW_RATE_2 = [102, "ESTAN00009", 176, "Rate", "3427022", "NISS002", "2026-05-01", "2026-04-01", "10000000231", 5002, "STTOBILL00"]
+_IBP_ROW_ELECTRICITY = [201, "ESTAN00001", 1, "Electricity", "9000011", "NISS003", "2026-05-01", "2026-04-01", "10000000232", 5003, "STTOBILL00"]
+_IBP_ALL_ROWS = [_IBP_ROW_RATE_1, _IBP_ROW_RATE_2, _IBP_ROW_ELECTRICITY]
+
+
+def test_incorrect_billing_period_detect_requires_login(client):
+    resp = client.post("/api/incorrect-billing-period/detect")
+    assert resp.status_code == 401
+
+
+def test_incorrect_billing_period_detect_requires_connection(client, monkeypatch):
+    import web.server as server_mod
+    from app.config import AppConfig, AIConfig
+
+    _login(client)
+    empty_config = AppConfig(connections={}, active_connection="default", ai=AIConfig())
+    monkeypatch.setattr(server_mod, "load_config", lambda: empty_config)
+    resp = client.post("/api/incorrect-billing-period/detect")
+    assert resp.status_code == 400
+
+
+def test_incorrect_billing_period_detect_returns_offered_service_grouped_rows(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_IBP_COLS, rows=_IBP_ALL_ROWS, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/incorrect-billing-period/detect")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["anomaly_count"] == 3
+    assert len(body["groups"]) == 2
+    rate_group = next(g for g in body["groups"] if g["offered_service_desc"] == "Rate")
+    assert rate_group["id_offered_service"] == "176"
+    assert len(rate_group["anomalies"]) == 2
+    first = rate_group["anomalies"][0]
+    assert first["id_anomalous"] == "101"
+    assert first["account"] == "3427021"
+    assert first["niss"] == "NISS001"
+    elec_group = next(g for g in body["groups"] if g["offered_service_desc"] == "Electricity")
+    assert len(elec_group["anomalies"]) == 1
+    assert body["possibly_truncated"] is False
+
+
+def test_incorrect_billing_period_detect_flags_possible_truncation(client, monkeypatch):
+    import web.server as server_mod
+    from app.core import incorrect_billing_period
+
+    _login(client)
+    rows = [_IBP_ROW_RATE_1 for _ in range(incorrect_billing_period.DETECT_DEFAULT_LIMIT)]
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_IBP_COLS, rows=rows, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/incorrect-billing-period/detect")
+    assert resp.json()["possibly_truncated"] is True
+
+
+def test_incorrect_billing_period_generate_requires_editor_role(client, monkeypatch):
+    _create_and_login_as(client, "viewer1", "viewer")
+    resp = client.post("/api/incorrect-billing-period/generate", json={"anomaly_ids": ["101"]})
+    assert resp.status_code == 403
+
+
+def test_incorrect_billing_period_generate_requires_selection(client, monkeypatch):
+    _login(client)
+    resp = client.post("/api/incorrect-billing-period/generate", json={"anomaly_ids": []})
+    assert resp.status_code == 400
+
+
+def test_incorrect_billing_period_generate_produces_correction_script_for_selected(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_IBP_COLS, rows=_IBP_ALL_ROWS, elapsed_ms=1.0),
+    )
+    resp = client.post(
+        "/api/incorrect-billing-period/generate",
+        json={"anomaly_ids": ["101", "201"], "program": "RATE_INCORRECT_BILLPERIOD"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["anomaly_count"] == 2
+    assert "ID_ANOMALOUS IN (101, 201)" in body["sql_text"]
+    assert "102" not in body["sql_text"].split("ID_ANOMALOUS IN (")[1].split(")")[0]
+
+    history = client.get("/api/history").json()["entries"]
+    assert any("Incorrect Billing Period" in e["table_name"] for e in history)
+
+
+def test_incorrect_billing_period_generate_ignores_ids_no_longer_detected(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_IBP_COLS, rows=[_IBP_ROW_RATE_1], elapsed_ms=1.0),
+    )
+    resp = client.post(
+        "/api/incorrect-billing-period/generate",
+        json={"anomaly_ids": ["999999"]},
+    )
+    assert resp.status_code == 400
+
+
+def test_incorrect_billing_period_generate_clean_strips_comments(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_IBP_COLS, rows=_IBP_ALL_ROWS, elapsed_ms=1.0),
+    )
+    resp = client.post(
+        "/api/incorrect-billing-period/generate",
+        json={"anomaly_ids": ["101"], "clean": True},
+    )
+    assert resp.status_code == 200
+    assert "--" not in resp.json()["sql_text"]
+
+
+# ---------------- Reading Validation/Modif ----------------
+_RV_COLS = [
+    "id_sector_supply", "billing_period", "reading_type", "reading_date",
+    "reading_prev_date", "read_status", "usage_name", "reading", "niss",
+]
+_RV_ROW_1 = [777, "10000000230", "TIPTL00001", "2026-05-01", "2026-04-01", "7000STSRED", "Electricity", "123.4", "10008283-301"]
+_RV_ROW_2 = [777, "10000000231", "TIPTL00001", "2026-06-01", "2026-05-01", "1000STSRED", "Electricity", "130.0", "10008283-301"]
+_RV_ROWS = [_RV_ROW_1, _RV_ROW_2]
+
+_RV_ACCOUNT_COLS = ["ID_SECTOR_SUPPLY", "NISS", "ID_OFFERED_SERVICE", "OFFERED_SERVICE_DESC", "CONTRACT_STATUS", "ACCOUNT"]
+_RV_ACCOUNT_ROW_ELEC = [777, "10008283-301", 1, "Electricity", "ESTSC00002", "ACC-1"]
+_RV_ACCOUNT_ROW_WATER = [778, "10008283-302", 19, "Water", "ESTSC00002", "ACC-1"]
+
+
+def test_reading_validation_detect_requires_login(client):
+    resp = client.post("/api/reading-validation/detect", json={"id_sector_supply": "777"})
+    assert resp.status_code == 401
+
+
+def test_reading_validation_detect_requires_connection(client, monkeypatch):
+    import web.server as server_mod
+    from app.config import AppConfig, AIConfig
+
+    _login(client)
+    empty_config = AppConfig(connections={}, active_connection="default", ai=AIConfig())
+    monkeypatch.setattr(server_mod, "load_config", lambda: empty_config)
+    resp = client.post("/api/reading-validation/detect", json={"id_sector_supply": "777"})
+    assert resp.status_code == 400
+
+
+def test_reading_validation_detect_requires_supply_or_niss(client):
+    _login(client)
+    resp = client.post("/api/reading-validation/detect", json={})
+    assert resp.status_code == 400
+
+
+def test_reading_validation_detect_by_sector_supply(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_RV_COLS, rows=_RV_ROWS, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/reading-validation/detect", json={"id_sector_supply": "777"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id_sector_supply"] == 777
+    assert body["count"] == 2
+    assert body["rows"][0]["niss"] == "10008283-301"
+    assert body["rows"][0]["billing_period"] == "10000000230"
+
+
+def test_reading_validation_detect_resolves_niss_to_sector_supply(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    calls = []
+
+    def fake_run_query(conn, sql):
+        calls.append(sql)
+        if "GCCOM_SECTOR_SUPPLY" in sql and "FROM gcgt_re_reading" not in sql:
+            return QueryResult(columns=["ID_SECTOR_SUPPLY"], rows=[[777]], elapsed_ms=1.0)
+        return QueryResult(columns=_RV_COLS, rows=_RV_ROWS, elapsed_ms=1.0)
+
+    monkeypatch.setattr(server_mod.mssql, "run_query", fake_run_query)
+    resp = client.post("/api/reading-validation/detect", json={"niss": "10008283-301"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id_sector_supply"] == 777
+    assert len(calls) == 2  # one lookup, one detail query
+
+
+def test_reading_validation_detect_niss_not_found(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=["ID_SECTOR_SUPPLY"], rows=[], elapsed_ms=1.0),
+    )
+    resp = client.post("/api/reading-validation/detect", json={"niss": "no-such-niss"})
+    assert resp.status_code == 404
+
+
+def test_reading_validation_search_account_requires_login(client):
+    resp = client.post("/api/reading-validation/search-account", json={"account_number": "ACC-1"})
+    assert resp.status_code == 401
+
+
+def test_reading_validation_search_account_returns_supplies(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_RV_ACCOUNT_COLS, rows=[_RV_ACCOUNT_ROW_ELEC, _RV_ACCOUNT_ROW_WATER], elapsed_ms=1.0),
+    )
+    resp = client.post("/api/reading-validation/search-account", json={"account_number": "ACC-1"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["supplies"]) == 2
+    descs = {s["offered_service_desc"] for s in body["supplies"]}
+    assert descs == {"Electricity", "Water"}
+
+
+def test_reading_validation_search_account_dedupes_by_sector_supply(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    # Same sector supply twice (e.g. contract renewal history) - only one
+    # entry should come back, not two.
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_RV_ACCOUNT_COLS, rows=[_RV_ACCOUNT_ROW_ELEC, _RV_ACCOUNT_ROW_ELEC], elapsed_ms=1.0),
+    )
+    resp = client.post("/api/reading-validation/search-account", json={"account_number": "ACC-1"})
+    assert len(resp.json()["supplies"]) == 1
+
+
+def test_reading_validation_search_account_requires_account_number(client):
+    _login(client)
+    resp = client.post("/api/reading-validation/search-account", json={"account_number": "  "})
+    assert resp.status_code == 400
+
+
+# ---------------- Reading Validation/Modif: inline editing (2026-09-25) ----------------
+_RV_TYPES_COLS = ["CODE", "DESCRIPTION"]
+_RV_TYPES_ROWS = [["TPREAD0001", "Cycle"], ["TPREAD0002", "Estimated"]]
+
+
+def test_reading_validation_reading_types_requires_login(client):
+    resp = client.get("/api/reading-validation/reading-types")
+    assert resp.status_code == 401
+
+
+def test_reading_validation_reading_types_returns_code_and_description(client, monkeypatch):
+    import web.server as server_mod
+    from app.db.mssql import QueryResult
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_RV_TYPES_COLS, rows=_RV_TYPES_ROWS, elapsed_ms=1.0),
+    )
+    resp = client.get("/api/reading-validation/reading-types")
+    assert resp.status_code == 200
+    assert resp.json()["reading_types"] == [
+        {"code": "TPREAD0001", "description": "Cycle"},
+        {"code": "TPREAD0002", "description": "Estimated"},
+    ]
+
+
+def test_reading_validation_generate_script_requires_login(client):
+    resp = client.post("/api/reading-validation/generate-script", json={"rows": []})
+    assert resp.status_code == 401
+
+
+def test_reading_validation_generate_script_requires_editor(client):
+    _create_and_login_as(client, "rv-viewer", "viewer")
+    resp = client.post(
+        "/api/reading-validation/generate-script",
+        json={"rows": [{"id_reading": "123", "edits": [{"column": "reading", "old_value": "41", "new_value": "42"}]}]},
+    )
+    assert resp.status_code == 403
+
+
+def test_reading_validation_generate_script_requires_changes(client):
+    _login(client)
+    resp = client.post("/api/reading-validation/generate-script", json={"rows": []})
+    assert resp.status_code == 400
+
+
+def test_reading_validation_generate_script_rejects_non_editable_column(client):
+    _login(client)
+    resp = client.post(
+        "/api/reading-validation/generate-script",
+        json={"rows": [{"id_reading": "123", "edits": [{"column": "billing_period", "old_value": "a", "new_value": "b"}]}]},
+    )
+    assert resp.status_code == 400
+
+
+def test_reading_validation_generate_script_builds_update_with_original_value_where(client):
+    _login(client)
+    resp = client.post(
+        "/api/reading-validation/generate-script",
+        json={
+            "rows": [{
+                "id_reading": "1046176278",
+                "edits": [{"column": "reading", "old_value": "41", "new_value": "42"}],
+            }],
+            "program": "JIRA-999",
+            "audit_user": "TESTER",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["statement_count"] == 1
+    sql = body["sql_text"]
+    assert "UPDATE GCGT_RE_READING" in sql
+    assert "VALUE = 42" in sql
+    assert "ID_READING = 1046176278" in sql
+    assert "VALUE = 41" in sql  # original value guard in the WHERE clause
+    assert "JIRA-999" in sql
+
+
+def test_reading_validation_generate_script_reading_type_uses_code_not_description(client):
+    _login(client)
+    resp = client.post(
+        "/api/reading-validation/generate-script",
+        json={
+            "rows": [{
+                "id_reading": "1",
+                "edits": [{"column": "reading_type", "old_value": "TPREAD0001", "new_value": "TPREAD0002"}],
+            }],
+        },
+    )
+    assert resp.status_code == 200
+    sql = resp.json()["sql_text"]
+    assert "READING_TYPE = 'TPREAD0002'" in sql
+    assert "READING_TYPE = 'TPREAD0001'" in sql
+
+
+def test_reading_validation_generate_script_rollback_kind(client):
+    _login(client)
+    resp = client.post(
+        "/api/reading-validation/generate-script",
+        json={
+            "rows": [{
+                "id_reading": "1",
+                "edits": [{"column": "prev_value", "old_value": "39", "new_value": "40"}],
+            }],
+            "kind": "rollback",
+        },
+    )
+    assert resp.status_code == 200
+    sql = resp.json()["sql_text"]
+    assert "PREV_VALUE = 39" in sql  # rollback SETs back to the original
+
+
+# ---------------- TNB CYCLE/DISC Analysis (2026-09-25) ----------------
+
+_TCD_COLS = ["ID_SECTOR_SUPPLY", "NISS", "BILLING_PERIOD", "C_ID_READING", "C_READ_STATUS_CODE", "D_ID_READING", "D_READ_STATUS_CODE"]
+_TCD_ROWS = [
+    [34672, "10030496-101", "10-October 2026", 1047494269, "8000STSRED", 1047626014, "7000STSRED"],
+    [34672, "10030496-101", "10-October 2026", 1047494270, "8000STSRED", 1047626015, "8000STSRED"],
+    [48613, "10040261-101", "9-September 2026", 1047440579, "7000STSRED", 1047581611, "8000STSRED"],
+]
+
+
+def test_tnb_cycle_disc_detect_requires_login(client):
+    resp = client.post("/api/tnb-cycle-disc/detect")
+    assert resp.status_code == 401
+
+
+def test_tnb_cycle_disc_detect_requires_connection(client, monkeypatch):
+    import web.server as server_mod
+    from app.config import AppConfig, AIConfig
+
+    _login(client)
+    empty_config = AppConfig(connections={}, active_connection="default", ai=AIConfig())
+    monkeypatch.setattr(server_mod, "load_config", lambda: empty_config)
+    resp = client.post("/api/tnb-cycle-disc/detect")
+    assert resp.status_code == 400
+
+
+def test_tnb_cycle_disc_detect_returns_lowercased_rows_and_counts(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_TCD_COLS, rows=_TCD_ROWS, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/tnb-cycle-disc/detect")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 3
+    assert body["supply_count"] == 2
+    assert body["rows"][0]["niss"] == "10030496-101"
+    assert body["rows"][0]["c_read_status_code"] == "8000STSRED"
+    assert body["rows"][2]["d_id_reading"] == "1047581611"
+
+
+# ---------------- Wrong Stuck in Hierarchy ITB (2026-09-25) ----------------
+
+def test_wrong_stuck_hierarchy_detect_requires_login(client):
+    resp = client.post("/api/wrong-stuck-hierarchy/detect", json={"id_billing_period": "10000000236"})
+    assert resp.status_code == 401
+
+
+def test_wrong_stuck_hierarchy_detect_rejects_non_numeric_period(client):
+    _login(client)
+    resp = client.post("/api/wrong-stuck-hierarchy/detect", json={"id_billing_period": "abc"})
+    assert resp.status_code == 400
+
+
+def test_wrong_stuck_hierarchy_detect_needs_no_params(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    captured = {}
+
+    def fake_run(conn, sql):
+        captured["sql"] = sql
+        return QueryResult(columns=["REFERENCE", "ID_BILLING_PERIOD"], rows=[["A", 1], ["B", 2]], elapsed_ms=1.0)
+
+    monkeypatch.setattr(server_mod.mssql, "run_query", fake_run)
+    resp = client.post("/api/wrong-stuck-hierarchy/detect", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id_billing_period"] is None
+    assert body["period_count"] == 2
+    assert "10000000" not in captured["sql"]
+
+
+def test_wrong_stuck_hierarchy_detect_returns_rows(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    cols = ["REFERENCE", "NISS", "ID_ITEM_TO_BILL", "ID_MAIN_MP", "ID_BILLING_PERIOD", "DESCRIPTION", "ID_ITEM_TO_BILL_190", "STATUS_190"]
+    rows = [
+        ["ACC-1", "100-101", 11, 900, 10000000236, "6-June 2026", 21, "STTOBILL07"],
+        ["ACC-1", "100-102", 12, 900, 10000000236, "6-June 2026", None, None],
+    ]
+    captured = {}
+
+    def fake_run(conn, sql):
+        captured["sql"] = sql
+        return QueryResult(columns=cols, rows=rows, elapsed_ms=1.0)
+
+    monkeypatch.setattr(server_mod.mssql, "run_query", fake_run)
+    resp = client.post("/api/wrong-stuck-hierarchy/detect", json={"id_billing_period": "10000000236"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 2
+    assert body["account_count"] == 1
+    assert body["main_mp_count"] == 1
+    assert body["rows"][0]["id_item_to_bill_190"] == "21"
+    assert body["rows"][1]["status_190"] == ""
+    assert "10000000236" in captured["sql"]
+
+
 # ---------------- RBAC / User management ----------------
 # The bootstrapped first-run account _login(client) uses is always role
 # "admin" (see web/auth.py's _bootstrap), so most of test_web_api.py's

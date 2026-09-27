@@ -20,7 +20,7 @@ import os
 import re
 import sys
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -36,7 +36,12 @@ from app.config import load_config, save_config, ConnectionConfig
 from app.core import ai_assist, diff_engine, schema_check, script_generator, sql_pretty, date_anomaly
 from app.core import hierarchy_analysis
 from app.core import bill_issuance_validator
+from app.core import incorrect_billing_period
 from app.core import bulk_checker
+from app.core import reading_validation
+from app.core import tnb_cycle_disc
+from app.core import wrong_stuck_hierarchy
+from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
 from app.db import date_anomaly_history, internal_store, mssql, script_history
@@ -1196,6 +1201,123 @@ def dashboard_trend(table: str = "", user: str = Depends(require_login)):
             {"created_at_utc": s.created_at_utc, "row_count": s.row_count, "display_name": s.display_name}
             for s in snaps
         ]
+    }
+
+
+# ---------------------------------------------------------------------
+# Overview (home dashboard across every menu) - RJ, 2026-09-23, verbatim:
+# "for the whole scriptgen, create a dashboard for all our menu, bulk
+# checker, diffdates, bill validator, etc.. i want a good dashboard with
+# modern graphs, pie chart... also when the graph or dashboard is clicked
+# it will redirect you to the details/menu." NOT the same thing as the
+# "Dashboard" page above (that one profiles the CURRENT query result grid,
+# via app.core.stats) - this is a separate landing page summarizing every
+# OTHER page in the sidebar, each stat/chart segment clickable through to
+# that page.
+#
+# Two different data sources, kept clearly separate:
+# 1. LOCAL (this app's own internal SQLite db - script_history,
+#    bulk_checker_db - always fast, no tunnel DB round trip): script
+#    activity by kind (pie) and a 14-day daily trend (bar).
+# 2. LIVE (the tunnel SQL Server DB): one bounded, already-capped query
+#    per area, EACH WRAPPED IN ITS OWN try/except - same "one slow/failing
+#    area doesn't blank the whole page" defensive pattern Case 4
+#    "Unclassified" already uses when it calls multiple other cases' own
+#    query builders. A None value (not a 0) means that area's count
+#    couldn't be fetched - the frontend renders that card as "-" rather
+#    than a misleading zero. Case 4 "Unclassified" itself is deliberately
+#    left out here - it internally re-runs Case 1/2/3's own queries a
+#    second time (see bill_issuance_case4_detect), so including it too
+#    would roughly double this route's own live-query cost for a number
+#    that's already implied by the other four cards.
+# ---------------------------------------------------------------------
+@app.get("/api/overview/stats")
+def overview_stats(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+
+    entries = script_history.list_history(config.internal_db_path, limit=1000)
+    kind_labels = {
+        script_history.KIND_UPDATE: "Workspace Update",
+        script_history.KIND_ROLLBACK: "Rollback",
+        script_history.KIND_DATE_ANOMALY: "DIFF DATES",
+        script_history.KIND_BILL_ISSUANCE: "Bill Issuance",
+    }
+    kind_counts: dict[str, int] = {}
+    for e in entries:
+        label = kind_labels.get(e.kind, e.kind or "Other")
+        kind_counts[label] = kind_counts.get(label, 0) + 1
+
+    today = datetime.now(timezone.utc).date()
+    day_counts: dict[str, int] = {}
+    for e in entries:
+        try:
+            d = datetime.fromisoformat(e.created_at_utc).date()
+        except ValueError:
+            continue
+        if 0 <= (today - d).days < 14:
+            key = d.isoformat()
+            day_counts[key] = day_counts.get(key, 0) + 1
+    trend = []
+    for i in range(13, -1, -1):
+        d = today - timedelta(days=i)
+        trend.append({"date": d.isoformat(), "count": day_counts.get(d.isoformat(), 0)})
+
+    live: dict[str, Optional[int]] = {}
+    if conn:
+        try:
+            result = mssql.run_query(
+                conn, date_anomaly.build_detect_all_anomalies_query(limit=date_anomaly.DETECT_ALL_DEFAULT_LIMIT),
+            )
+            live["dateanomaly"] = len(result.rows)
+        except Exception:
+            live["dateanomaly"] = None
+        try:
+            result = mssql.run_query(
+                conn, hierarchy_analysis.build_pending_primaries_query(limit=hierarchy_analysis.HIERARCHY_DEFAULT_LIMIT),
+            )
+            live["hierarchy"] = len(result.rows)
+        except Exception:
+            live["hierarchy"] = None
+        try:
+            stuck = mssql.run_query(
+                conn, bill_issuance_validator.build_stuck_bills_query(limit=bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT),
+            )
+            nc = mssql.run_query(
+                conn, bill_issuance_validator.build_new_contract_match_query(limit=bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT),
+            )
+            live["billissuance_case1"] = len(stuck.rows) + len(nc.rows)
+        except Exception:
+            live["billissuance_case1"] = None
+        try:
+            result = mssql.run_query(
+                conn, bill_issuance_validator.build_terminated_period_mismatch_query(limit=bill_issuance_validator.TERMINATED_PERIOD_DEFAULT_LIMIT),
+            )
+            rows = [dict(zip(result.columns, r)) for r in result.rows]
+            accounts = _case2_group_rows_by_account(rows)
+            live["billissuance_case2"] = sum(1 for a in accounts if not a["complete"])
+        except Exception:
+            live["billissuance_case2"] = None
+        try:
+            result = mssql.run_query(
+                conn, bill_issuance_validator.build_bills_complete_query(limit=bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_LIMIT),
+            )
+            live["billissuance_case3"] = len(result.rows)
+        except Exception:
+            live["billissuance_case3"] = None
+
+    try:
+        bulk_checker_search_count = len(bulk_checker_db.list_search_history(config.internal_db_path))
+    except Exception:
+        bulk_checker_search_count = None
+
+    return {
+        "has_connection": conn is not None,
+        "script_kind_counts": kind_counts,
+        "script_total": len(entries),
+        "script_trend": trend,
+        "live": live,
+        "bulk_checker_search_count": bulk_checker_search_count,
     }
 
 
@@ -3353,6 +3475,482 @@ def bill_issuance_case4_export_xlsx(body: BillIssuanceCase4ExportXlsxRequest, us
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="bill_issuance_case4.xlsx"'},
     )
+
+
+# ---------------------------------------------------------------------
+# Incorrect Billing Period ("RATE INCORRECT BILLING PERIOD") - RJ,
+# 2026-09-23, own SQL - see app/core/incorrect_billing_period.py's module
+# docstring for the full query provenance and the correction script's own
+# exact template.
+# ---------------------------------------------------------------------
+def _group_rows_by_offered_service(rows: list[dict]) -> list[dict]:
+    """
+    Groups build_detect_query's flat rows into one object per ID_OFFERED_
+    SERVICE - RJ's own words: "Group it with id_offered_service, and can
+    be filtered with ID_OFFERED_SERVICE description". Row order from the
+    query is already CS.ID_OFFERED_SERVICE, AN.ID_ANOMALOUS (see that
+    function's own ORDER BY), so dict insertion order preserves the
+    grouping without a second sort here - same convention as
+    _case2_group_rows_by_account.
+    """
+    groups: dict[Any, dict] = {}
+    for r in rows:
+        key = diff_engine.cell_display(_da_col(r, "ID_OFFERED_SERVICE"))
+        g = groups.get(key)
+        if g is None:
+            g = {
+                "id_offered_service": key,
+                "offered_service_desc": diff_engine.cell_display(_da_col(r, "OFFERED_SERVICE_DESC")) or "",
+                "anomalies": [],
+            }
+            groups[key] = g
+        g["anomalies"].append({
+            "id_anomalous": diff_engine.cell_display(_da_col(r, "ID_ANOMALOUS")),
+            "anomalous_status": diff_engine.cell_display(_da_col(r, "ANOMALOUS_STATUS")),
+            "account": diff_engine.cell_display(_da_col(r, "ACCOUNT")),
+            "niss": diff_engine.cell_display(_da_col(r, "NISS")),
+            "last_billing_date": diff_engine.cell_display(_da_col(r, "LAST_BILLING_DATE")),
+            "billing_date": diff_engine.cell_display(_da_col(r, "BILLING_DATE")),
+            "id_billing_period": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
+            "id_item_to_bill": diff_engine.cell_display(_da_col(r, "ID_ITEM_TO_BILL")),
+            "item_status": diff_engine.cell_display(_da_col(r, "ITEM_STATUS")),
+            "id_reading": diff_engine.cell_display(_da_col(r, "ID_READING")),
+            "read_status": diff_engine.cell_display(_da_col(r, "READ_STATUS")),
+            "reading_type": diff_engine.cell_display(_da_col(r, "READING_TYPE")),
+            "ready_usage": diff_engine.cell_display(_da_col(r, "READY_USAGE")),
+            "reading_prev_date": diff_engine.cell_display(_da_col(r, "READING_PREV_DATE")),
+            "reading_date": diff_engine.cell_display(_da_col(r, "READING_DATE")),
+            "niss_at_reading": diff_engine.cell_display(_da_col(r, "NISS_AT_READING")),
+        })
+    return list(groups.values())
+
+
+@app.post("/api/incorrect-billing-period/detect")
+def incorrect_billing_period_detect(user: str = Depends(require_login)):
+    """
+    incorrect_billing_period.build_detect_query - see that function's own
+    docstring and the module docstring for RJ's exact SQL and business
+    reasoning. Stateless - every call re-runs the query fresh.
+
+    Returns offered-service-grouped rows (see _group_rows_by_offered_
+    service) - the UI's primary table is one section per ID_OFFERED_
+    SERVICE (with its human-readable description), each holding the
+    anomalies for that service.
+    """
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+
+    limit = incorrect_billing_period.DETECT_DEFAULT_LIMIT
+    try:
+        result = mssql.run_query(conn, incorrect_billing_period.build_detect_query(limit=limit))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    rows = [dict(zip(result.columns, r)) for r in result.rows]
+    groups = _group_rows_by_offered_service(rows)
+    return {
+        "groups": groups,
+        "anomaly_count": len(rows),
+        "possibly_truncated": len(rows) >= limit,
+        "limit": limit,
+    }
+
+
+class IncorrectBillingPeriodGenerateRequest(BaseModel):
+    # Required, not optional like Case 2's id_payment_forms - RJ's own
+    # words: "can generate script base on the selected anomalies from the
+    # list only", i.e. there is no "nothing checked = act on everything
+    # detected" default here.
+    anomaly_ids: list[str] = []
+    program: str = incorrect_billing_period.CORRECTION_SCRIPT_DEFAULT_PROGRAM
+    audit_user: str = incorrect_billing_period.CORRECTION_SCRIPT_DEFAULT_USER
+    clean: bool = False
+
+
+@app.post("/api/incorrect-billing-period/generate")
+def incorrect_billing_period_generate(
+    body: IncorrectBillingPeriodGenerateRequest, user: str = Depends(require_editor),
+):
+    """
+    Generates the correction script (incorrect_billing_period.build_
+    correction_script) - RJ's own exact UPDATE template, cancelling only
+    the ID_ANOMALOUS values the analyst checked on the detect list.
+
+    Re-runs build_detect_query fresh right before generating (same "re-
+    verify at generate time" pattern every other Generate route in this
+    app uses) rather than trusting anomaly_ids' types as given by the
+    browser - the native ID_ANOMALOUS value from the fresh row is what
+    actually gets passed to build_correction_script, so the browser's
+    strings never need coercing to match the DB column's real type.
+    """
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    program = body.program.strip() or incorrect_billing_period.CORRECTION_SCRIPT_DEFAULT_PROGRAM
+    audit_user = body.audit_user.strip() or incorrect_billing_period.CORRECTION_SCRIPT_DEFAULT_USER
+
+    scope = {str(x).strip() for x in body.anomaly_ids if str(x).strip()}
+    if not scope:
+        raise HTTPException(status_code=400, detail="Select at least one anomaly to correct.")
+
+    limit = incorrect_billing_period.DETECT_DEFAULT_LIMIT
+    try:
+        result = mssql.run_query(conn, incorrect_billing_period.build_detect_query(limit=limit))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    rows = [dict(zip(result.columns, r)) for r in result.rows]
+    seen: set[str] = set()
+    anomaly_ids = []
+    for r in rows:
+        aid = _da_col(r, "ID_ANOMALOUS")
+        if str(aid) in scope and str(aid) not in seen:
+            seen.add(str(aid))
+            anomaly_ids.append(aid)
+
+    if not anomaly_ids:
+        raise HTTPException(status_code=400, detail="None of the selected anomalies are still detected.")
+
+    fix_result = incorrect_billing_period.build_correction_script(
+        anomaly_ids, program=program, user=audit_user, clean=body.clean,
+    )
+
+    try:
+        script_history.record_script(
+            config.internal_db_path,
+            username=user,
+            kind=script_history.KIND_INCORRECT_BILLING_PERIOD,
+            schema_name="",
+            table_name=f"Incorrect Billing Period ({len(anomaly_ids)} anomaly(ies))",
+            program=program,
+            statement_count=1,
+            warning_count=fix_result.warning_count,
+            sql_text=fix_result.sql_text,
+            source=script_history.SOURCE_WEB,
+        )
+    except Exception:
+        pass
+
+    return {
+        "sql_text": fix_result.sql_text,
+        "anomaly_count": fix_result.anomaly_count,
+        "warnings": fix_result.warnings,
+    }
+
+
+# ---------------------------------------------------------------------
+# Reading Validation/Modif - RJ, 2026-09-23, own SQL - see app/core/
+# reading_validation.py's module docstring for the full query provenance.
+# Phase 1 scope only (RJ: "this is the main query for now"): display,
+# filter, sort. No UPDATE/MODIF capability yet despite the menu's own
+# name - require_login only, same as every other read-heavy page here.
+# ---------------------------------------------------------------------
+def _rv_row(result) -> list[dict]:
+    return [dict(zip(result.columns, r)) for r in result.rows]
+
+
+class ReadingValidationSearchAccountRequest(BaseModel):
+    account_number: str
+
+
+@app.post("/api/reading-validation/search-account")
+def reading_validation_search_account(
+    body: ReadingValidationSearchAccountRequest, user: str = Depends(require_login),
+):
+    """
+    reading_validation.build_account_niss_query - RJ: "we will add a
+    search by account, which will lead to create 2 tabs, we expect to
+    have 1 or 2 niss for this, either water or electricity". Returns one
+    entry per distinct sector supply under this account, so the frontend
+    can open one tab per entry (each tab then calls the detect route
+    below with that entry's id_sector_supply).
+    """
+    account_number = body.account_number.strip()
+    if not account_number:
+        raise HTTPException(status_code=400, detail="Account number is required.")
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(conn, reading_validation.build_account_niss_query(account_number))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    rows = _rv_row(result)
+    supplies: dict[Any, dict] = {}
+    for r in rows:
+        sid = _da_col(r, "ID_SECTOR_SUPPLY")
+        if sid in supplies:
+            continue
+        supplies[sid] = {
+            "id_sector_supply": diff_engine.cell_display(sid),
+            "niss": diff_engine.cell_display(_da_col(r, "NISS")),
+            "offered_service_desc": diff_engine.cell_display(_da_col(r, "OFFERED_SERVICE_DESC")) or "",
+            "contract_status": diff_engine.cell_display(_da_col(r, "CONTRACT_STATUS")),
+        }
+    return {"account_number": account_number, "supplies": list(supplies.values())}
+
+
+class ReadingValidationDetectRequest(BaseModel):
+    id_sector_supply: str = ""
+    niss: str = ""
+    id_measuring_point: str = ""
+    id_device: str = ""
+
+
+@app.post("/api/reading-validation/detect")
+def reading_validation_detect(body: ReadingValidationDetectRequest, user: str = Depends(require_login)):
+    """
+    reading_validation.build_readings_query - every reading for one
+    sector supply, filtered primarily by GCCOM_SECTOR_SUPPLY.NISS or the
+    raw ID_SECTOR_SUPPLY (either works - if only a NISS is given, it's
+    resolved to its ID_SECTOR_SUPPLY first with a small lookup query, no
+    app/core builder needed for a plain lookup like this, same convention
+    as bill_issuance_case3_billing_periods). Billing period, reading date
+    range, reading type, read status, and consumption type filters are
+    NOT applied here - they're applied client-side against this route's
+    full result set, same "detect once, filter/sort client-side" pattern
+    Incorrect Billing Period and Detect All already use, since a single
+    supply's own reading history is never large enough to need a second
+    server round-trip per filter change.
+    """
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+
+    id_sector_supply_raw = body.id_sector_supply.strip()
+    niss = body.niss.strip()
+    if not id_sector_supply_raw and not niss:
+        raise HTTPException(status_code=400, detail="Sector supply (or NISS) is required.")
+
+    try:
+        if not id_sector_supply_raw:
+            lookup = mssql.run_query(
+                conn,
+                f"SELECT ID_SECTOR_SUPPLY FROM {reading_validation.SECTOR_SUPPLY_TABLE} "
+                f"WHERE NISS = {format_sql_literal(niss)}",
+            )
+            if not lookup.rows:
+                raise HTTPException(status_code=404, detail=f"No sector supply found for NISS {niss}.")
+            id_sector_supply_raw = str(lookup.rows[0][0])
+
+        id_sector_supply = int(id_sector_supply_raw)
+        id_measuring_point = int(body.id_measuring_point) if body.id_measuring_point.strip() else None
+        id_device = int(body.id_device) if body.id_device.strip() else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Sector supply / measuring point / device must be numeric.")
+
+    try:
+        result = mssql.run_query(
+            conn,
+            reading_validation.build_readings_query(
+                id_sector_supply, id_measuring_point=id_measuring_point, id_device=id_device,
+            ),
+        )
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    rows = _rv_row(result)
+    out_rows = [{c: diff_engine.cell_display(_da_col(r, c)) for c in result.columns} for r in rows]
+    return {
+        "id_sector_supply": id_sector_supply,
+        "rows": out_rows,
+        "count": len(out_rows),
+    }
+
+
+@app.get("/api/reading-validation/reading-types")
+def reading_validation_reading_types(user: str = Depends(require_login)):
+    """reading_validation.build_reading_types_query - every GCGT_RE_
+    READING_TYPE code + English description, for the Reading Type edit
+    dropdown (RJ, 2026-09-25: "reading_type(make it as dropdown ...)")."""
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(conn, reading_validation.build_reading_types_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = _rv_row(result)
+    return {
+        "reading_types": [
+            {"code": diff_engine.cell_display(_da_col(r, "CODE")), "description": diff_engine.cell_display(_da_col(r, "DESCRIPTION"))}
+            for r in rows
+        ]
+    }
+
+
+class ReadingValidationCellEdit(BaseModel):
+    column: str
+    old_value: str = ""
+    new_value: str = ""
+
+
+class ReadingValidationRowEdit(BaseModel):
+    id_reading: str
+    edits: list[ReadingValidationCellEdit] = []
+
+
+class ReadingValidationGenerateRequest(BaseModel):
+    rows: list[ReadingValidationRowEdit]
+    program: str = script_generator.DEFAULT_AUDIT_PROGRAM
+    audit_user: str = script_generator.DEFAULT_AUDIT_USER
+    kind: str = "update"  # "update" | "rollback"
+
+
+@app.post("/api/reading-validation/generate-script")
+def reading_validation_generate_script(
+    body: ReadingValidationGenerateRequest, user: str = Depends(require_editor),
+):
+    """
+    Turns the grid's in-memory edits (dates, reading/prev_value, the three
+    usage columns, reading_type's raw code) into a GCGT_RE_READING update
+    script, reusing this app's existing script_generator/diff_engine
+    infrastructure (RowChange/CellChange) rather than a hand-rolled
+    template - same reasoning as every other "generate a script from
+    edited grid cells" feature in this app. RJ, 2026-09-25: "once the
+    values are update, we will generate an update script for GCGT_RE_
+    READING, with the updated values, in the where clause, we need to put
+    the original values" - that's exactly what build_update_statements'
+    per-changed-column WHERE guard already does (see script_generator.py's
+    _where_predicate_with_changed_columns), on top of the ID_READING key.
+
+    Reading Validation has its own separate "current result set" (the
+    last /detect call), not the single shared Workspace QueryState this
+    app's generic /api/script/generate route depends on - so this builds
+    RowChange objects directly from what the frontend posts (its own
+    tracked original-vs-edited values), rather than trying to reuse that
+    session-bound endpoint.
+    """
+    if not body.rows:
+        raise HTTPException(status_code=400, detail="No changes to generate a script for.")
+
+    row_changes: list[diff_engine.RowChange] = []
+    for idx, row in enumerate(body.rows):
+        if not row.edits:
+            continue
+        cell_changes: list[diff_engine.CellChange] = []
+        for edit in row.edits:
+            mapping = reading_validation.EDITABLE_COLUMNS.get(edit.column)
+            if not mapping:
+                raise HTTPException(status_code=400, detail=f"Column '{edit.column}' is not editable.")
+            db_col, kind = mapping
+            old_val = reading_validation.coerce_edit_value(kind, edit.old_value)
+            new_val = reading_validation.coerce_edit_value(kind, edit.new_value)
+            cell_changes.append(diff_engine.CellChange(column=db_col, old_value=old_val, new_value=new_val))
+        if not cell_changes:
+            continue
+        id_reading_val = reading_validation.coerce_edit_value("decimal", row.id_reading)
+        row_changes.append(
+            diff_engine.RowChange(
+                row_index=idx,
+                key_predicate={"ID_READING": id_reading_val},
+                key_is_full_row=False,
+                cell_changes=cell_changes,
+            )
+        )
+
+    if not row_changes:
+        raise HTTPException(status_code=400, detail="No changes to generate a script for.")
+
+    builder = script_generator.generate_rollback_script if body.kind == "rollback" else script_generator.generate_update_script
+    result = builder(None, "GCGT_RE_READING", row_changes, program=body.program, user=body.audit_user)
+
+    try:
+        config = load_config()
+        script_history.record_script(
+            config.internal_db_path,
+            username=user,
+            kind=script_history.KIND_ROLLBACK if body.kind == "rollback" else script_history.KIND_UPDATE,
+            schema_name="",
+            table_name="GCGT_RE_READING",
+            program=body.program,
+            statement_count=result.statement_count,
+            warning_count=result.warning_count,
+            sql_text=result.sql_text,
+            source=script_history.SOURCE_WEB,
+        )
+    except Exception:
+        # Same stance as /api/script/generate: history is a record of the
+        # event, never a precondition for seeing the script just generated.
+        pass
+
+    return {
+        "sql_text": result.sql_text,
+        "statement_count": result.statement_count,
+        "warning_count": result.warning_count,
+    }
+
+
+# ---------------------------------------------------------------------
+# TNB CYCLE/DISC analysis (RJ, 2026-09-25) - see app/core/tnb_cycle_disc.py
+# for the query provenance. One scan, filtered client-side (billing
+# period + NISS), same "detect once, filter/sort in the browser" pattern
+# Incorrect Billing Period already uses.
+# ---------------------------------------------------------------------
+@app.post("/api/tnb-cycle-disc/detect")
+def tnb_cycle_disc_detect(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(conn, tnb_cycle_disc.build_tnb_cycle_disc_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [
+        {c.lower(): diff_engine.cell_display(v) for c, v in zip(result.columns, r)}
+        for r in result.rows
+    ]
+    return {
+        "rows": rows,
+        "count": len(rows),
+        "supply_count": len({r.get("id_sector_supply") for r in rows}),
+    }
+
+
+# ---------------------------------------------------------------------
+# Wrong Stuck in Hierarchy ITB (RJ, 2026-09-25) - see app/core/
+# wrong_stuck_hierarchy.py. Default scan covers every billing period
+# (RJ: "initial search should not have any param"); the per-period rule
+# is enforced inside the query by matching periods. An optional
+# id_billing_period still narrows it.
+# ---------------------------------------------------------------------
+class WrongStuckHierarchyRequest(BaseModel):
+    id_billing_period: str = ""
+
+
+@app.post("/api/wrong-stuck-hierarchy/detect")
+def wrong_stuck_hierarchy_detect(body: WrongStuckHierarchyRequest | None = None, user: str = Depends(require_login)):
+    raw = ((body.id_billing_period if body else "") or "").strip()
+    if raw and not raw.isdigit():
+        raise HTTPException(status_code=400, detail="Billing period id must be numeric.")
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(conn, wrong_stuck_hierarchy.build_wrong_stuck_query(int(raw) if raw else None))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [
+        {c.lower(): diff_engine.cell_display(v) for c, v in zip(result.columns, r)}
+        for r in result.rows
+    ]
+    return {
+        "id_billing_period": int(raw) if raw else None,
+        "rows": rows,
+        "count": len(rows),
+        "account_count": len({r.get("reference") for r in rows}),
+        "main_mp_count": len({r.get("id_main_mp") for r in rows}),
+        "period_count": len({r.get("id_billing_period") for r in rows}),
+    }
 
 
 # ---------------------------------------------------------------------
