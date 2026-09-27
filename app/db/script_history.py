@@ -50,6 +50,7 @@ KIND_ROLLBACK = "rollback"
 KIND_DATE_ANOMALY = "date_anomaly_correction"
 KIND_BILL_ISSUANCE = "bill_issuance_correction"
 KIND_INCORRECT_BILLING_PERIOD = "incorrect_billing_period_correction"
+KIND_WRONG_STUCK_HIERARCHY = "wrong_stuck_hierarchy_correction"
 
 
 @dataclass

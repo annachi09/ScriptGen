@@ -50,20 +50,29 @@ function daRowClassForBillingPeriods(count) {
   return count > 1 ? "row-multi-period" : "";
 }
 
+// In-flight API call counter - lets the shared ⟳ Refresh button wait for a
+// page's own scan to finish before it restores that page's filters.
+let _apiInflight = 0;
+
 async function api(path, options = {}) {
-  const resp = await fetch(path, {
-    method: options.method || "GET",
-    headers: { "Content-Type": "application/json" },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-    credentials: "same-origin",
-  });
-  let data = null;
-  try { data = await resp.json(); } catch (_) { /* no body */ }
-  if (!resp.ok) {
-    const message = (data && data.detail) || `Request failed (${resp.status})`;
-    throw new Error(message);
+  _apiInflight++;
+  try {
+    const resp = await fetch(path, {
+      method: options.method || "GET",
+      headers: { "Content-Type": "application/json" },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      credentials: "same-origin",
+    });
+    let data = null;
+    try { data = await resp.json(); } catch (_) { /* no body */ }
+    if (!resp.ok) {
+      const message = (data && data.detail) || `Request failed (${resp.status})`;
+      throw new Error(message);
+    }
+    return data;
+  } finally {
+    _apiInflight--;
   }
-  return data;
 }
 
 // ---------------- Auth ----------------
@@ -442,6 +451,7 @@ $$(".nav-item[data-page]").forEach((btn) => {
     if (page === "settings") loadSettingsPage();
     if (page === "dateanomaly") { daBatchRefreshRecentRuns(); daHistoryRefresh(); }
     if (page === "bulkchecker") bcOnPageShown();
+    if (page === "wrongbilledconsumption") wbcOnPageShown();
   });
 });
 
@@ -2262,6 +2272,22 @@ function daCleanupRenderDashboard(rows) {
   // checked, so this count is "how many rows still need that one-time
   // status bump" - spelled out in the card label itself now instead of
   // relying on a hover tooltip nobody may notice.
+  // hx dashboard (RJ 2026-09-27, app-wide redesign) - gauges are KPIs
+  // only; the old clickable KPI row below stays in the DOM but hidden (its
+  // "needs advance" filter is still on the filter row's own select).
+  hxRenderDashboard("da-cleanup-dash", {
+    gauges: total ? [
+      { label: "Billing status still pending", count: needsAdvance, total, c1: "#f59e0b", c2: "#f97316",
+        hint: "GCCOM_ITEMS_TO_BILL.STATUS still STTOBILL00 - not yet advanced to STTOBILL01" },
+      { label: "All cycle readings", count: rows.filter((r) => r.all_cycle === true).length, total, c1: "#10b981", c2: "#22c55e" },
+      { label: "More than one billing period", count: rows.filter((r) => Number(r.billing_period_count) > 1).length, total, c1: "#ef4444", c2: "#ec4899" },
+    ] : [],
+    tiles: [
+      { icon: "🩹", label: "Anomalies shown", value: total.toLocaleString(), accent: true },
+      { icon: "👤", label: "Distinct accounts", value: distinctAccounts.toLocaleString() },
+      { icon: "🧩", label: "Offered services", value: distinctServices.toLocaleString() },
+    ],
+  });
   const advanceTitle = "Billing STATUS is still STTOBILL00 (“pending”) - hasn't been advanced to STTOBILL01 yet. Generate Cleanup Script does that for whatever's checked. Click to toggle this filter.";
   $("#da-cleanup-kpi-row").innerHTML = [
     ["Shown", total, false, ""],
@@ -3279,7 +3305,7 @@ function drawBoxPlots(canvas, numericColumns) {
 // object + visible-indices function, a KPI row, and CSV/Excel export of
 // whatever's currently visible - same conventions, new page.
 let hierRows = [];
-let hierFilters = { search: "", status: "", type: "", mpStatus: "", billingPeriod: "", primaryOnly: false };
+let hierFilters = { search: "", status: "", type: "", mpStatus: "", billingPeriod: "", primaryOnly: false, periodBilled: "" };
 // Column-sort state for the main Pending Primaries table (task 2026-09-
 // 11: "allow to order by the different columns the main and detail").
 // null key = no manual sort, table keeps its natural query order.
@@ -3371,6 +3397,7 @@ function hierVisibleIndices(ignoreFilters = false) {
       if (hierFilters.mpStatus && r.mp_status !== hierFilters.mpStatus) return false;
       if (hierFilters.billingPeriod && String(r.id_billing_period ?? "") !== hierFilters.billingPeriod) return false;
       if (hierFilters.primaryOnly && Number(r.secondaries_not_sent_count ?? 0) !== 0) return false;
+      if (hierFilters.periodBilled && String(r.period_billed ?? "0") !== hierFilters.periodBilled) return false;
       if (search) {
         const haystack = `${r.niss || ""} ${r.id_measuring_point || ""}`.toLowerCase();
         if (!haystack.includes(search)) return false;
@@ -3402,33 +3429,214 @@ function hierPopulateFilterOptions() {
   $("#hier-filter-mpstatus").value = hierFilters.mpStatus;
   $("#hier-filter-billingperiod").value = hierFilters.billingPeriod;
   $("#hier-filter-primaryonly").checked = hierFilters.primaryOnly;
+  hierSyncPeriodBilledSeg();
   $("#hier-filter-row").hidden = hierRows.length === 0;
-  $("#hier-export-csv-btn").hidden = hierRows.length === 0;
-  $("#hier-export-xlsx-btn").hidden = hierRows.length === 0;
   $("#hier-export-all-wrap").hidden = hierRows.length === 0;
   $("#hier-dashboard-card").hidden = hierRows.length === 0;
 }
 
-function hierRenderKpiRow(visibleRows) {
-  const distinctNiss = new Set(visibleRows.map((r) => r.niss).filter(Boolean)).size;
-  const anomalousCount = visibleRows.filter((r) => r.read_status === "5000STSRED").length;
-  const periods = visibleRows.map((r) => Number(r.id_billing_period)).filter((n) => !Number.isNaN(n));
-  const oldestPeriod = periods.length ? Math.min(...periods) : null;
-  const primaryOnlyCount = visibleRows.filter((r) => Number(r.secondaries_not_sent_count ?? NaN) === 0).length;
-  const cards = [
-    ["rows", "📄", "Pending primaries", visibleRows.length],
-    ["niss", "🔌", "Distinct NISS", distinctNiss],
-    ["anomalous", "⚠️", "Anomalous reads", anomalousCount],
-    ["oldest", "📅", "Oldest billing period", oldestPeriod ?? "—"],
-    ["primaryonly", "🟢", "Primary-only fixes", primaryOnlyCount],
-  ];
-  $("#hier-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
-    `<div class="kpi-card" data-kpi="${kpi}">
-      <div class="kpi-value">${value}</div>
-      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
-    </div>`
-  ).join("");
+// Segmented "Period billed" control (All / Billed / Not billed) - replaces
+// the old <select>; hierFilters.periodBilled keeps the same "", "1", "0".
+function hierSyncPeriodBilledSeg() {
+  $$("#hier-filter-periodbilled button").forEach((b) =>
+    b.classList.toggle("is-active", b.dataset.value === (hierFilters.periodBilled || "")));
 }
+
+// Active-filter count badge on the Filters panel header.
+function hierUpdateFilterBadge() {
+  const f = hierFilters;
+  const n = [f.search.trim(), f.status, f.type, f.mpStatus, f.billingPeriod, f.periodBilled].filter(Boolean).length
+    + (f.primaryOnly ? 1 : 0);
+  const badge = $("#hier-filter-badge");
+  badge.textContent = String(n);
+  badge.hidden = n === 0;
+}
+
+// --- Modern dashboard helpers (RJ 2026-09-27: "modern, using gauge meter
+// style") ---------------------------------------------------------------
+// Semicircle gauge: arc filled to `pct` (0-100) plus a needle. pathLength
+// =100 lets stroke-dasharray take the percentage directly.
+function hxGaugeSvg(pct, colorFrom, colorTo, id) {
+  const p = Math.max(0, Math.min(100, pct));
+  const angle = -90 + (p * 180) / 100;
+  return `
+    <svg viewBox="0 0 120 72" class="hx-gauge-svg" aria-hidden="true">
+      <defs><linearGradient id="hxg-${id}" x1="0" x2="1" y1="0" y2="0">
+        <stop offset="0%" stop-color="${colorFrom}"/><stop offset="100%" stop-color="${colorTo}"/>
+      </linearGradient></defs>
+      <path d="M12 62 A48 48 0 0 1 108 62" class="hx-gauge-track" pathLength="100"/>
+      <path d="M12 62 A48 48 0 0 1 108 62" class="hx-gauge-fill" pathLength="100"
+            stroke="url(#hxg-${id})" stroke-dasharray="${p} 100"/>
+      <g transform="rotate(${angle} 60 62)">
+        <line x1="60" y1="62" x2="60" y2="22" class="hx-gauge-needle"/>
+      </g>
+      <circle cx="60" cy="62" r="4.5" class="hx-gauge-hub"/>
+    </svg>`;
+}
+
+function hierRenderGauges(visibleRows) {
+  const n = visibleRows.length || 0;
+  const billed = visibleRows.filter((r) => String(r.period_billed) === "1").length;
+  const primaryOnly = visibleRows.filter((r) => Number(r.secondaries_not_sent_count ?? NaN) === 0).length;
+  const anomalous = visibleRows.filter((r) => r.read_status === "5000STSRED").length;
+  const pct = (x) => (n ? Math.round((x / n) * 1000) / 10 : 0);
+  // KPI-only (RJ 2026-09-27: "i dont want it to be filters the gauge, i
+  // want it to be used in kpis") - display, no click behaviour.
+  $("#hier-gauge-row").innerHTML = hxGaugesHtml([
+    { label: "Period already billed", count: billed, total: n, c1: "#f97316", c2: "#ef4444",
+      hint: "Pending reading whose period already has a matching bill" },
+    { label: "Primary-only fixes", count: primaryOnly, total: n, c1: "#10b981", c2: "#22c55e",
+      hint: "Every secondary already sent — only the primary is left" },
+    { label: "Anomalous reads", count: anomalous, total: n, c1: "#f59e0b", c2: "#eab308",
+      hint: "Primary reading in 5000STSRED (Anomalous)" },
+  ]);
+}
+
+// ---------------------------------------------------------------------
+// Shared "hx" dashboard toolkit (RJ 2026-09-27: "apply the same design to
+// all of my menus"). Every page builds its KPI strip with these:
+//   hxGaugesHtml([{label, count, total, c1, c2, hint}])  -> gauge cards
+//   hxTilesHtml([{icon, label, value, accent, sub}])      -> stat tiles
+//   hxRenderDashboard(containerId, {gauges, tiles, split}) -> both, into
+//     a .hx-dashboard container (split = {title, entries:[[label,count]]})
+// Gauges are KPIs only - never filters.
+// ---------------------------------------------------------------------
+let _hxGaugeSeq = 0;
+function hxGaugesHtml(gauges) {
+  return gauges.map((g) => {
+    const total = Number(g.total) || 0;
+    const count = Number(g.count) || 0;
+    const pct = total ? Math.round((count / total) * 1000) / 10 : 0;
+    const id = `g${++_hxGaugeSeq}`;
+    return `
+    <div class="hx-gauge" title="${escapeHtml(g.hint || "")}">
+      ${hxGaugeSvg(pct, g.c1 || "#6366f1", g.c2 || "#06b6d4", id)}
+      <div class="hx-gauge-value">${pct}<small>%</small></div>
+      <div class="hx-gauge-label">${escapeHtml(g.label)}</div>
+      <div class="hx-gauge-count">${count.toLocaleString()} of ${total.toLocaleString()}</div>
+    </div>`;
+  }).join("");
+}
+
+function hxTilesHtml(tiles) {
+  return tiles.map((t) => `
+    <div class="hx-tile${t.accent ? " hx-tile-accent" : ""}">
+      <div class="hx-tile-icon">${t.icon || "•"}</div>
+      <div><div class="hx-tile-value">${t.value}${t.sub ? ` <small>${escapeHtml(t.sub)}</small>` : ""}</div>
+      <div class="hx-tile-label">${escapeHtml(t.label)}</div></div>
+    </div>`).join("");
+}
+
+const HX_SPLIT_PALETTE = ["#6366f1", "#06b6d4", "#f59e0b", "#10b981", "#ec4899", "#8b5cf6", "#ef4444", "#94a3b8"];
+function hxSplitHtml(title, entries) {
+  if (!entries || !entries.length) return "";
+  const total = entries.reduce((s, [, c]) => s + c, 0) || 1;
+  const color = (i) => HX_SPLIT_PALETTE[i % HX_SPLIT_PALETTE.length];
+  return `
+    <div class="hx-split-title">${escapeHtml(title)}</div>
+    <div class="hx-split-bar">${entries.map(([label, count], i) =>
+      `<span style="width:${(count / total) * 100}%;background:${color(i)}" title="${escapeHtml(label)}: ${count}"></span>`).join("")}</div>
+    <div class="hx-split-legend">${entries.map(([label, count], i) =>
+      `<span><i style="background:${color(i)}"></i>${escapeHtml(label)} <b>${count.toLocaleString()}</b> <em>${Math.round((count / total) * 100)}%</em></span>`).join("")}</div>`;
+}
+
+// Counts rows by a key function -> [[label, count], ...] sorted desc.
+function hxCountBy(rows, keyFn, emptyLabel = "(none)") {
+  const m = new Map();
+  rows.forEach((r) => { const k = keyFn(r) || emptyLabel; m.set(k, (m.get(k) || 0) + 1); });
+  return [...m.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+function hxSum(rows, key) {
+  return rows.reduce((s, r) => s + (Number(r[key]) || 0), 0);
+}
+
+// Collapses every page's static explanation text by default (RJ
+// 2026-09-27: "by default the information about the functionality should
+// be collapsed, it is eating space" - now app-wide). Wraps:
+//   - .warning-banner                      -> "⚠ Notes"
+//   - long static <p class="hint-text">    -> "ⓘ How this works"
+// Only STATIC text is touched: anything with an id, or containing an
+// element with an id, is left alone (those are live status lines the code
+// updates). Consecutive paragraphs in the same spot share one pill.
+// Modals and the already-collapsed Hierarchy "About" section are skipped.
+function hxCollapseInfo() {
+  const skip = (el) => el.closest(".hier-reading-modal, .hx-info, .hx-hint, .hx-modal, #login-overlay, .login-card");
+  const wrap = (el, summaryText, warn) => {
+    const prev = el.previousElementSibling;
+    if (prev && prev.matches("details.hx-hint[data-hx-auto]") && prev.classList.contains("hx-hint-warn") === warn) {
+      prev.appendChild(el);
+      return;
+    }
+    const d = document.createElement("details");
+    d.className = "hx-hint" + (warn ? " hx-hint-warn" : "");
+    d.dataset.hxAuto = "1";
+    const s = document.createElement("summary");
+    s.textContent = summaryText;
+    el.parentNode.insertBefore(d, el);
+    d.appendChild(s);
+    d.appendChild(el);
+  };
+  $$(".page .warning-banner").forEach((el) => {
+    if (skip(el) || el.id || el.querySelector("[id]")) return;
+    wrap(el, "⚠ Notes", true);
+  });
+  $$(".page p.hint-text").forEach((el) => {
+    if (skip(el) || el.id || el.querySelector("[id]")) return;
+    if (el.textContent.trim().length < 90) return;
+    wrap(el, "ⓘ How this works", false);
+  });
+}
+
+// For pages that already have their own KPI row (Bill Issuance cases, Bulk
+// Checker): puts a gauge strip directly above that row, reusing one
+// container per row so re-renders replace rather than stack.
+function hxGaugesAbove(kpiRowSelector, gauges) {
+  const row = $(kpiRowSelector);
+  if (!row) return;
+  let strip = row.previousElementSibling;
+  if (!strip || !strip.classList.contains("hx-gauge-strip")) {
+    strip = document.createElement("div");
+    strip.className = "hx-gauges hx-gauge-strip";
+    row.parentNode.insertBefore(strip, row);
+  }
+  const shown = gauges.filter((g) => Number(g.total) > 0);
+  strip.hidden = shown.length === 0;
+  strip.classList.remove("hx-gauges-1", "hx-gauges-2", "hx-gauges-3", "hx-gauges-4");
+  strip.classList.add(`hx-gauges-${Math.min(Math.max(shown.length, 1), 4)}`);
+  strip.innerHTML = hxGaugesHtml(shown);
+}
+
+function hxRenderDashboard(containerId, { gauges = [], tiles = [], split = null } = {}) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.hidden = false;
+  el.classList.toggle("hx-dashboard-nogauges", gauges.length === 0);
+  el.innerHTML =
+    (gauges.length ? `<div class="hx-gauges hx-gauges-${Math.min(gauges.length, 4)}">${hxGaugesHtml(gauges)}</div>` : "") +
+    `<div class="hx-tiles">${hxTilesHtml(tiles)}</div>` +
+    (split && split.entries && split.entries.length ? `<div class="hx-split">${hxSplitHtml(split.title, split.entries)}</div>` : "");
+}
+
+const HX_READ_STATUS = {
+  "1000STSRED": ["Available", "hx-pill-blue"],
+  "5000STSRED": ["Anomalous", "hx-pill-amber"],
+  "6000STSRED": ["Sent to bill", "hx-pill-violet"],
+  "7000STSRED": ["Billed", "hx-pill-green"],
+  "7001STSRED": ["UAU billed", "hx-pill-green"],
+  "8000STSRED": ["TNB", "hx-pill-gray"],
+};
+function hxStatusPill(code) {
+  if (!code) return `<span class="hx-pill hx-pill-gray">—</span>`;
+  const [label, cls] = HX_READ_STATUS[code] || [code, "hx-pill-gray"];
+  return `<span class="hx-pill ${cls}" title="${escapeHtml(code)}">${escapeHtml(label)}</span>`;
+}
+function hxDate(v) {
+  return escapeHtml(String(v ?? "").replace(/ 00:00:00(\.0+)?$/, ""));
+}
+
+// (hierRenderKpiRow replaced by hierRenderGauges + the tiles in
+// hierRenderDashboard - RJ 2026-09-27 redesign.)
 
 // Small "Overview" dashboard shown above the main card - same "recompute
 // from whatever's currently visible" convention as hierRenderKpiRow just
@@ -3442,38 +3650,38 @@ function hierRenderDashboard(visibleRows) {
   const totalReadyUsage = visibleRows.reduce((sum, r) => sum + (Number(r.ready_usage) || 0), 0);
   const totalSecondaries = visibleRows.reduce((sum, r) => sum + (Number(r.secondary_count) || 0), 0);
   const avgSecondaries = visibleRows.length ? (totalSecondaries / visibleRows.length).toFixed(1) : "0.0";
-  const distinctPeriods = new Set(visibleRows.map((r) => r.id_billing_period).filter(Boolean)).size;
-  const cards = [
-    ["readyusage", "★", "Total ready usage", totalReadyUsage.toLocaleString()],
-    ["primaries", "🗂️", "Pending primaries", visibleRows.length],
-    ["secondaries", "🔗", "Total secondaries", totalSecondaries],
-    ["avg", "📊", "Avg secondaries / primary", avgSecondaries],
-    ["periods", "📅", "Billing periods in view", distinctPeriods],
+  const distinctNiss = new Set(visibleRows.map((r) => r.niss).filter(Boolean)).size;
+  const periodRows = visibleRows.filter((r) => r.id_billing_period);
+  const oldest = periodRows.reduce((m, r) => (!m || Number(r.id_billing_period) < Number(m.id_billing_period) ? r : m), null);
+  const tiles = [
+    ["★", "Total ready usage", totalReadyUsage.toLocaleString(), "hx-tile-accent"],
+    ["🗂️", "Pending primaries", visibleRows.length.toLocaleString(), ""],
+    ["🔌", "Distinct NISS", distinctNiss.toLocaleString(), ""],
+    ["🔗", "Secondaries", `${totalSecondaries.toLocaleString()} <small>avg ${avgSecondaries}</small>`, ""],
+    ["📅", "Oldest period", oldest ? escapeHtml(oldest.billing_period_desc || oldest.id_billing_period) : "—", ""],
   ];
-  $("#hier-dashboard-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
-    `<div class="kpi-card" data-kpi="${kpi}">
-      <div class="kpi-value">${value}</div>
-      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
-    </div>`
-  ).join("");
+  $("#hier-dashboard-kpi-row").innerHTML = tiles.map(([icon, label, value, cls]) =>
+    `<div class="hx-tile ${cls}">
+      <div class="hx-tile-icon">${icon}</div>
+      <div><div class="hx-tile-value">${value}</div><div class="hx-tile-label">${label}</div></div>
+    </div>`).join("");
 
-  // Calculation-module type breakdown - counts how many currently-visible
-  // primaries fall under each GCCOM_CALCULATION_MODULE label. Unlabeled
-  // rows (no calc_module_type resolved) are grouped as "Unclassified"
-  // rather than dropped, so the counts still add up to the total above.
+  // Calc-module split as one stacked bar + legend (was a row of cards).
+  // Unlabeled rows grouped as "Unclassified" so the parts add up.
   const typeCounts = new Map();
   visibleRows.forEach((r) => {
     const label = r.calc_module_type || "Unclassified";
     typeCounts.set(label, (typeCounts.get(label) || 0) + 1);
   });
-  const typeEntries = [...typeCounts.entries()].sort((a, b) => b[1] - a[1]);
-  $("#hier-dashboard-type-row").innerHTML = typeEntries.length
-    ? typeEntries.map(([label, count]) =>
-        `<div class="kpi-card" data-kpi="type" title="${escapeHtml(label)}">
-          <div class="kpi-value">${count}</div>
-          <div class="kpi-label"><span class="kpi-card-icon">🏷️</span>${escapeHtml(label)}</div>
-        </div>`
-      ).join("")
+  const entries = [...typeCounts.entries()].sort((a, b) => b[1] - a[1]);
+  const total = visibleRows.length || 1;
+  const palette = ["#6366f1", "#06b6d4", "#f59e0b", "#10b981", "#ec4899", "#94a3b8"];
+  $("#hier-dashboard-type-row").innerHTML = entries.length ? `
+    <div class="hx-split-title">Calculation module</div>
+    <div class="hx-split-bar">${entries.map(([label, count], i) =>
+      `<span style="width:${(count / total) * 100}%;background:${palette[i % palette.length]}" title="${escapeHtml(label)}: ${count}"></span>`).join("")}</div>
+    <div class="hx-split-legend">${entries.map(([label, count], i) =>
+      `<span><i style="background:${palette[i % palette.length]}"></i>${escapeHtml(label)} <b>${count}</b> <em>${Math.round((count / total) * 100)}%</em></span>`).join("")}</div>`
     : "";
 }
 
@@ -3493,31 +3701,36 @@ function hierRenderTable() {
     // for the non-green case - a different condition (5000STSRED reads)
     // but the same "needs a second look" visual intent, so no new CSS
     // was needed for that one.
+    // Redesign (RJ 2026-09-27): identity + what-to-act-on first (NISS,
+    // MP, period, status, billed?, ready usage), structural detail after.
+    // Primary-only rows get a green left accent instead of a full-row
+    // fill; anomalous an amber accent. Whole row opens the detail pop-out.
     const isPrimaryOnly = Number(r.secondaries_not_sent_count ?? NaN) === 0;
-    tr.className = isPrimaryOnly ? "row-primary-only" : (r.read_status === "5000STSRED" ? "row-multi-period" : "");
+    tr.className = "hx-row" + (isPrimaryOnly ? " hx-row-primaryonly" : (r.read_status === "5000STSRED" ? " hx-row-anomalous" : ""));
+    tr.dataset.idx = String(idx);
+    const notSent = Number(r.secondaries_not_sent_count ?? 0);
     tr.innerHTML = (
-      `<td>${escapeHtml(r.id_measuring_point ?? "")}</td>` +
-      `<td>${escapeHtml(r.id_main_mp ?? "")}</td>` +
-      `<td>${escapeHtml(r.niss ?? "")}</td>` +
-      `<td title="${escapeHtml(r.mp_type_desc ?? "")}">${escapeHtml(r.mp_type ?? "")}${r.mp_type_desc ? " (" + escapeHtml(r.mp_type_desc) + ")" : ""}</td>` +
-      `<td title="${escapeHtml(r.mp_status_desc ?? "")}">${escapeHtml(r.mp_status ?? "")}${r.mp_status_desc ? " (" + escapeHtml(r.mp_status_desc) + ")" : ""}</td>` +
-      `<td>${escapeHtml(r.secondary_count ?? "0")}</td>` +
-      `<td>${escapeHtml(r.secondaries_not_sent_count ?? "0")}</td>` +
-      `<td title="ID_CALCULATION_MODULE ${escapeHtml(r.id_calculation_module ?? "")}">${escapeHtml(r.calc_module_type ?? "")}</td>` +
-      `<td title="${escapeHtml(r.billing_period_desc ?? "")}">${escapeHtml(r.id_billing_period ?? "")}${r.billing_period_desc ? " (" + escapeHtml(r.billing_period_desc) + ")" : ""}</td>` +
-      `<td>${escapeHtml(r.id_reading ?? "")}</td>` +
-      `<td>${escapeHtml(r.reading_date ?? "")}</td>` +
-      `<td title="${escapeHtml(r.reading_type_desc ?? "")}">${escapeHtml(r.reading_type ?? "")}${r.reading_type_desc ? " (" + escapeHtml(r.reading_type_desc) + ")" : ""}</td>` +
-      `<td>${escapeHtml(r.read_status ?? "")}</td>` +
-      `<td><strong>${escapeHtml(r.ready_usage ?? "")}</strong></td>` +
-      `<td>${escapeHtml(r.reading_usage ?? "")}</td>` +
-      `<td><button type="button" class="btn btn-pill-sm hier-drill-btn" data-idx="${idx}" title="View this hierarchy's full member list">🔗</button></td>`
+      `<td><span class="hx-niss">${escapeHtml(r.niss ?? "")}</span></td>` +
+      `<td class="hx-mono">${escapeHtml(r.id_measuring_point ?? "")}${r.id_main_mp ? `<div class="hx-sub">main ${escapeHtml(r.id_main_mp)}</div>` : ""}</td>` +
+      `<td title="${escapeHtml(r.id_billing_period ?? "")}">${escapeHtml(r.billing_period_desc || r.id_billing_period || "")}</td>` +
+      `<td>${hxStatusPill(r.read_status)}</td>` +
+      `<td>${String(r.period_billed) === "1" ? `<span class="hx-pill hx-pill-billed">Billed</span>` : `<span class="hx-pill hx-pill-ghost">Open</span>`}</td>` +
+      `<td class="hx-num"><strong>${escapeHtml(r.ready_usage ?? "")}</strong></td>` +
+      `<td class="hx-num">${escapeHtml(r.secondary_count ?? "0")}</td>` +
+      `<td class="hx-num">${notSent === 0 ? `<span class="hx-pill hx-pill-green">0</span>` : escapeHtml(String(notSent))}</td>` +
+      `<td>${hxDate(r.reading_date)}</td>` +
+      `<td title="${escapeHtml(r.reading_type ?? "")}">${escapeHtml(r.reading_type_desc || r.reading_type || "")}</td>` +
+      `<td class="hx-clip" title="${escapeHtml(r.calc_module_type ?? "")}">${escapeHtml(r.calc_module_type ?? "")}</td>` +
+      `<td title="${escapeHtml(r.mp_status ?? "")}">${escapeHtml(r.mp_status_desc || r.mp_status || "")}</td>` +
+      `<td class="hx-mono">${escapeHtml(r.id_reading ?? "")}</td>` +
+      `<td><button type="button" class="hx-icon-btn hier-drill-btn" data-idx="${idx}" title="Open hierarchy detail">🔗</button></td>`
     );
     tbody.appendChild(tr);
   });
   const visibleRows = visible.map((idx) => hierRows[idx]);
-  hierRenderKpiRow(visibleRows);
+  hierRenderGauges(visibleRows);
   hierRenderDashboard(visibleRows);
+  hierUpdateFilterBadge();
 }
 
 hierWireSortableHeaders(
@@ -3541,7 +3754,7 @@ $("#hier-detect-btn").addEventListener("click", async () => {
   try {
     const data = await api("/api/hierarchy-analysis/detect", { method: "POST" });
     hierRows = data.rows;
-    hierFilters = { search: "", status: "", type: "", mpStatus: "", billingPeriod: "", primaryOnly: false };
+    hierFilters = { search: "", status: "", type: "", mpStatus: "", billingPeriod: "", primaryOnly: false, periodBilled: "" };
     $("#hier-filter-search").value = "";
     hierPopulateFilterOptions();
     hierRenderTable();
@@ -3577,9 +3790,21 @@ $("#hier-filter-primaryonly").addEventListener("change", () => {
   hierFilters = { ...hierFilters, primaryOnly: $("#hier-filter-primaryonly").checked };
   hierRenderTable();
 });
+$("#hier-filter-periodbilled").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-value]");
+  if (!b) return;
+  hierFilters = { ...hierFilters, periodBilled: b.dataset.value };
+  hierSyncPeriodBilledSeg();
+  hierRenderTable();
+});
 
-$("#hier-filter-clear-btn").addEventListener("click", () => {
-  hierFilters = { search: "", status: "", type: "", mpStatus: "", billingPeriod: "", primaryOnly: false };
+$("#hier-filter-clear-btn").addEventListener("click", (ev) => {
+  // Lives inside the Filters <summary> - don't let the click also
+  // collapse/expand the panel.
+  ev.preventDefault();
+  ev.stopPropagation();
+  hierFilters = { search: "", status: "", type: "", mpStatus: "", billingPeriod: "", primaryOnly: false, periodBilled: "" };
+  hierSyncPeriodBilledSeg();
   $("#hier-filter-search").value = "";
   $("#hier-filter-status").value = "";
   $("#hier-filter-type").value = "";
@@ -3626,25 +3851,23 @@ function hierRenderDetailTable() {
   sorted.forEach((r) => {
     const tr = document.createElement("tr");
     tr.className = hierIsBilled(r.read_status) ? "" : "row-not-billed";
+    // "Primary" follows the corrected definition (MP_TYPE IN Principal /
+    // Principal acoplado), not the IND_DIST_PPAL flag this drill-down
+    // query still happens to return - see hierarchy_analysis.py.
+    const isPrimary = ["TIPEQM0003", "TIPEQM0005"].includes(r.mp_type);
     tr.innerHTML = (
-      `<td>${escapeHtml(r.id_measuring_point ?? "")}</td>` +
-      `<td>${escapeHtml(r.id_main_mp ?? "")}</td>` +
-      `<td>${escapeHtml(r.niss ?? "")}</td>` +
-      // "Primary?" now follows the corrected definition (MP_TYPE IN
-      // Principal/Principal acoplado), not the IND_DIST_PPAL flag this
-      // drill-down query still happens to return - see server-side
-      // app/core/hierarchy_analysis.py's module docstring for why.
-      `<td>${["TIPEQM0003", "TIPEQM0005"].includes(r.mp_type) ? "Yes" : ""}</td>` +
-      `<td>${escapeHtml(r.perc_dist ?? "")}</td>` +
-      `<td>${escapeHtml(r.mp_type ?? "")}</td>` +
+      `<td><span class="hx-niss">${escapeHtml(r.niss ?? "")}</span></td>` +
+      `<td class="hx-mono">${escapeHtml(r.id_measuring_point ?? "")}</td>` +
+      `<td>${isPrimary ? `<span class="hx-pill hx-pill-violet">Primary</span>` : `<span class="hx-pill hx-pill-ghost">Secondary</span>`}</td>` +
+      `<td class="hx-num">${escapeHtml(r.perc_dist ?? "")}</td>` +
+      `<td>${hxStatusPill(r.read_status)}</td>` +
+      `<td class="hx-num"><strong>${escapeHtml(r.ready_usage ?? "")}</strong></td>` +
+      `<td class="hx-num">${escapeHtml(r.value ?? "")}</td>` +
+      `<td>${hxDate(r.reading_date)}</td>` +
+      `<td title="${escapeHtml(r.reading_type ?? "")}">${escapeHtml(r.reading_type_desc || r.reading_type || "")}</td>` +
+      `<td title="${escapeHtml(r.id_billing_period ?? "")}">${escapeHtml(r.billing_period_desc || r.id_billing_period || "")}</td>` +
       `<td>${escapeHtml(r.status ?? "")}</td>` +
-      `<td>${escapeHtml(r.id_billing_period ?? "")}${r.billing_period_desc ? " (" + escapeHtml(r.billing_period_desc) + ")" : ""}</td>` +
-      `<td>${escapeHtml(r.id_reading ?? "")}</td>` +
-      `<td>${escapeHtml(r.reading_date ?? "")}</td>` +
-      `<td>${escapeHtml(r.reading_type ?? "")}${r.reading_type_desc ? " (" + escapeHtml(r.reading_type_desc) + ")" : ""}</td>` +
-      `<td>${escapeHtml(r.read_status ?? "")}</td>` +
-      `<td><strong>${escapeHtml(r.ready_usage ?? "")}</strong></td>` +
-      `<td>${escapeHtml(r.value ?? "")}</td>` +
+      `<td class="hx-mono">${escapeHtml(r.id_reading ?? "")}</td>` +
       // Opens the reading-history popup (task #143) for this row's own
       // supply, highlighting the billing period this row itself is at -
       // the analyst's own ask ("highlight the reading in the pop up
@@ -3677,8 +3900,8 @@ function hierRenderReadingModal(rows, checkingBillingPeriod) {
       `<td>${escapeHtml(r.reading_type ?? "")}</td>` +
       `<td>${escapeHtml(r.usage_type ?? "")}</td>` +
       `<td>${escapeHtml(r.read_status ?? "")}</td>` +
-      `<td>${escapeHtml(r.prev_date ?? "")}</td>` +
-      `<td>${escapeHtml(r.reading_date ?? "")}</td>` +
+      `<td>${hxDate(r.prev_date)}</td>` +
+      `<td>${hxDate(r.reading_date)}</td>` +
       `<td>${escapeHtml(r.prev_value ?? "")}</td>` +
       `<td>${escapeHtml(r.value ?? "")}</td>` +
       `<td>${escapeHtml(r.reading_usage ?? "")}</td>` +
@@ -3703,9 +3926,9 @@ $("#hier-detail-table tbody").addEventListener("click", async (ev) => {
     });
     hierRenderReadingModal(data.rows, billingPeriod);
     $("#hier-reading-modal-title").textContent =
-      `— supply ${sectorSupply} (${data.rows.length} reading(s))` +
-      (billingPeriod ? `, checking billing period ${billingPeriod}` : "");
-    $("#hier-reading-modal-overlay").hidden = false;
+      `Supply ${sectorSupply} · ${data.rows.length} reading(s)` +
+      (billingPeriod ? ` · checking period ${billingPeriod}` : "");
+    hxOpenModal("hier-reading-modal-overlay");
   } catch (err) {
     showToast(err.message || "Could not load reading history.", true);
   } finally {
@@ -3713,11 +3936,9 @@ $("#hier-detail-table tbody").addEventListener("click", async (ev) => {
   }
 });
 
-$("#hier-reading-modal-close-btn").addEventListener("click", () => {
-  $("#hier-reading-modal-overlay").hidden = true;
-});
+$("#hier-reading-modal-close-btn").addEventListener("click", () => hxCloseModal("hier-reading-modal-overlay"));
 $("#hier-reading-modal-overlay").addEventListener("click", (ev) => {
-  if (ev.target.id === "hier-reading-modal-overlay") $("#hier-reading-modal-overlay").hidden = true;
+  if (ev.target.id === "hier-reading-modal-overlay") hxCloseModal("hier-reading-modal-overlay");
 });
 
 $("#hier-table tbody").addEventListener("click", async (ev) => {
@@ -3738,13 +3959,17 @@ $("#hier-table tbody").addEventListener("click", async (ev) => {
     $("#hier-detail-filter-notbilled").checked = false;
     hierRenderDetailTable();
     const notBilledCount = hierDetailRows.filter((r) => !hierIsBilled(r.read_status)).length;
-    const periodNote = row.id_billing_period
-      ? ` — scoped to billing period ${row.id_billing_period}${row.billing_period_desc ? " (" + row.billing_period_desc + ")" : ""}`
-      : "";
-    const notBilledNote = notBilledCount ? `, ${notBilledCount} not billed` : "";
-    $("#hier-detail-title").textContent = `— measuring point ${row.id_measuring_point} (${data.rows.length} member row(s)${notBilledNote})${periodNote}`;
-    $("#hier-detail-card").hidden = false;
-    $("#hier-detail-card").scrollIntoView({ behavior: "smooth", block: "start" });
+    const totalReady = hierDetailRows.reduce((s, r) => s + (Number(r.ready_usage) || 0), 0);
+    $("#hier-detail-title").textContent =
+      `${row.niss || ""} · measuring point ${row.id_measuring_point}` +
+      (row.id_billing_period ? ` · ${row.billing_period_desc || row.id_billing_period}` : "");
+    const stat = (label, value, cls = "") => `<div class="hx-mstat ${cls}"><b>${value}</b><span>${label}</span></div>`;
+    $("#hier-detail-stats").innerHTML =
+      stat("Members", hierDetailRows.length) +
+      stat("Not billed", notBilledCount, notBilledCount ? "hx-mstat-warn" : "hx-mstat-ok") +
+      stat("Ready usage", totalReady.toLocaleString()) +
+      stat("Period", String(row.period_billed) === "1" ? "Billed" : "Open", String(row.period_billed) === "1" ? "hx-mstat-warn" : "");
+    hxOpenModal("hier-detail-card");
   } catch (err) {
     showToast(err.message || "Could not load hierarchy detail.", true);
   } finally {
@@ -3757,16 +3982,54 @@ $("#hier-detail-filter-notbilled").addEventListener("change", () => {
   hierRenderDetailTable();
 });
 
-$("#hier-detail-close-btn").addEventListener("click", () => { $("#hier-detail-card").hidden = true; });
+$("#hier-detail-close-btn").addEventListener("click", () => hxCloseModal("hier-detail-card"));
+$("#hier-detail-card").addEventListener("click", (ev) => {
+  if (ev.target.id === "hier-detail-card") hxCloseModal("hier-detail-card");
+});
+
+// Whole-row click opens the detail pop-out (the 🔗 button still works via
+// the handler above; this covers clicks anywhere else on the row).
+$("#hier-table tbody").addEventListener("click", (ev) => {
+  if (ev.target.closest(".hier-drill-btn")) return;
+  const tr = ev.target.closest("tr.hx-row");
+  if (!tr) return;
+  tr.querySelector(".hier-drill-btn")?.click();
+});
+
+// --- Pop-out helpers: open/close, maximize, Esc (RJ 2026-09-27: "a
+// popout when you press it that can be maximized") -------------------
+function hxOpenModal(id) {
+  $(`#${id}`).hidden = false;
+  document.body.classList.add("hx-modal-open");
+}
+function hxCloseModal(id) {
+  $(`#${id}`).hidden = true;
+  if (!$$(".hier-reading-modal-overlay").some((o) => !o.hidden)) document.body.classList.remove("hx-modal-open");
+}
+document.addEventListener("click", (ev) => {
+  const btn = ev.target.closest("[data-maximize]");
+  if (!btn) return;
+  const box = document.getElementById(btn.dataset.maximize);
+  if (!box) return;
+  const max = box.classList.toggle("is-max");
+  btn.textContent = max ? "⤡" : "⤢";
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape") return;
+  // Close the top-most open pop-out only (readings sits above detail).
+  if (!$("#hier-reading-modal-overlay").hidden) { hxCloseModal("hier-reading-modal-overlay"); return; }
+  if (!$("#hier-detail-card").hidden) hxCloseModal("hier-detail-card");
+});
 
 $("#hier-export-csv-btn").addEventListener("click", () => {
   const exportAll = !!$("#hier-export-all")?.checked;
   const visible = hierVisibleIndices(exportAll);
   if (!visible.length) return;
-  const header = ["id_measuring_point", "id_main_mp", "niss", "mp_type", "mp_status", "secondary_count", "secondaries_not_sent_count", "id_calculation_module", "calc_module_type", "id_billing_period", "billing_period_desc", "id_reading", "reading_date", "reading_type", "reading_type_desc", "read_status", "ready_usage", "reading_usage"];
+  const header = ["id_measuring_point", "id_main_mp", "niss", "mp_type", "mp_status", "secondary_count", "secondaries_not_sent_count", "id_calculation_module", "calc_module_type", "id_billing_period", "billing_period_desc", "id_reading", "reading_date", "reading_type", "reading_type_desc", "read_status", "period_billed", "ready_usage", "reading_usage"];
   const lines = [header.join(",")];
   visible.forEach((idx) => {
-    const r = hierRows[idx];
+    const r = { ...hierRows[idx] };
+    r.period_billed = String(r.period_billed) === "1" ? "Yes" : "No";
     lines.push(header.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(","));
   });
   const blob = new Blob([lines.join("\n")], { type: "text/csv" });
@@ -3935,6 +4198,11 @@ function billissRenderKpiRow() {
     ["water", "💧", "Water blocked (Electricity OK)", waterCount],
     ["avgahead", "📅", "Avg. months ahead (Stuck Bill)", avgAhead],
   ];
+  hxGaugesAbove("#billiss-kpi-row", [
+    { label: "Stuck Bill", count: stuckRows.length, total: billissRows.length, c1: "#ef4444", c2: "#f97316" },
+    { label: "New Contract Match", count: ncRows.length, total: billissRows.length, c1: "#6366f1", c2: "#06b6d4" },
+    { label: "Electricity blocked (of stuck)", count: electricityCount, total: stuckRows.length, c1: "#f59e0b", c2: "#eab308" },
+  ]);
   $("#billiss-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
     `<div class="kpi-card" data-kpi="${kpi}">
       <div class="kpi-value">${value}</div>
@@ -4218,6 +4486,11 @@ function biss2RenderKpiRow() {
     ["complete", "✅", "Accounts already Complete", complete],
     ["services", "🔧", "Services needing a period update", servicesNeedingUpdate],
   ];
+  hxGaugesAbove("#biss2-kpi-row", [
+    { label: "Accounts needing action", count: needsAction, total, c1: "#f59e0b", c2: "#f97316" },
+    { label: "Accounts already complete", count: complete, total, c1: "#10b981", c2: "#22c55e" },
+    { label: "Accounts with a missing bill", count: missingBillAccounts, total, c1: "#ef4444", c2: "#ec4899" },
+  ]);
   $("#biss2-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
     `<div class="kpi-card" data-kpi="${kpi}">
       <div class="kpi-value">${value}</div>
@@ -4536,6 +4809,9 @@ function biss3RenderKpiRow(data) {
     ["accounts", "🏠", "Distinct accounts", data?.account_count ?? new Set(biss3Rows.map((r) => r.id_payment_form)).size],
     ["active", "✅", "With active contract (YES)", data?.with_active_contract_count ?? biss3Rows.filter((r) => r.with_active_contract === "YES").length],
   ];
+  hxGaugesAbove("#biss3-kpi-row", [
+    { label: "Rows with an active contract", count: biss3Rows.filter((r) => r.with_active_contract === "YES").length, total: biss3Rows.length, c1: "#10b981", c2: "#22c55e" },
+  ]);
   $("#biss3-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
     `<div class="kpi-card" data-kpi="${kpi}">
       <div class="kpi-value">${value}</div>
@@ -4943,6 +5219,22 @@ function ibpRenderTable() {
   });
   $("#ibp-select-all").checked = visible.length > 0 && visible.every((r) => ibpSelected.has(String(r.id_anomalous)));
   renderFilteredCount("#ibp-filtered-count", visible.length, ibpRows.length);
+  if (ibpRows.length) {
+    const n = visible.length;
+    hxRenderDashboard("ibp-dash", {
+      gauges: [
+        { label: "Reading already billed", count: visible.filter((r) => ["7000STSRED", "7001STSRED"].includes(r.read_status)).length, total: n, c1: "#6366f1", c2: "#06b6d4" },
+        { label: "Item to bill billed", count: visible.filter((r) => r.item_status === "STTOBILL07").length, total: n, c1: "#10b981", c2: "#22c55e" },
+      ],
+      tiles: [
+        { icon: "📆", label: "Open anomalies", value: new Set(visible.map((r) => r.id_anomalous)).size.toLocaleString(), accent: true },
+        { icon: "👤", label: "Accounts", value: new Set(visible.map((r) => r.account).filter(Boolean)).size.toLocaleString() },
+        { icon: "★", label: "Total ready usage", value: hxSum(visible, "ready_usage").toLocaleString() },
+        { icon: "🧩", label: "Offered services", value: new Set(visible.map((r) => r.offered_service_desc)).size.toLocaleString() },
+      ],
+      split: { title: "Offered service", entries: hxCountBy(visible, (r) => r.offered_service_desc) },
+    });
+  }
 }
 
 $("#ibp-select-all").addEventListener("change", (e) => {
@@ -5125,6 +5417,25 @@ function tcdRenderTable() {
       }).join("") + "</tr>").join("")
     : `<tr><td colspan="${TCD_COLUMNS.length}" class="hint-text">No pairs match the current filters.</td></tr>`;
   renderFilteredCount("#tcd-filtered-count", rows.length, tcdRows.length);
+  if (tcdRows.length) {
+    const n = rows.length;
+    hxRenderDashboard("tcd-dash", {
+      gauges: [
+        { label: "Reading date in contract", count: rows.filter((r) => String(r.in_contract) === "1").length, total: n, c1: "#10b981", c2: "#22c55e",
+          hint: "A non-cancelled contracted service covers the reading date" },
+        { label: "Cycle is TNB", count: rows.filter((r) => r.c_read_status_code === TCD_TNB_CODE).length, total: n, c1: "#6366f1", c2: "#3b82f6" },
+        { label: "Disconnection is TNB", count: rows.filter((r) => r.d_read_status_code === TCD_TNB_CODE).length, total: n, c1: "#f59e0b", c2: "#f97316" },
+      ],
+      tiles: [
+        { icon: "★", label: "Ready usage (cycle + disc.)", value: (hxSum(rows, "c_ready_usage") + hxSum(rows, "d_ready_usage")).toLocaleString(), accent: true },
+        { icon: "🔌", label: "Pairs", value: n.toLocaleString() },
+        { icon: "🏠", label: "Sector supplies", value: new Set(rows.map((r) => r.id_sector_supply)).size.toLocaleString() },
+        { icon: "📅", label: "Billing periods", value: new Set(rows.map((r) => r.billing_period).filter(Boolean)).size.toLocaleString() },
+        { icon: "⚡", label: "Both TNB", value: rows.filter((r) => r.c_read_status_code === TCD_TNB_CODE && r.d_read_status_code === TCD_TNB_CODE).length.toLocaleString() },
+      ],
+      split: { title: "Usage type", entries: hxCountBy(rows, (r) => r.usage_name) },
+    });
+  }
 }
 
 async function tcdDetect() {
@@ -5201,6 +5512,16 @@ const WSH_COLUMNS = [
 let wshRows = [];
 let wshSortKey = null;
 let wshSortDir = 1;
+let wshSelected = new Set(); // stuck ID_ITEM_TO_BILL of each checked row
+
+function wshUpdateSelectionUI() {
+  const n = wshSelected.size;
+  const partners = wshRows.filter((r) => wshSelected.has(String(r.id_item_to_bill)) && r.status_190 === "STTOBILL09").length;
+  $("#wsh-selection-hint").textContent = n
+    ? `${n} row(s) selected → ${n} stuck item(s)${partners ? ` + up to ${partners} service-190 item(s) in STTOBILL09` : ""}.`
+    : "No rows selected.";
+  $("#wsh-generate-btn").disabled = n === 0;
+}
 
 function wshVisibleRows() {
   const period = $("#wsh-filter-period").value;
@@ -5221,10 +5542,20 @@ function wshVisibleRows() {
 
 function wshRenderTable() {
   const head = document.querySelector("#wsh-table thead tr");
-  head.innerHTML = WSH_COLUMNS.map((c) => {
+  const rowsForHeader = wshVisibleRows();
+  const allChecked = rowsForHeader.length > 0 && rowsForHeader.every((r) => wshSelected.has(String(r.id_item_to_bill)));
+  head.innerHTML = `<th><input type="checkbox" id="wsh-select-all" title="Select all visible rows"${allChecked ? " checked" : ""} /></th>` +
+    WSH_COLUMNS.map((c) => {
     const arrow = wshSortKey === c.key ? `<span class="stats-table-sort-arrow">${wshSortDir === 1 ? "▲" : "▼"}</span>` : "";
     return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
   }).join("");
+  $("#wsh-select-all").addEventListener("change", (ev) => {
+    wshVisibleRows().forEach((r) => {
+      if (ev.target.checked) wshSelected.add(String(r.id_item_to_bill));
+      else wshSelected.delete(String(r.id_item_to_bill));
+    });
+    wshRenderTable();
+  });
   head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
     const k = th.dataset.sort;
     wshSortDir = wshSortKey === k ? -wshSortDir : 1;
@@ -5233,14 +5564,78 @@ function wshRenderTable() {
   }));
   const rows = wshVisibleRows();
   document.querySelector("#wsh-table tbody").innerHTML = rows.length
-    ? rows.map((r) => "<tr>" + WSH_COLUMNS.map((c) => {
-        const v = r[c.key] ?? "";
-        const cls = c.key === "status_190" && !v ? ' class="hint-text"' : "";
-        return `<td${cls}>${escapeHtml(c.key === "status_190" && !v ? "(none)" : v)}</td>`;
-      }).join("") + "</tr>").join("")
-    : `<tr><td colspan="${WSH_COLUMNS.length}" class="hint-text">${wshRows.length ? "No rows match the current filters." : "No stuck secondaries for this period."}</td></tr>`;
+    ? rows.map((r) => {
+        const id = String(r.id_item_to_bill);
+        return `<tr><td><input type="checkbox" class="wsh-row-check" data-id="${escapeHtml(id)}"${wshSelected.has(id) ? " checked" : ""} /></td>` +
+          WSH_COLUMNS.map((c) => {
+            const v = r[c.key] ?? "";
+            const cls = c.key === "status_190" && !v ? ' class="hint-text"' : "";
+            return `<td${cls}>${escapeHtml(c.key === "status_190" && !v ? "(none)" : v)}</td>`;
+          }).join("") + "</tr>";
+      }).join("")
+    : `<tr><td colspan="${WSH_COLUMNS.length + 1}" class="hint-text">${wshRows.length ? "No rows match the current filters." : "No stuck secondaries found."}</td></tr>`;
   renderFilteredCount("#wsh-filtered-count", rows.length, wshRows.length);
+  wshUpdateSelectionUI();
+  if (wshRows.length) {
+    const n = rows.length;
+    hxRenderDashboard("wsh-dash", {
+      gauges: [
+        { label: "Service-190 also stuck", count: rows.filter((r) => r.status_190 === "STTOBILL09").length, total: n, c1: "#f97316", c2: "#ef4444",
+          hint: "The account's service-190 item for the same period is also STTOBILL09 (goes in the script too)" },
+        { label: "No service-190 item", count: rows.filter((r) => !r.status_190).length, total: n, c1: "#94a3b8", c2: "#64748b" },
+        { label: "Selected for script", count: rows.filter((r) => wshSelected.has(String(r.id_item_to_bill))).length, total: n, c1: "#6366f1", c2: "#06b6d4" },
+      ],
+      tiles: [
+        { icon: "🪜", label: "Stuck items", value: new Set(rows.map((r) => r.id_item_to_bill)).size.toLocaleString(), accent: true },
+        { icon: "👤", label: "Accounts", value: new Set(rows.map((r) => r.reference)).size.toLocaleString() },
+        { icon: "🎯", label: "Main MPs", value: new Set(rows.map((r) => r.id_main_mp)).size.toLocaleString() },
+        { icon: "📅", label: "Billing periods", value: new Set(rows.map((r) => r.id_billing_period)).size.toLocaleString() },
+      ],
+      split: { title: "Billing period", entries: hxCountBy(rows, (r) => r.description) },
+    });
+  }
 }
+
+document.querySelector("#wsh-table tbody").addEventListener("change", (ev) => {
+  const cb = ev.target.closest(".wsh-row-check");
+  if (!cb) return;
+  if (cb.checked) wshSelected.add(cb.dataset.id); else wshSelected.delete(cb.dataset.id);
+  wshRenderTable(); // refreshes select-all, the selection hint and the "Selected for script" gauge
+});
+
+$("#wsh-generate-btn").addEventListener("click", async () => {
+  if (!wshSelected.size) return;
+  const program = $("#wsh-program").value.trim();
+  if (!program) { showToast("Enter the Jira/Program # this change is for.", true); return; }
+  const btn = $("#wsh-generate-btn");
+  btn.disabled = true;
+  try {
+    const result = await api("/api/wrong-stuck-hierarchy/generate", {
+      method: "POST",
+      body: { item_ids: [...wshSelected], program, audit_user: $("#wsh-audit-user").value.trim(), clean: $("#wsh-clean-toggle").checked },
+    });
+    $("#wsh-output").textContent = result.sql_text;
+    let msg = `Script generated: ${result.item_count} item(s) to bill (${result.stuck_count} stuck + ${result.partner_count} service-190).`;
+    if (result.not_found) msg += ` ${result.not_found} selected item(s) are no longer stuck and were skipped.`;
+    showToast(msg);
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = wshSelected.size === 0;
+  }
+});
+$("#wsh-copy-btn").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#wsh-output").textContent); showToast("Script copied to clipboard."); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#wsh-download-btn").addEventListener("click", () => {
+  const blob = new Blob([$("#wsh-output").textContent], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "wrong_stuck_hierarchy_itb_update.sql";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
 
 $("#wsh-detect-btn").addEventListener("click", async () => {
   const btn = $("#wsh-detect-btn");
@@ -5249,6 +5644,8 @@ $("#wsh-detect-btn").addEventListener("click", async () => {
   try {
     const data = await api("/api/wrong-stuck-hierarchy/detect", { method: "POST", body: {} });
     wshRows = data.rows || [];
+    // RJ: "for all ITB that is in status STTOBILL09" - every row starts checked.
+    wshSelected = new Set(wshRows.map((r) => String(r.id_item_to_bill)));
     // Billing period filter: newest first, labelled in words.
     const periods = new Map();
     wshRows.forEach((r) => { if (r.id_billing_period && !periods.has(r.id_billing_period)) periods.set(r.id_billing_period, r.description || r.id_billing_period); });
@@ -5300,6 +5697,643 @@ $("#wsh-export-btn").addEventListener("click", () => {
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 });
+
+// Wrong Stuck in Hierarchy sub-nav (own data attribute, same reason as
+// the Bill Issuance sub-nav comment explains).
+$$(".da-subnav-btn[data-wsh-sub]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const sub = btn.dataset.wshSub;
+    $$(".da-subnav-btn[data-wsh-sub]").forEach((b) => b.classList.toggle("is-active", b === btn));
+    $$(".da-subpage[data-wsh-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.wshSub === sub));
+  });
+});
+
+// --- Tab 2: Sanitary stuck, Water billed/pending (RJ, 2026-09-27) ---
+const WSHS_COLUMNS = [
+  { key: "reference", label: "Account" },
+  { key: "description", label: "Billing Period" },
+  { key: "billing_date", label: "Billing Date", date: true },
+  { key: "sanitary_niss", label: "Sanitary NISS" },
+  { key: "id_item_to_bill_sanitary", label: "ID Item To Bill (Sanitary)" },
+  { key: "status_sanitary", label: "Status (Sanitary)" },
+  { key: "water_niss", label: "Water NISS" },
+  { key: "id_item_to_bill_water", label: "ID Item To Bill (Water)" },
+  { key: "status_water", label: "Status (Water)" },
+];
+let wshsRows = [];
+let wshsSortKey = null;
+let wshsSortDir = 1;
+
+function wshsFmt(c, v) {
+  const s = v ?? "";
+  return c.date && typeof s === "string" ? s.replace(/ 00:00:00(\.0+)?$/, "") : s;
+}
+
+function wshsVisibleRows() {
+  const period = $("#wshs-filter-period").value;
+  const q = $("#wshs-filter-search").value.trim().toLowerCase();
+  const water = $("#wshs-filter-water").value;
+  let rows = wshsRows.filter((r) => {
+    if (period && String(r.id_billing_period) !== period) return false;
+    if (water && r.status_water !== water) return false;
+    if (q && ![r.reference, r.sanitary_niss, r.water_niss, r.id_item_to_bill_sanitary, r.id_item_to_bill_water]
+      .some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    return true;
+  });
+  if (wshsSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[wshsSortKey], b[wshsSortKey], wshsSortDir));
+  return rows;
+}
+
+function wshsRenderTable() {
+  const head = document.querySelector("#wshs-table thead tr");
+  head.innerHTML = WSHS_COLUMNS.map((c) => {
+    const arrow = wshsSortKey === c.key ? `<span class="stats-table-sort-arrow">${wshsSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    wshsSortDir = wshsSortKey === k ? -wshsSortDir : 1;
+    wshsSortKey = k;
+    wshsRenderTable();
+  }));
+  const rows = wshsVisibleRows();
+  document.querySelector("#wshs-table tbody").innerHTML = rows.length
+    ? rows.map((r) => "<tr>" + WSHS_COLUMNS.map((c) => `<td>${escapeHtml(wshsFmt(c, r[c.key]))}</td>`).join("") + "</tr>").join("")
+    : `<tr><td colspan="${WSHS_COLUMNS.length}" class="hint-text">${wshsRows.length ? "No rows match the current filters." : "No sanitary items stuck while water is billed/pending."}</td></tr>`;
+  renderFilteredCount("#wshs-filtered-count", rows.length, wshsRows.length);
+  const n = rows.length;
+  hxRenderDashboard("wshs-dash", {
+    gauges: n ? [
+      { label: "Water already billed", count: rows.filter((r) => r.status_water === "STTOBILL07").length, total: n, c1: "#ef4444", c2: "#f97316" },
+      { label: "Water pending", count: rows.filter((r) => r.status_water === "STTOBILL01").length, total: n, c1: "#f59e0b", c2: "#eab308" },
+    ] : [],
+    tiles: [
+      { icon: "🚿", label: "Stuck sanitary items", value: new Set(rows.map((r) => r.id_item_to_bill_sanitary)).size.toLocaleString(), accent: true },
+      { icon: "👤", label: "Accounts", value: new Set(rows.map((r) => r.reference)).size.toLocaleString() },
+      { icon: "📅", label: "Billing periods", value: new Set(rows.map((r) => r.id_billing_period)).size.toLocaleString() },
+    ],
+  });
+}
+
+$("#wshs-detect-btn").addEventListener("click", async () => {
+  const btn = $("#wshs-detect-btn");
+  btn.disabled = true;
+  $("#wshs-summary").textContent = "Scanning all billing periods…";
+  try {
+    const data = await api("/api/wrong-stuck-hierarchy/sanitary/detect", { method: "POST" });
+    wshsRows = data.rows || [];
+    const periods = new Map();
+    wshsRows.forEach((r) => { if (r.id_billing_period && !periods.has(r.id_billing_period)) periods.set(r.id_billing_period, r.description || r.id_billing_period); });
+    const pIds = [...periods.keys()].sort((a, b) => Number(b) - Number(a));
+    $("#wshs-filter-period").innerHTML = `<option value="">All</option>` +
+      pIds.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(periods.get(id))}</option>`).join("");
+    $("#wshs-filter-row").hidden = wshsRows.length === 0;
+    $("#wshs-export-btn").disabled = wshsRows.length === 0;
+    $("#wshs-summary").textContent = data.count
+      ? `${data.count} sanitary item(s) stuck across ${data.account_count} account(s), ${data.period_count} billing period(s).`
+      : "None found — every stuck sanitary item's water item is also still in hierarchy (or has no match).";
+    wshsRenderTable();
+  } catch (err) {
+    $("#wshs-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+["#wshs-filter-period", "#wshs-filter-water"].forEach((id) => $(id).addEventListener("change", wshsRenderTable));
+$("#wshs-filter-search").addEventListener("input", wshsRenderTable);
+$("#wshs-filter-clear-btn").addEventListener("click", () => {
+  ["#wshs-filter-period", "#wshs-filter-water", "#wshs-filter-search"].forEach((id) => { $(id).value = ""; });
+  wshsRenderTable();
+});
+$("#wshs-export-btn").addEventListener("click", () => {
+  const rows = wshsVisibleRows();
+  if (!rows.length) return;
+  const lines = [WSHS_COLUMNS.map((c) => `"${c.label}"`).join(",")];
+  rows.forEach((r) => lines.push(WSHS_COLUMNS.map((c) => `"${String(wshsFmt(c, r[c.key]) ?? "").replace(/"/g, '""')}"`).join(",")));
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "sanitary_stuck_water_billed.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------- Wrong Billed Consumption (RJ 2026-09-27) ----------------
+// See app/core/wrong_billed_consumption.py. One billing period per scan
+// (server side, ~20-30s); filters/sort client-side.
+const WBC_COLUMNS = [
+  { key: "niss", label: "NISS", render: (r) => `<span class="hx-niss">${escapeHtml(r.niss ?? "")}</span>` },
+  { key: "billing_period", label: "Billing Period" },
+  { key: "read_status", label: "Read Status", render: (r) => hxStatusPill(r.read_status) },
+  { key: "usage_type", label: "Usage Type", render: (r) => `<span title="${escapeHtml(r.usage_type ?? "")}">${escapeHtml(r.usage_type_desc || r.usage_type || "")}</span>` },
+  { key: "mp_type", label: "MP Type", render: (r) => `<span class="hx-pill ${r.mp_type === "TIPEQM0001" ? "hx-pill-blue" : "hx-pill-amber"}" title="${escapeHtml(r.mp_type ?? "")} · MP ${escapeHtml(r.id_measuring_point ?? "")}">${escapeHtml(r.mp_type_desc || r.mp_type || "—")}</span>` },
+  { key: "prev_value", label: "Prev Value", num: true },
+  { key: "value", label: "Value", num: true },
+  { key: "reading_usage", label: "Reading Usage", num: true },
+  { key: "corrected_usage", label: "Corrected Usage", num: true },
+  { key: "ready_usage", label: "★ Ready Usage", num: true, render: (r) => `<strong>${escapeHtml(r.ready_usage ?? "")}</strong>` +
+      (String(r.ready_usage_off_formula) === "1" ? ` <span class="hx-pill hx-pill-amber" title="Expected ${escapeHtml(r.expected_ready_usage ?? "")} = (VALUE − PREV) × ${escapeHtml(r.multiplier ?? "1")}">Off formula</span>` : "") },
+  { key: "id_item_to_bill", label: "Item To Bill", mono: true },
+  { key: "id_bill", label: "Bill", mono: true },
+  { key: "bill_status", label: "Bill Status", render: (r) => `<span class="hx-pill ${r.bill_status === "ESTFAC0005" ? "hx-pill-green" : "hx-pill-blue"}" title="${escapeHtml(r.bill_status ?? "")}">${escapeHtml(r.bill_status_desc || r.bill_status || "")}</span>` },
+  { key: "billing_type", label: "Billing Type", render: (r) => `<span title="${escapeHtml(r.billing_type ?? "")}">${escapeHtml(r.billing_type_desc || r.billing_type || "")}</span>` },
+  { key: "billed_ready_usage", label: "★ Billed (ITB)", num: true, render: (r) => `<strong class="wbc-billed">${escapeHtml(r.billed_ready_usage ?? "")}</strong>` },
+  // Bill's consumption concepts (CONCSMO003 + CC210): SUM(CALCULATION_BASE).
+  // Red when it differs from the reading's READY_USAGE.
+  { key: "billed_consumption", label: "Billed Consumption", num: true, render: (r) => wbcMarkDiff(r.billed_consumption, r.ready_usage) },
+  { key: "difference", label: "Difference", num: true, render: (r) => {
+      const d = Number(r.difference);
+      return `<span class="hx-pill ${d > 0 ? "hx-pill-billed" : "hx-pill-blue"}">${d > 0 ? "+" : ""}${escapeHtml(r.difference ?? "")}</span>`;
+    } },
+  { key: "billed_prev_value", label: "Billed Prev", num: true, render: (r) => wbcMarkDiff(r.billed_prev_value, r.prev_value) },
+  { key: "billed_value", label: "Billed Value", num: true, render: (r) => wbcMarkDiff(r.billed_value, r.value) },
+  { key: "expected_ready_usage", label: "Expected", num: true },
+  { key: "id_reading", label: "Reading", mono: true },
+  { key: "reading_date", label: "Reading Date", date: true },
+];
+let wbcRows = [];
+let wbcSortKey = null;
+let wbcSortDir = 1;
+let wbcDir = "";
+let wbcPeriodsLoaded = false;
+// Rendering speed (RJ 2026-09-27: "the rendering is a little bit slow"):
+// the table shows one page of WBC_PAGE_SIZE rows at a time instead of up
+// to 2,000, and the search box waits for a short pause in typing.
+const WBC_PAGE_SIZE = 100;
+let wbcPage = 0;
+let _wbcSearchTimer = null;
+
+// Highlights a billed start/end value that differs from the reading's own.
+function wbcMarkDiff(billed, own) {
+  const nb = Number(billed), no = Number(own);
+  const same = billed !== "" && billed != null && own !== "" && own != null && !isNaN(nb) && !isNaN(no)
+    ? Math.abs(nb - no) < 0.001
+    : String(billed ?? "") === String(own ?? "");
+  return same ? escapeHtml(billed ?? "") : `<span class="wbc-diff" title="Reading has ${escapeHtml(own ?? "")}">${escapeHtml(billed ?? "")}</span>`;
+}
+
+async function wbcOnPageShown() {
+  if (wbcPeriodsLoaded) return;
+  const sel = $("#wbc-period");
+  try {
+    const data = await api("/api/wrong-billed-consumption/billing-periods");
+    const periods = data.periods || [];
+    sel.innerHTML = periods.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.description || p.id)}</option>`).join("");
+    // Default: the most recent period that's already underway (skip next month's).
+    if (periods.length > 1) sel.value = periods[1].id;
+    wbcPeriodsLoaded = true;
+  } catch (err) {
+    sel.innerHTML = `<option value="">(couldn't load periods)</option>`;
+    showToast(err.message, true);
+  }
+}
+
+function wbcVisibleRows() {
+  const q = $("#wbc-filter-search").value.trim().toLowerCase();
+  const usage = $("#wbc-filter-usage").value;
+  const status = $("#wbc-filter-status").value;
+  // MP type checkboxes (default: Normal only). "" = readings with no MP type.
+  const mpTypes = new Set($$("#wbc-filter-mptype input:checked").map((c) => c.value));
+  let rows = wbcRows.filter((r) => {
+    if (!mpTypes.has(r.mp_type || "")) return false;
+    if (usage && r.usage_type !== usage) return false;
+    if (status && r.read_status !== status) return false;
+    if (wbcDir === "over" && !(Number(r.difference) > 0)) return false;
+    if (wbcDir === "under" && !(Number(r.difference) < 0)) return false;
+    if (q && ![r.niss, r.id_reading, r.id_item_to_bill].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    return true;
+  });
+  if (wbcSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[wbcSortKey], b[wbcSortKey], wbcSortDir));
+  return rows;
+}
+
+function wbcRenderTable() {
+  const head = document.querySelector("#wbc-table thead tr");
+  head.innerHTML = WBC_COLUMNS.map((c) => {
+    const arrow = wbcSortKey === c.key ? `<span class="stats-table-sort-arrow">${wbcSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    wbcSortDir = wbcSortKey === k ? -wbcSortDir : 1;
+    wbcSortKey = k;
+    wbcPage = 0;
+    wbcRenderTable();
+  }));
+  const all = wbcVisibleRows();
+  const pages = Math.max(1, Math.ceil(all.length / WBC_PAGE_SIZE));
+  wbcPage = Math.min(wbcPage, pages - 1);
+  const rows = all.slice(wbcPage * WBC_PAGE_SIZE, (wbcPage + 1) * WBC_PAGE_SIZE);
+  document.querySelector("#wbc-table tbody").innerHTML = rows.length
+    ? rows.map((r) => `<tr class="hx-row ${Number(r.difference) > 0 ? "hx-row-anomalous" : ""}">` +
+        WBC_COLUMNS.map((c) => `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${c.render ? c.render(r) : (c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? ""))}</td>`).join("") +
+        "</tr>").join("")
+    : `<tr><td colspan="${WBC_COLUMNS.length}" class="hint-text">${wbcRows.length ? "No rows match the current filters." : "No mismatches in this billing period."}</td></tr>`;
+  const pager = $("#wbc-pager");
+  pager.hidden = pages <= 1;
+  pager.innerHTML = pages <= 1 ? "" :
+    `<button type="button" class="hx-icon-btn" data-wbc-page="prev" ${wbcPage === 0 ? "disabled" : ""} title="Previous page">‹</button>` +
+    `<span>Rows ${(wbcPage * WBC_PAGE_SIZE + 1).toLocaleString()}–${Math.min((wbcPage + 1) * WBC_PAGE_SIZE, all.length).toLocaleString()} of ${all.length.toLocaleString()} · page ${wbcPage + 1} / ${pages}</span>` +
+    `<button type="button" class="hx-icon-btn" data-wbc-page="next" ${wbcPage >= pages - 1 ? "disabled" : ""} title="Next page">›</button>`;
+  renderFilteredCount("#wbc-filtered-count", all.length, wbcRows.length);
+  if (wbcRows.length) {
+    const n = all.length;
+    const over = all.filter((r) => Number(r.difference) > 0);
+    hxRenderDashboard("wbc-dash", {
+      gauges: [
+        { label: "Over-billed", count: over.length, total: n, c1: "#ef4444", c2: "#f97316", hint: "Billed more than the reading's READY_USAGE" },
+        { label: "Billed from a different start", count: all.filter((r) => String(r.billed_prev_value) !== String(r.prev_value)).length, total: n, c1: "#6366f1", c2: "#06b6d4",
+          hint: "The link row's PREV_VALUE differs from the reading's" },
+        { label: "Reading off formula", count: all.filter((r) => String(r.ready_usage_off_formula) === "1").length, total: n, c1: "#f59e0b", c2: "#eab308",
+          hint: "READY_USAGE ≠ (VALUE − PREV_VALUE) × MULTIPLIER" },
+      ],
+      tiles: [
+        { icon: "⚖️", label: "Net difference (billed − ready)", value: hxSum(all, "difference").toLocaleString(), accent: true },
+        { icon: "📈", label: "Over-billed usage", value: hxSum(over, "difference").toLocaleString() },
+        { icon: "📉", label: "Under-billed usage", value: hxSum(all.filter((r) => Number(r.difference) < 0), "difference").toLocaleString() },
+        { icon: "📏", label: "Readings", value: new Set(all.map((r) => r.id_reading)).size.toLocaleString() },
+        { icon: "🔌", label: "NISS", value: new Set(all.map((r) => r.niss).filter(Boolean)).size.toLocaleString() },
+      ],
+      split: { title: "Usage type", entries: hxCountBy(all, (r) => r.usage_type_desc || r.usage_type) },
+    });
+  }
+}
+
+$("#wbc-detect-btn").addEventListener("click", async () => {
+  const id = $("#wbc-period").value;
+  if (!id) { showToast("Pick a billing period first.", true); return; }
+  const btn = $("#wbc-detect-btn");
+  btn.disabled = true;
+  const label = $("#wbc-period").selectedOptions[0]?.textContent || id;
+  $("#wbc-summary").textContent = `Scanning ${label}… (about 20–30s)`;
+  try {
+    const data = await api("/api/wrong-billed-consumption/detect", { method: "POST", body: { id_billing_period: id } });
+    wbcRows = data.rows || [];
+    wbcPage = 0;
+    const opts = (key, descKey) => {
+      const m = new Map();
+      wbcRows.forEach((r) => { if (r[key] && !m.has(r[key])) m.set(r[key], r[descKey] || r[key]); });
+      return `<option value="">All</option>` + [...m.entries()].sort((a, b) => String(a[1]).localeCompare(String(b[1])))
+        .map(([v, d]) => `<option value="${escapeHtml(v)}">${escapeHtml(d)}</option>`).join("");
+    };
+    const usageCur = $("#wbc-filter-usage").value, statusCur = $("#wbc-filter-status").value;
+    $("#wbc-filter-usage").innerHTML = opts("usage_type", "usage_type_desc");
+    $("#wbc-filter-status").innerHTML = opts("read_status", "read_status_desc");
+    $("#wbc-filter-usage").value = usageCur; $("#wbc-filter-status").value = statusCur;
+    $("#wbc-filters").hidden = wbcRows.length === 0;
+    $("#wbc-export-btn").disabled = wbcRows.length === 0;
+    $("#wbc-dash").hidden = wbcRows.length === 0;
+    $("#wbc-summary").textContent = `${label}: ${data.count.toLocaleString()} mismatch(es) on ${data.reading_count.toLocaleString()} reading(s), ${data.supply_count.toLocaleString()} NISS.`;
+    wbcRenderTable();
+  } catch (err) {
+    $("#wbc-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+["#wbc-filter-usage", "#wbc-filter-status", "#wbc-filter-mptype"].forEach((id) => $(id).addEventListener("change", () => { wbcPage = 0; wbcRenderTable(); }));
+$("#wbc-filter-search").addEventListener("input", () => {
+  clearTimeout(_wbcSearchTimer);
+  _wbcSearchTimer = setTimeout(() => { wbcPage = 0; wbcRenderTable(); }, 250);
+});
+$("#wbc-pager").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-wbc-page]");
+  if (!b || b.disabled) return;
+  wbcPage += b.dataset.wbcPage === "next" ? 1 : -1;
+  wbcRenderTable();
+  $("#wbc-table").scrollIntoView({ block: "start", behavior: "smooth" });
+});
+$("#wbc-filter-dir").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-value]");
+  if (!b) return;
+  wbcPage = 0;
+  wbcDir = b.dataset.value;
+  $$("#wbc-filter-dir button").forEach((x) => x.classList.toggle("is-active", x === b));
+  wbcRenderTable();
+});
+$("#wbc-filter-clear-btn").addEventListener("click", (ev) => {
+  ev.preventDefault();
+  ev.stopPropagation();
+  ["#wbc-filter-usage", "#wbc-filter-status", "#wbc-filter-search"].forEach((id) => { $(id).value = ""; });
+  $$("#wbc-filter-mptype input").forEach((c) => { c.checked = c.value === "TIPEQM0001"; });
+  wbcDir = "";
+  $$("#wbc-filter-dir button").forEach((x) => x.classList.toggle("is-active", x.dataset.value === ""));
+  wbcRenderTable();
+});
+$("#wbc-export-btn").addEventListener("click", () => {
+  const rows = wbcVisibleRows();
+  if (!rows.length) return;
+  const keys = ["id_billing_period", "billing_period", "niss", "id_reading", "id_measuring_point", "mp_type", "mp_type_desc", "read_status", "usage_type", "reading_prev_date", "reading_date",
+    "prev_value", "value", "reading_usage", "corrected_usage", "ready_usage", "multiplier", "expected_ready_usage", "ready_usage_off_formula",
+    "id_item_to_bill", "itb_status", "id_bill", "bill_status", "bill_status_desc", "billing_type", "billing_type_desc",
+    "billed_ready_usage", "billed_consumption", "billed_prev_value", "billed_value", "difference"];
+  const lines = [keys.join(",")];
+  rows.forEach((r) => lines.push(keys.map((k) => `"${String(r[k] ?? "").replace(/ 00:00:00(\.0+)?$/, "").replace(/"/g, '""')}"`).join(",")));
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `wrong_billed_consumption_${$("#wbc-period").value}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------- DOUBLE ITB (RJ 2026-09-27) ----------------
+// See app/core/double_itb.py. One scan; filters/sort client-side; built
+// with the shared hx dashboard + filter panel from the start.
+const DITB_COLUMNS = [
+  { key: "niss", label: "NISS", render: (r) => `<span class="hx-niss">${escapeHtml(r.niss ?? "")}</span>` },
+  { key: "billing_period", label: "Billing Period" },
+  { key: "needs_rebilling", label: "Rebilling", render: (r) => String(r.needs_rebilling) === "1"
+      ? `<span class="hx-pill hx-pill-billed">Needs rebilling</span>` : `<span class="hx-pill hx-pill-ghost">No</span>` },
+  { key: "anom_ready_usage", label: "★ Ready Usage (anomalous)", num: true, render: (r) => `<strong>${escapeHtml(r.anom_ready_usage ?? "")}</strong>` },
+  { key: "anom_reading_count", label: "Readings", num: true },
+  { key: "anom_id_item_to_bill", label: "Anomalous ITB", mono: true },
+  { key: "anom_status", label: "Status", render: (r) => `<span class="hx-pill hx-pill-amber" title="${escapeHtml(r.anom_status ?? "")}">Anomalous</span>` },
+  { key: "anom_billing_date", label: "Billing Date", date: true },
+  { key: "billed_id_item_to_bill", label: "Billed ITB", mono: true },
+  { key: "billed_status", label: "Status", render: (r) => `<span class="hx-pill hx-pill-green" title="${escapeHtml(r.billed_status ?? "")}">Billed</span>` },
+  { key: "billed_id_bill", label: "ID Bill", mono: true },
+  { key: "ini_date", label: "INI Date", date: true },
+  { key: "end_date", label: "END Date", date: true },
+  { key: "id_billing_service", label: "Billing Service", mono: true },
+  { key: "account", label: "Account", mono: true },
+  { key: "offered_service", label: "Service" },
+];
+let ditbRows = [];
+let ditbSortKey = null;
+let ditbSortDir = 1;
+let ditbRebill = "";
+
+function ditbVisibleRows() {
+  const q = $("#ditb-filter-search").value.trim().toLowerCase();
+  const bp = $("#ditb-filter-bp").value;
+  const svc = $("#ditb-filter-service").value;
+  let rows = ditbRows.filter((r) => {
+    if (bp && r.billing_period !== bp) return false;
+    if (svc && r.offered_service !== svc) return false;
+    if (ditbRebill && String(r.needs_rebilling) !== ditbRebill) return false;
+    if (q && ![r.niss, r.account, r.anom_id_item_to_bill, r.billed_id_item_to_bill, r.id_billing_service]
+      .some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    return true;
+  });
+  if (ditbSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[ditbSortKey], b[ditbSortKey], ditbSortDir));
+  return rows;
+}
+
+function ditbCell(c, r) {
+  if (c.render) return c.render(r);
+  if (c.date) return hxDate(r[c.key]);
+  return escapeHtml(r[c.key] ?? "");
+}
+
+function ditbRenderTable() {
+  const head = document.querySelector("#ditb-table thead tr");
+  head.innerHTML = DITB_COLUMNS.map((c) => {
+    const arrow = ditbSortKey === c.key ? `<span class="stats-table-sort-arrow">${ditbSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    ditbSortDir = ditbSortKey === k ? -ditbSortDir : 1;
+    ditbSortKey = k;
+    ditbRenderTable();
+  }));
+  const rows = ditbVisibleRows();
+  document.querySelector("#ditb-table tbody").innerHTML = rows.length
+    ? rows.map((r) => `<tr class="${String(r.needs_rebilling) === "1" ? "hx-row hx-row-anomalous" : "hx-row"}">` +
+        DITB_COLUMNS.map((c) => `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${ditbCell(c, r)}</td>`).join("") + "</tr>").join("")
+    : `<tr><td colspan="${DITB_COLUMNS.length}" class="hint-text">${ditbRows.length ? "No rows match the current filters." : "No double items to bill found."}</td></tr>`;
+  renderFilteredCount("#ditb-filtered-count", rows.length, ditbRows.length);
+  if (ditbRows.length) {
+    const n = rows.length;
+    const rebill = rows.filter((r) => String(r.needs_rebilling) === "1");
+    hxRenderDashboard("ditb-dash", {
+      gauges: [
+        { label: "Needs rebilling", count: rebill.length, total: n, c1: "#ef4444", c2: "#f97316",
+          hint: "Anomalous item's ready usage is not zero" },
+        { label: "Zero ready usage", count: n - rebill.length, total: n, c1: "#10b981", c2: "#22c55e" },
+        { label: "Twin billed in another period", count: rows.filter((r) => r.billed_id_billing_period && r.billed_id_billing_period !== r.id_billing_period).length, total: n, c1: "#6366f1", c2: "#06b6d4",
+          hint: "The billed twin's billing period differs from the anomalous item's" },
+      ],
+      tiles: [
+        { icon: "★", label: "Ready usage to rebill", value: hxSum(rebill, "anom_ready_usage").toLocaleString(), accent: true },
+        { icon: "👯", label: "Anomalous items", value: new Set(rows.map((r) => r.anom_id_item_to_bill)).size.toLocaleString() },
+        { icon: "🔌", label: "NISS", value: new Set(rows.map((r) => r.niss).filter(Boolean)).size.toLocaleString() },
+        { icon: "👤", label: "Accounts", value: new Set(rows.map((r) => r.account).filter(Boolean)).size.toLocaleString() },
+        { icon: "📅", label: "Billing periods", value: new Set(rows.map((r) => r.billing_period).filter(Boolean)).size.toLocaleString() },
+      ],
+      split: { title: "Offered service", entries: hxCountBy(rows, (r) => r.offered_service) },
+    });
+  }
+}
+
+$("#ditb-detect-btn").addEventListener("click", async () => {
+  const btn = $("#ditb-detect-btn");
+  btn.disabled = true;
+  $("#ditb-summary").textContent = "Scanning…";
+  try {
+    const data = await api("/api/double-itb/detect", { method: "POST" });
+    ditbRows = data.rows || [];
+    const periods = new Map();
+    ditbRows.forEach((r) => { if (r.billing_period && !periods.has(r.billing_period)) periods.set(r.billing_period, Number(r.id_billing_period) || 0); });
+    $("#ditb-filter-bp").innerHTML = `<option value="">All</option>` +
+      [...periods.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+    $("#ditb-filter-service").innerHTML = `<option value="">All</option>` +
+      [...new Set(ditbRows.map((r) => r.offered_service).filter(Boolean))].sort().map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+    $("#ditb-filters").hidden = ditbRows.length === 0;
+    $("#ditb-export-btn").disabled = ditbRows.length === 0;
+    $("#ditb-summary").textContent = `${data.anomalous_item_count} anomalous item(s) with a billed twin — ${data.needs_rebilling_count} need rebilling.`;
+    ditbRenderTable();
+  } catch (err) {
+    $("#ditb-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+["#ditb-filter-bp", "#ditb-filter-service"].forEach((id) => $(id).addEventListener("change", ditbRenderTable));
+$("#ditb-filter-search").addEventListener("input", ditbRenderTable);
+$("#ditb-filter-rebill").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-value]");
+  if (!b) return;
+  ditbRebill = b.dataset.value;
+  $$("#ditb-filter-rebill button").forEach((x) => x.classList.toggle("is-active", x === b));
+  ditbRenderTable();
+});
+$("#ditb-filter-clear-btn").addEventListener("click", (ev) => {
+  ev.preventDefault();
+  ev.stopPropagation();
+  ["#ditb-filter-bp", "#ditb-filter-service", "#ditb-filter-search"].forEach((id) => { $(id).value = ""; });
+  ditbRebill = "";
+  $$("#ditb-filter-rebill button").forEach((x) => x.classList.toggle("is-active", x.dataset.value === ""));
+  ditbRenderTable();
+});
+$("#ditb-export-btn").addEventListener("click", () => {
+  const rows = ditbVisibleRows();
+  if (!rows.length) return;
+  const cols = DITB_COLUMNS.map((c) => c.key);
+  const labels = ["NISS", "Billing Period", "Needs Rebilling", "Ready Usage (anomalous)", "Readings", "Anomalous ITB", "Anomalous Status",
+    "Anomalous Billing Date", "Billed ITB", "Billed Status", "ID Bill", "INI Date", "END Date", "Billing Service", "Account", "Service"];
+  const lines = [labels.map((l) => `"${l}"`).join(",")];
+  rows.forEach((r) => lines.push(cols.map((k) => {
+    let v = r[k] ?? "";
+    if (k === "needs_rebilling") v = String(v) === "1" ? "Yes" : "No";
+    if (["anom_billing_date", "ini_date", "end_date"].includes(k)) v = String(v).replace(/ 00:00:00(\.0+)?$/, "");
+    return `"${String(v).replace(/"/g, '""')}"`;
+  }).join(",")));
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "double_itb.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------- Disconnection TNB ----------------
+// RJ, 2026-09-27 - see app/core/disconnection_tnb.py. One scan, no
+// parameters; billing period / NISS / contract status / estimated
+// filters are client-side.
+const DTNB_COLUMNS = [
+  { key: "niss", label: "NISS" },
+  { key: "billing_period", label: "Billing Period" },
+  { key: "id_reading", label: "ID Reading" },
+  { key: "reading_prev_date", label: "Prev. Date", date: true },
+  { key: "reading_date", label: "Reading Date", date: true },
+  { key: "prev_value", label: "Prev. Value" },
+  { key: "value", label: "Value" },
+  { key: "reading_usage", label: "Reading Usage" },
+  { key: "corrected_usage", label: "Corrected Usage" },
+  { key: "ready_usage", label: "Ready Usage" },
+  { key: "read_status", label: "Read Status" },
+  { key: "ind_estimate", label: "Estimated" },
+  { key: "id_contracted_service", label: "Nearest Contracted Service", contract: true },
+  { key: "contract_status", label: "Contract Status", contract: true },
+  { key: "contract_from_date", label: "Contract From", date: true, contract: true },
+  { key: "contract_end_date", label: "Contract End Date", date: true, contract: true },
+  { key: "days_from_end", label: "Days After End", contract: true },
+];
+let dtnbRows = [];
+let dtnbSortKey = null;
+let dtnbSortDir = 1;
+
+function dtnbFmt(c, v) {
+  const s = v ?? "";
+  if (c.date && typeof s === "string") return s.replace(/ 00:00:00(\.0+)?$/, "");
+  if (c.key === "ind_estimate") return String(s) === "1" ? "Yes" : String(s) === "0" ? "No" : s;
+  return s;
+}
+
+function dtnbVisibleRows() {
+  const bp = $("#dtnb-filter-bp").value;
+  const niss = $("#dtnb-filter-niss").value.trim().toLowerCase();
+  const cs = $("#dtnb-filter-contract").value;
+  const est = $("#dtnb-filter-est").value;
+  let rows = dtnbRows.filter((r) => {
+    if (bp && r.billing_period !== bp) return false;
+    if (niss && !String(r.niss ?? "").toLowerCase().includes(niss)) return false;
+    if (cs === "__none__" && r.id_contracted_service) return false;
+    if (cs && cs !== "__none__" && r.contract_status !== cs) return false;
+    if (est && String(r.ind_estimate) !== est) return false;
+    return true;
+  });
+  if (dtnbSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[dtnbSortKey], b[dtnbSortKey], dtnbSortDir));
+  return rows;
+}
+
+function dtnbRenderTable() {
+  const head = document.querySelector("#dtnb-table thead tr");
+  head.innerHTML = DTNB_COLUMNS.map((c) => {
+    const arrow = dtnbSortKey === c.key ? `<span class="stats-table-sort-arrow">${dtnbSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable${c.contract ? " dtnb-col-contract" : ""}" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    dtnbSortDir = dtnbSortKey === k ? -dtnbSortDir : 1;
+    dtnbSortKey = k;
+    dtnbRenderTable();
+  }));
+  const rows = dtnbVisibleRows();
+  document.querySelector("#dtnb-table tbody").innerHTML = rows.length
+    ? rows.map((r) => "<tr>" + DTNB_COLUMNS.map((c) => {
+        const cls = [];
+        if (c.contract) cls.push("dtnb-cell-contract");
+        if (c.key === "ready_usage") cls.push("dtnb-ready");
+        if (c.key === "days_from_end" && r.days_from_end !== "" && Number(r.days_from_end) > 0) cls.push("dtnb-after-end");
+        return `<td${cls.length ? ` class="${cls.join(" ")}"` : ""}>${escapeHtml(dtnbFmt(c, r[c.key]))}</td>`;
+      }).join("") + "</tr>").join("")
+    : `<tr><td colspan="${DTNB_COLUMNS.length}" class="hint-text">${dtnbRows.length ? "No rows match the current filters." : "No TNB disconnections with ready usage found."}</td></tr>`;
+  renderFilteredCount("#dtnb-filtered-count", rows.length, dtnbRows.length);
+  if (dtnbRows.length) {
+    const n = rows.length;
+    hxRenderDashboard("dtnb-dash", {
+      gauges: [
+        { label: "Read after contract end", count: rows.filter((r) => r.days_from_end !== "" && Number(r.days_from_end) > 0).length, total: n, c1: "#ef4444", c2: "#f97316",
+          hint: "Reading date is later than the nearest contracted service's end date" },
+        { label: "Estimated readings", count: rows.filter((r) => String(r.ind_estimate) === "1").length, total: n, c1: "#f59e0b", c2: "#eab308" },
+        { label: "No contract found", count: rows.filter((r) => !r.id_contracted_service).length, total: n, c1: "#94a3b8", c2: "#64748b" },
+      ],
+      tiles: [
+        { icon: "★", label: "Total ready usage", value: hxSum(rows, "ready_usage").toLocaleString(), accent: true },
+        { icon: "⛔", label: "TNB disconnections", value: n.toLocaleString() },
+        { icon: "🏠", label: "Sector supplies", value: new Set(rows.map((r) => r.id_sector_supply)).size.toLocaleString() },
+        { icon: "📅", label: "Billing periods", value: new Set(rows.map((r) => r.billing_period).filter(Boolean)).size.toLocaleString() },
+      ],
+      split: { title: "Nearest contract status", entries: hxCountBy(rows, (r) => r.contract_status, "(no contract)") },
+    });
+  }
+}
+
+$("#dtnb-detect-btn").addEventListener("click", async () => {
+  const btn = $("#dtnb-detect-btn");
+  btn.disabled = true;
+  $("#dtnb-summary").textContent = "Scanning…";
+  try {
+    const data = await api("/api/disconnection-tnb/detect", { method: "POST" });
+    dtnbRows = data.rows || [];
+    const periods = new Map();
+    dtnbRows.forEach((r) => { if (r.billing_period && !periods.has(r.billing_period)) periods.set(r.billing_period, Number(r.id_billing_period) || 0); });
+    const bpSel = $("#dtnb-filter-bp");
+    const bpCur = bpSel.value;
+    const bpNames = [...periods.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n);
+    bpSel.innerHTML = `<option value="">All</option>` + bpNames.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+    if (bpNames.includes(bpCur)) bpSel.value = bpCur;
+    const statuses = [...new Set(dtnbRows.map((r) => r.contract_status).filter(Boolean))].sort();
+    $("#dtnb-filter-contract").innerHTML = `<option value="">All</option>` +
+      statuses.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("") +
+      (data.no_contract_count ? `<option value="__none__">(no contract)</option>` : "");
+    $("#dtnb-filter-row").hidden = dtnbRows.length === 0;
+    $("#dtnb-export-btn").disabled = dtnbRows.length === 0;
+    $("#dtnb-summary").textContent = `${data.count} TNB disconnection reading(s) with ready usage across ${data.supply_count} sector supply(ies)` +
+      (data.no_contract_count ? ` — ${data.no_contract_count} with no contracted service found.` : ".");
+    dtnbRenderTable();
+  } catch (err) {
+    $("#dtnb-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+["#dtnb-filter-bp", "#dtnb-filter-contract", "#dtnb-filter-est"].forEach((id) => $(id).addEventListener("change", dtnbRenderTable));
+$("#dtnb-filter-niss").addEventListener("input", dtnbRenderTable);
+$("#dtnb-filter-clear-btn").addEventListener("click", () => {
+  ["#dtnb-filter-bp", "#dtnb-filter-contract", "#dtnb-filter-est", "#dtnb-filter-niss"].forEach((id) => { $(id).value = ""; });
+  dtnbRenderTable();
+});
+$("#dtnb-export-btn").addEventListener("click", () => {
+  const rows = dtnbVisibleRows();
+  if (!rows.length) return;
+  const lines = [DTNB_COLUMNS.map((c) => `"${c.label}"`).join(",")];
+  rows.forEach((r) => lines.push(DTNB_COLUMNS.map((c) => `"${String(dtnbFmt(c, r[c.key]) ?? "").replace(/"/g, '""')}"`).join(",")));
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "disconnection_tnb.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+dtnbRenderTable();
 
 // ---------------- Reading Validation/Modif ----------------
 // RJ, 2026-09-23, own SQL - see app/core/reading_validation.py's module
@@ -5645,6 +6679,26 @@ function rvRenderTable() {
   renderFilteredCount("#rv-filtered-count", indices.length, rvRows.length);
   rvApplyChainHighlight();
   rvUpdateDirtyUI();
+  if (rvRows.length) {
+    const vis = indices.map((i) => rvRows[i]);
+    const n = vis.length;
+    const status = (r) => String(r.read_status || "").toLowerCase();
+    hxRenderDashboard("rv-dash", {
+      gauges: [
+        { label: "Billed readings", count: vis.filter((r) => status(r).includes("billed") && !status(r).includes("not billed")).length, total: n, c1: "#10b981", c2: "#22c55e" },
+        { label: "Estimated", count: vis.filter((r) => String(r.ind_estimate) === "1").length, total: n, c1: "#f59e0b", c2: "#eab308" },
+        { label: "Terminated not billed", count: vis.filter((r) => status(r).includes("terminated")).length, total: n, c1: "#ef4444", c2: "#f97316" },
+      ],
+      tiles: [
+        { icon: "★", label: "Total bill-ready usage", value: hxSum(vis, "bill_ready_usage").toLocaleString(), accent: true },
+        { icon: "📏", label: "Readings", value: n.toLocaleString() },
+        { icon: "📅", label: "Billing periods", value: new Set(vis.map((r) => r.billing_period).filter(Boolean)).size.toLocaleString() },
+        { icon: "🔢", label: "Meters", value: new Set(vis.map((r) => r.company_meter_num).filter(Boolean)).size.toLocaleString() },
+        { icon: "✏️", label: "Pending edits", value: rvDirtyIds.size.toLocaleString() },
+      ],
+      split: { title: "Reading type", entries: hxCountBy(vis, (r) => r.reading_type) },
+    });
+  }
 }
 
 document.querySelector("#rv-table tbody").addEventListener("click", (ev) => {
@@ -6416,6 +7470,11 @@ function bcRenderKpiRow(result) {
     ["invoicing", "🧾", "In invoicing", result.in_invoicing_count, "in_invoicing"],
     ["outstanding", "💰", "Outstanding", result.outstanding_amount.toLocaleString(undefined, { maximumFractionDigits: 2 }), null],
   ];
+  hxGaugesAbove("#bc-kpi-row", [
+    { label: "Pending (no file)", count: result.pending_count, total: result.row_count, c1: "#f59e0b", c2: "#f97316" },
+    { label: "Missing bill", count: result.missing_bill_count, total: result.row_count, c1: "#ef4444", c2: "#ec4899" },
+    { label: "In invoicing", count: result.in_invoicing_count, total: result.row_count, c1: "#6366f1", c2: "#06b6d4" },
+  ]);
   $("#bc-kpi-row").innerHTML = cards.map(([kpi, icon, label, value, filterValue]) => {
     const clickable = filterValue !== null;
     const active = clickable && bcState.statusFilter === filterValue;
@@ -6735,9 +7794,9 @@ $("#bc-detail-table tbody").addEventListener("click", async (ev) => {
     });
     hierRenderReadingModal(data.rows, billingPeriod);
     $("#hier-reading-modal-title").textContent =
-      `— supply ${sectorSupply} (${data.rows.length} reading(s))` +
-      (billingPeriod ? `, checking billing period ${billingPeriod}` : "");
-    $("#hier-reading-modal-overlay").hidden = false;
+      `Supply ${sectorSupply} · ${data.rows.length} reading(s)` +
+      (billingPeriod ? ` · checking period ${billingPeriod}` : "");
+    hxOpenModal("hier-reading-modal-overlay");
   } catch (err) {
     showToast(err.message || "Could not load reading history.", true);
   } finally {
@@ -6823,8 +7882,152 @@ $("#bc-detail-export-xlsx-btn").addEventListener("click", () => {
   );
 });
 
+// ---------------- ⟳ Refresh on every menu (RJ 2026-09-27) ----------------
+// "add a refresh in all menu, this will refresh the data using the same
+// filters". One shared button per page header. It:
+//   1. snapshots the page's filter controls (every input/select/textarea
+//      with an id, plus hx segmented controls) - table cells, modals and
+//      select-all boxes are skipped,
+//   2. re-runs that page's own scan/load (HX_REFRESH below - for pages
+//      with sub-tabs, the ACTIVE sub-tab's scan),
+//   3. waits until the scan's button is re-enabled and no api() call is
+//      in flight,
+//   4. puts back every control whose value the scan reset, firing that
+//      control's own input/change handlers so the page re-filters exactly
+//      as it does when you change a filter by hand.
+// Pages whose data comes from a person's typed search (Workspace query,
+// Reading Validation NISS, DIFF DATES single NISS, Bulk Checker) simply
+// re-run that same search.
+function hxActiveSub(attr) {
+  const b = document.querySelector(`.da-subnav-btn.is-active[${attr}]`);
+  return b ? b.getAttribute(attr) : null;
+}
+
+const HX_REFRESH = {
+  // (Overview keeps its own existing 🔄 Refresh button, so it's not here.)
+  workspace: () => ({ btn: "#run-btn" }),
+  history: () => ({ fn: loadHistory }),
+  dashboard: () => ({ fn: loadDashboard }),
+  ai: () => ({ fn: loadAIPage }),
+  tools: () => ({ fn: loadToolsPage }),
+  settings: () => ({ fn: loadSettingsPage }),
+  dateanomaly: () => {
+    const sub = hxActiveSub("data-da-sub");
+    if (sub === "single") return { btn: "#da-detect-btn" };
+    if (sub === "detectall") return { btn: "#da-cleanup-detect-btn" };
+    if (sub === "history") return { fn: daHistoryRefresh };
+    return { fn: daBatchRefreshRecentRuns };
+  },
+  hierarchy: () => ({ btn: "#hier-detect-btn" }),
+  readingvalidation: () => (rvActiveSupply
+    ? { fn: () => rvLoadSupply(rvActiveSupply) }
+    : { btn: "#rv-supply-search-btn" }),
+  tnbcycledisc: () => ({ btn: "#tcd-detect-btn" }),
+  wrongstuckhierarchy: () => ({ btn: hxActiveSub("data-wsh-sub") === "sanitary" ? "#wshs-detect-btn" : "#wsh-detect-btn" }),
+  doubleitb: () => ({ btn: "#ditb-detect-btn" }),
+  wrongbilledconsumption: () => ({ btn: "#wbc-detect-btn" }),
+  disconnectiontnb: () => ({ btn: "#dtnb-detect-btn" }),
+  billissuance: () => {
+    const sub = hxActiveSub("data-biss-sub") || "case1";
+    return { btn: sub === "case1" ? "#billiss-detect-btn" : `#biss${sub.replace("case", "")}-detect-btn` };
+  },
+  incorrectbillingperiod: () => ({ btn: "#ibp-detect-btn" }),
+  bulkchecker: () => ({ btn: "#bc-search-btn" }),
+};
+
+function hxSnapshotFilters(page) {
+  const skip = (el) => !el.id || el.closest("table, .hier-reading-modal, .hx-modal") ||
+    /select-all|password|program|audit-user|jira/i.test(el.id) || ["file", "password", "button", "submit"].includes(el.type);
+  const controls = [...page.querySelectorAll("input, select, textarea")].filter((el) => !skip(el))
+    .map((el) => ({ id: el.id, check: el.type === "checkbox" || el.type === "radio", value: el.type === "checkbox" || el.type === "radio" ? el.checked : el.value }));
+  const segs = [...page.querySelectorAll(".hx-seg[id]")]
+    .map((s) => ({ id: s.id, value: s.querySelector("button.is-active")?.dataset.value ?? "" }));
+  return { controls, segs };
+}
+
+function hxRestoreFilters(snap) {
+  snap.controls.forEach((c) => {
+    const el = document.getElementById(c.id);
+    if (!el) return;
+    if (c.check) {
+      if (el.checked === c.value) return;
+      el.checked = c.value;
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
+    }
+    if (el.value === c.value) return;
+    if (el.tagName === "SELECT" && ![...el.options].some((o) => o.value === c.value)) return; // value gone after refresh
+    el.value = c.value;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  snap.segs.forEach((s) => {
+    const seg = document.getElementById(s.id);
+    const active = seg?.querySelector("button.is-active")?.dataset.value ?? "";
+    if (!seg || active === s.value) return;
+    seg.querySelector(`button[data-value="${CSS.escape(s.value)}"]`)?.click();
+  });
+}
+
+const hxSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function hxWaitIdle(btn, timeoutMs = 10 * 60 * 1000) {
+  const start = Date.now();
+  await hxSleep(150); // let the click handler start its request
+  while (Date.now() - start < timeoutMs) {
+    if (_apiInflight === 0 && !(btn && btn.disabled)) return;
+    await hxSleep(200);
+  }
+}
+
+async function hxRefreshPage(pageId, refreshBtn) {
+  const page = document.getElementById(`page-${pageId}`);
+  const spec = HX_REFRESH[pageId]?.();
+  if (!page || !spec) return;
+  const snap = hxSnapshotFilters(page);
+  refreshBtn.disabled = true;
+  refreshBtn.classList.add("is-spinning");
+  try {
+    if (spec.fn) {
+      await spec.fn();
+      await hxWaitIdle(null);
+    } else {
+      const btn = $(spec.btn);
+      if (!btn) return;
+      if (btn.disabled) { showToast("A scan is already running on this page.", true); return; }
+      btn.click();
+      await hxWaitIdle(btn);
+    }
+    hxRestoreFilters(snap);
+    const t = new Date().toLocaleTimeString();
+    refreshBtn.title = `Refresh data (keeps your filters) — last refreshed ${t}`;
+    showToast(`Refreshed at ${t}.`);
+  } catch (err) {
+    showToast(err.message || "Refresh failed.", true);
+  } finally {
+    refreshBtn.disabled = false;
+    refreshBtn.classList.remove("is-spinning");
+  }
+}
+
+function hxInstallRefreshButtons() {
+  Object.keys(HX_REFRESH).forEach((pageId) => {
+    const header = document.querySelector(`#page-${pageId} > .page-header`);
+    if (!header || header.querySelector(".hx-refresh-btn")) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "hx-refresh-btn";
+    btn.title = "Refresh data (keeps your filters)";
+    btn.innerHTML = `<span class="hx-refresh-icon">⟳</span><span>Refresh</span>`;
+    btn.addEventListener("click", () => hxRefreshPage(pageId, btn));
+    header.classList.add("hx-has-refresh");
+    header.appendChild(btn);
+  });
+}
+
 // ---------------- Boot ----------------
 (async function init() {
+  try { hxCollapseInfo(); } catch (e) { console.error("hxCollapseInfo", e); }
+  try { hxInstallRefreshButtons(); } catch (e) { console.error("hxInstallRefreshButtons", e); }
   loadServerInfo();
   const loggedIn = await checkSession();
   if (loggedIn) showApp();

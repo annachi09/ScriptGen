@@ -201,6 +201,53 @@ def _qualified(schema: str, table: str) -> str:
     return f"{quote_ident(schema)}.{quote_ident(table)}" if schema else quote_ident(table)
 
 
+# --- "Period already billed?" (RJ, 2026-09-27) ---------------------------
+# RJ: "add a new column saying if the period is already billed or not ...
+# connect to gccom_sector_supply using id_sector_supply, then connect to
+# gccom_contracted_service using id_sector_supply, then get the
+# id_contracted_service which is not cancelled and the reading_date is
+# within the from_date and end_date, then ... connect it to gccom_bill,
+# then in the bill check the reading prev_date of re_reading is either
+# equal or +1 will be the last_billing_date of GCCOM_BILL and the
+# reading_date is equal to the billing_date, if met then yes the period is
+# already billed and the bill_type should be TFGEN0001 (similar)".
+# Live-checked 2026-09-27: GCCOM_BILL (OUC_COMMON_ADMIN) has
+# ID_CONTRACTED_SERVICE / LAST_BILLING_DATE / BILLING_DATE / BILL_TYPE;
+# "TFGEN0001" doesn't exist - the real code is TFGEN00001 (by far the
+# most common bill type, 165M rows), so that's what's used. Contract
+# "not cancelled" = STATUS <> ESTSC00005 (Anulado), same code
+# tnb_cycle_disc.py uses. Dates compared as dates (time ignored); END_DATE
+# empty counts as still open. Computed on the OUTER query (after RN = 1 +
+# TOP), so it runs once per shown primary, not per scanned reading.
+CONTRACTED_SERVICE_TABLE = "GCCOM_CONTRACTED_SERVICE"
+BILL_TABLE = "GCCOM_BILL"
+BILL_SCHEMA = "OUC_COMMON_ADMIN"
+CONTRACT_STATUS_CANCELLED = "ESTSC00005"
+BILLED_BILL_TYPE = "TFGEN00001"
+
+
+def _period_billed_expr(alias: str) -> str:
+    cs_tbl = _qualified(BILL_SCHEMA, CONTRACTED_SERVICE_TABLE)
+    bill_tbl = _qualified(BILL_SCHEMA, BILL_TABLE)
+    cancelled = format_sql_literal(CONTRACT_STATUS_CANCELLED)
+    bill_type = format_sql_literal(BILLED_BILL_TYPE)
+    return (
+        f"    CASE WHEN EXISTS (\n"
+        f"        SELECT 1 FROM {cs_tbl} pcs\n"
+        f"        JOIN {bill_tbl} pb ON pb.ID_CONTRACTED_SERVICE = pcs.ID_CONTRACTED_SERVICE\n"
+        f"        WHERE pcs.ID_SECTOR_SUPPLY = {alias}.ID_SECTOR_SUPPLY\n"
+        f"          AND pcs.STATUS <> {cancelled}\n"
+        f"          AND pcs.FROM_DATE <= {alias}.READING_DATE\n"
+        f"          AND (pcs.END_DATE IS NULL OR pcs.END_DATE >= {alias}.READING_DATE)\n"
+        f"          AND pb.BILL_TYPE = {bill_type}\n"
+        f"          AND CAST(pb.BILLING_DATE AS date) = CAST({alias}.READING_DATE AS date)\n"
+        f"          AND CAST(pb.LAST_BILLING_DATE AS date) IN (\n"
+        f"              CAST({alias}.READING_PREV_DATE AS date),\n"
+        f"              DATEADD(day, 1, CAST({alias}.READING_PREV_DATE AS date)))\n"
+        f"    ) THEN 1 ELSE 0 END"
+    )
+
+
 def build_pending_primaries_query(
     pending_statuses: Iterable[str] = PENDING_READ_STATUSES,
     pending_types: Iterable[str] = PENDING_READING_TYPES,
@@ -292,7 +339,8 @@ def build_pending_primaries_query(
         else ""
     )
     return (
-        f"SELECT {top_clause}*\n"
+        f"SELECT {top_clause}A.*,\n"
+        f"{_period_billed_expr('A')} AS PERIOD_BILLED\n"
         f"FROM (\n"
         f"    SELECT\n"
         f"        mp.{MAIN_MP_COLUMN},\n"

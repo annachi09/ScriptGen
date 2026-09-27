@@ -41,6 +41,9 @@ from app.core import bulk_checker
 from app.core import reading_validation
 from app.core import tnb_cycle_disc
 from app.core import wrong_stuck_hierarchy
+from app.core import disconnection_tnb
+from app.core import double_itb
+from app.core import wrong_billed_consumption
 from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -2322,6 +2325,11 @@ def hierarchy_analysis_detect(user: str = Depends(require_login)):
                 "reading_usage": diff_engine.cell_display(_da_col(r, "READING_USAGE")),
                 "usage_type": diff_engine.cell_display(_da_col(r, "USAGE_TYPE")),
                 "ind_estimate": diff_engine.cell_display(_da_col(r, "IND_ESTIMATE")),
+                # 1/0 - is this reading's period already billed (a
+                # non-cancelled contract covering the reading date has a
+                # TFGEN00001 bill matching its dates)? RJ, 2026-09-27 - see
+                # hierarchy_analysis._period_billed_expr.
+                "period_billed": diff_engine.cell_display(_da_col(r, "PERIOD_BILLED")),
             }
             for r in rows
         ],
@@ -3950,6 +3958,199 @@ def wrong_stuck_hierarchy_detect(body: WrongStuckHierarchyRequest | None = None,
         "account_count": len({r.get("reference") for r in rows}),
         "main_mp_count": len({r.get("id_main_mp") for r in rows}),
         "period_count": len({r.get("id_billing_period") for r in rows}),
+    }
+
+
+@app.post("/api/wrong-stuck-hierarchy/sanitary/detect")
+def wrong_stuck_hierarchy_sanitary_detect(user: str = Depends(require_login)):
+    """Tab 2 - sanitary (190) item stuck in STTOBILL09 while the account's
+    water (19) item for the same period + billing date is already billed
+    (STTOBILL07) or pending (STTOBILL01). See wrong_stuck_hierarchy.
+    build_sanitary_stuck_water_done_query."""
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(conn, wrong_stuck_hierarchy.build_sanitary_stuck_water_done_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [
+        {c.lower(): diff_engine.cell_display(v) for c, v in zip(result.columns, r)}
+        for r in result.rows
+    ]
+    return {
+        "rows": rows,
+        "count": len(rows),
+        "account_count": len({r.get("reference") for r in rows}),
+        "period_count": len({r.get("id_billing_period") for r in rows}),
+    }
+
+
+class WrongStuckHierarchyGenerateRequest(BaseModel):
+    item_ids: list[str] = []  # the STUCK ID_ITEM_TO_BILL of each selected row
+    program: str = wrong_stuck_hierarchy.CORRECTION_SCRIPT_DEFAULT_PROGRAM
+    audit_user: str = wrong_stuck_hierarchy.CORRECTION_SCRIPT_DEFAULT_USER
+    clean: bool = False
+
+
+@app.post("/api/wrong-stuck-hierarchy/generate")
+def wrong_stuck_hierarchy_generate(body: WrongStuckHierarchyGenerateRequest, user: str = Depends(require_editor)):
+    """RJ's STTOBILL09 -> STTOBILL01 update (see wrong_stuck_hierarchy.
+    build_correction_script). Same safety pattern as Incorrect Billing
+    Period's generate: detection is re-run server-side and only rows whose
+    stuck item is BOTH selected and still detected go into the script, so
+    the ids (and their service-190 partners) come from the database, not
+    from the browser."""
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    scope = {str(x).strip() for x in body.item_ids if str(x).strip()}
+    if not scope:
+        raise HTTPException(status_code=400, detail="Select at least one row to correct.")
+    program = body.program.strip() or wrong_stuck_hierarchy.CORRECTION_SCRIPT_DEFAULT_PROGRAM
+    audit_user = body.audit_user.strip() or wrong_stuck_hierarchy.CORRECTION_SCRIPT_DEFAULT_USER
+    try:
+        result = mssql.run_query(conn, wrong_stuck_hierarchy.build_wrong_stuck_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [dict(zip(result.columns, r)) for r in result.rows]
+    selected = [r for r in rows if str(_da_col(r, "ID_ITEM_TO_BILL")) in scope]
+    if not selected:
+        raise HTTPException(status_code=400, detail="None of the selected items are still stuck - re-scan.")
+    item_ids = wrong_stuck_hierarchy.collect_correction_item_ids(selected)
+    stuck_count = len({str(_da_col(r, "ID_ITEM_TO_BILL")) for r in selected})
+    sql_text = wrong_stuck_hierarchy.build_correction_script(
+        item_ids, program=program, user=audit_user, clean=body.clean,
+    )
+    try:
+        script_history.record_script(
+            config.internal_db_path,
+            username=user,
+            kind=script_history.KIND_WRONG_STUCK_HIERARCHY,
+            schema_name="",
+            table_name=f"Wrong Stuck in Hierarchy ITB ({len(item_ids)} item(s))",
+            program=program,
+            statement_count=-(-len(item_ids) // wrong_stuck_hierarchy.CORRECTION_CHUNK_SIZE),
+            warning_count=0,
+            sql_text=sql_text,
+            source=script_history.SOURCE_WEB,
+        )
+    except Exception:
+        pass
+    return {
+        "sql_text": sql_text,
+        "item_count": len(item_ids),
+        "stuck_count": stuck_count,
+        "partner_count": len(item_ids) - stuck_count,
+        "not_found": len(scope) - stuck_count,
+    }
+
+
+# ---------------------------------------------------------------------
+# Wrong Billed Consumption (RJ, 2026-09-27) - see app/core/
+# wrong_billed_consumption.py. One billing period per scan (~23s each).
+# ---------------------------------------------------------------------
+@app.get("/api/wrong-billed-consumption/billing-periods")
+def wrong_billed_consumption_periods(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(conn, wrong_billed_consumption.build_billing_periods_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [dict(zip(result.columns, r)) for r in result.rows]
+    return {
+        "periods": [
+            {"id": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
+             "description": diff_engine.cell_display(_da_col(r, "DESCRIPTION"))}
+            for r in rows
+        ]
+    }
+
+
+class WrongBilledConsumptionRequest(BaseModel):
+    id_billing_period: str
+
+
+@app.post("/api/wrong-billed-consumption/detect")
+def wrong_billed_consumption_detect(body: WrongBilledConsumptionRequest, user: str = Depends(require_login)):
+    raw = (body.id_billing_period or "").strip()
+    if not raw.isdigit():
+        raise HTTPException(status_code=400, detail="Pick a billing period.")
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(conn, wrong_billed_consumption.build_wrong_billed_consumption_query(int(raw)))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [
+        {c.lower(): diff_engine.cell_display(v) for c, v in zip(result.columns, r)}
+        for r in result.rows
+    ]
+    return {
+        "id_billing_period": int(raw),
+        "rows": rows,
+        "count": len(rows),
+        "reading_count": len({r.get("id_reading") for r in rows}),
+        "supply_count": len({r.get("niss") for r in rows}),
+    }
+
+
+# ---------------------------------------------------------------------
+# DOUBLE ITB (RJ, 2026-09-27) - see app/core/double_itb.py. One scan, no
+# parameters; filtered client-side.
+# ---------------------------------------------------------------------
+@app.post("/api/double-itb/detect")
+def double_itb_detect(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(conn, double_itb.build_double_itb_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [
+        {c.lower(): diff_engine.cell_display(v) for c, v in zip(result.columns, r)}
+        for r in result.rows
+    ]
+    return {
+        "rows": rows,
+        "count": len(rows),
+        "anomalous_item_count": len({r.get("anom_id_item_to_bill") for r in rows}),
+        "needs_rebilling_count": sum(1 for r in rows if r.get("needs_rebilling") == "1"),
+    }
+
+
+# ---------------------------------------------------------------------
+# Disconnection TNB (RJ, 2026-09-27) - see app/core/disconnection_tnb.py.
+# One scan, no parameters; filtered client-side.
+# ---------------------------------------------------------------------
+@app.post("/api/disconnection-tnb/detect")
+def disconnection_tnb_detect(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(conn, disconnection_tnb.build_disconnection_tnb_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [
+        {c.lower(): diff_engine.cell_display(v) for c, v in zip(result.columns, r)}
+        for r in result.rows
+    ]
+    return {
+        "rows": rows,
+        "count": len(rows),
+        "supply_count": len({r.get("id_sector_supply") for r in rows}),
+        "no_contract_count": sum(1 for r in rows if not r.get("id_contracted_service")),
     }
 
 

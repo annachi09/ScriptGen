@@ -2780,6 +2780,195 @@ niss".
   unticked stays hidden. Configs saved before this change are treated as
   knowing every id except those in `MENU_IDS_ADDED_BEFORE_TRACKING`.
 
+## Hierarchy Analysis: "Period Billed" column (2026-09-27)
+
+RJ: "add a new column saying if the period is already billed or not ...
+connect to gccom_contracted_service using id_sector_supply ... not
+cancelled and the reading_date is within the from_date and end_date ...
+connect it to gccom_bill ... the reading prev_date ... equal or +1 will
+be the last_billing_date ... and the reading_date is equal to the
+billing_date ... bill_type should be TFGEN0001 (similar)". Add a filter.
+
+- `hierarchy_analysis._period_billed_expr` adds `PERIOD_BILLED` (1/0) to
+  `build_pending_primaries_query`, computed on the outer query (once per
+  shown primary): EXISTS a `GCCOM_CONTRACTED_SERVICE` on the same
+  `ID_SECTOR_SUPPLY`, `STATUS <> 'ESTSC00005'` (Cancelled), `FROM_DATE <=
+  READING_DATE` and `END_DATE` empty or `>= READING_DATE`, with a
+  `GCCOM_BILL` where `BILL_TYPE = 'TFGEN00001'`, `BILLING_DATE =
+  READING_DATE` and `LAST_BILLING_DATE` = `READING_PREV_DATE` or +1 day
+  (all compared as dates).
+- "TFGEN0001" doesn't exist in the DB; `TFGEN00001` is the real code (the
+  main bill type, 165M rows) - that's what's used.
+- Page: "Period Billed" column (Yes in red), "Period billed" filter
+  (All/Yes/No), a KPI card, and the column in the CSV export.
+- Live 2026-09-27: 75 of the 1,000 pending primaries already had a
+  matching bill; the check adds ~5s to the scan.
+
+## Hierarchy Analysis: page redesign (2026-09-27)
+
+RJ: "change the layout it is confusing, also the colors and KPI, i want
+it to be modern, using gauge meter style ... the reading and details, i
+want it to be a popout ... that can be maximized. the filters are not
+organized, by default the information about the functionality should be
+collapsed". Front-end only (index.html / app.js / styles.css, all new
+classes prefixed `hx-`); no server or query changes.
+
+- **About this page** - the old subtitle, draft-warning banner and color
+  legend now live in one `<details>` that starts collapsed.
+- **Command bar** - Detect, the result summary + filtered count, and an
+  Export menu (CSV / Excel / "include rows hidden by filters").
+- **Dashboard** - three SVG semicircle gauges with needles: Period
+  already billed %, Primary-only fixes %, Anomalous reads %. Clicking a
+  gauge toggles its filter (highlighted "filtering"). Stat tiles: total
+  ready usage (accent tile), pending primaries, distinct NISS,
+  secondaries (+avg), oldest period. Calc-module split is one stacked bar
+  with a legend. All recomputed from the visible rows.
+- **Filters** - collapsible panel with a grid of labelled fields, a
+  segmented All / Billed / Not billed control for Period billed, a
+  toggle switch for Primary-only, an active-filter count badge, and
+  Clear in the panel header.
+- **Table** - reordered to NISS, Measuring point (+main MP), Billing
+  period, Read status, Period, Ready usage first. Status and Period are
+  colored pills; primary-only rows get a green left accent, anomalous an
+  amber one; sticky header with its own scroll. Clicking a row opens its
+  detail.
+- **Pop-outs** - Hierarchy Detail is now a modal (summary stats: members,
+  not billed, ready usage, period billed) instead of a card at the bottom
+  of the page; 📖 Readings opens the reading history on top of it. Both
+  have a maximize/restore button (⤢), close on ✕, backdrop click or Esc
+  (Esc closes the top-most first), and lock page scroll while open. The
+  reading-history pop-out is shared with Bulk Checker, which gets the
+  same maximize button.
+
+## Wrong Billed Consumption (2026-09-27)
+
+RJ: cases where the billed consumption in READING_ITEMS_TO_BILL isn't
+the READY_USAGE in GCGT_RE_READING ((VALUE - PREV_VALUE) x MULTIPLIER from
+GCGT_ME_USAGE_TYPE_METER by id_device + usage type); cycle readings only,
+readings from Feb 2023. Example given: reading 1046340065 - READY_USAGE
+4452 (57236 -> 61688) but billed 7799 from PREV_VALUE 53889.
+
+- **Query:** `app/core/wrong_billed_consumption.py`. Billed usage is
+  summed per (ID_READING, ID_ITEM_TO_BILL) from
+  `OUC_ADMIN.GCCOM_READINGS_ITEMSTOBILL` and compared to the reading's
+  READY_USAGE (tolerance 0.001). Per item to bill, not per reading: water
+  readings are billed on both the water and the sanitary item with the
+  full usage, so a per-reading sum doubled them (272,455 false positives
+  in one period vs 2,267 real mismatches per item).
+- Extra columns: EXPECTED_READY_USAGE = (VALUE - PREV_VALUE) x MULTIPLIER
+  (missing multiplier = 1) with an "Off formula" flag, the link row's own
+  BILLED_PREV_VALUE / BILLED_VALUE (red when they differ from the
+  reading's), DIFFERENCE = billed - ready.
+- **One billing period per scan** (~24s each on the tunnel; all periods
+  at once exceeds the 120s timeout). `GET
+  /api/wrong-billed-consumption/billing-periods` (Jan 2023 -> next month,
+  newest first) + `POST /api/wrong-billed-consumption/detect
+  {id_billing_period}`.
+- **Page:** menu id `wrongbilledconsumption`, hx design: period picker +
+  Scan, gauges (over-billed, billed from a different start, reading off
+  formula), tiles (net / over / under difference, readings, NISS), usage
+  split, filters (search, usage type, read status, Over/Under), table
+  capped at 2,000 rendered rows (CSV has all), CSV export, ⟳ Refresh.
+- Live 2026-09-27, September 2026 (before the bill condition below):
+  2,267 mismatches (1,306 over-billed, 460 billed from a different start,
+  45 readings off formula). Largest were meter rollovers.
+- **Bill condition (same day):** "check the GCCOM_BILL of ITEMS_TO_BILL,
+  it should be in status invoiced or generated, not rebilled. the
+  billing_type should not be credit note". Item to bill ->
+  `GCCOM_ITEMS_TO_BILL.ID_BILL` -> `OUC_COMMON_ADMIN.GCCOM_BILL` with
+  `BILLING_STATUS IN ('ESTFAC0005' Invoiced, 'ESTFAC0008' Generated)`
+  and `BILLING_TYPE <> 'TIPFAC0011'` (Credit Note); items with no bill
+  drop out. New columns: Bill, Bill Status, Billing Type (English via
+  OUC_ADMIN.GCCOM_BILL_STATUS / GCCOM_BILLING_TYPE), ITB status. Live,
+  September 2026: 2,267 -> 42 rows (all Invoiced; 35 In cycle, 7
+  Substitutive Rebilling), ~22s, RJ's example still included.
+- **Rendering:** the table now shows 100 rows per page with a pager
+  (was up to 2,000 at once) and the search box waits 250ms after typing
+  before re-filtering.
+- **MP type (same day):** "add the filter and column for MP_TYPE, the
+  filter will be a check box which is by default only NORMAL". Joins
+  `r.ID_MEASURING_POINT` -> `OUC_COMMON_ADMIN.GCGT_RE_MEASUREMENT_POINT.MP_TYPE`
+  -> `GCGT_RE_MP_TYPE` (English via GCTS_DICTIONARY): TIPEQM0001 Normal,
+  0002 Secondary, 0003 Main, 0004 Control, 0005 Main coupled. The scan
+  returns every type; the checkboxes (Normal only by default, plus "no MP
+  type") filter on the page, so ticking another type needs no re-scan.
+  Clear resets to Normal only; Refresh keeps the ticks; CSV carries
+  ID_MEASURING_POINT / MP_TYPE / MP_TYPE_DESC. Counts in the summary line
+  are for all MP types.
+- **Billed read status + BILLED_CONSUMPTION (same day):** "read_status
+  should only be billed" -> `r.READ_STATUS = '7000STSRED'` (Billed;
+  7001STSRED "UAU - Billed" not included). New column BILLED_CONSUMPTION
+  per bill (RJ's query): `SUM(CALCULATION_BASE)` from
+  `OUC_ADMIN.GCCOM_BILLING_CONCEPT` + `_DETAIL` where
+  `COD_CONCEPT IN ('CONCSMO003','CC210')`, via OUTER APPLY on the row's
+  ID_BILL. Shown red when it differs from READY_USAGE. Example reading
+  1046340065: bill 1073781052 -> 7799 (ready usage 4452).
+
+## ⟳ Refresh on every menu (2026-09-27)
+
+RJ: "add a refresh in all menu, this will refresh the data using the same
+filters". Front-end only (`hxInstallRefreshButtons` / `hxRefreshPage` in
+app.js).
+
+- A ⟳ Refresh button sits top-right of every page header (Overview keeps
+  its own existing 🔄 Refresh).
+- On click it snapshots the page's filter controls (inputs/selects with
+  an id, plus hx segmented controls; table cells, modals, select-all
+  boxes, Jira/program/audit-user fields are skipped), re-runs the page's
+  own scan (`HX_REFRESH` map; for tabbed pages the ACTIVE tab's scan),
+  waits until that scan's button is re-enabled and no `api()` call is in
+  flight (`_apiInflight` counter), then restores any control the scan
+  reset, firing its own input/change handlers so the page re-filters the
+  same way a manual change would.
+- Search-driven pages (Workspace query, Reading Validation supply, DIFF
+  DATES single NISS, Bulk Checker) re-run the same search.
+- Verified live: Hierarchy (Period billed + Primary-only + search kept, 58
+  rows before/after) and DOUBLE ITB (billing period + Needs rebilling
+  kept, 21 rows before/after).
+
+## DOUBLE ITB (2026-09-27)
+
+RJ: GCCOM_ITEMS_TO_BILL with 2+ records on the same ID_BILLING_SERVICE,
+one Billed and one Anomalous, sharing INI_DATE and END_DATE; show NISS,
+billing period and ITB details; link the anomalous one to the readings
+and show its READY_USAGE; flag it for rebilling when that isn't zero.
+
+- **Query:** `app/core/double_itb.py`. Anomalous `a` (STTOBILL00) joined
+  to Billed twin `b` (STTOBILL07) on same ID_BILLING_SERVICE, INI_DATE,
+  END_DATE. READY_USAGE is summed per anomalous item from
+  `OUC_ADMIN.GCCOM_READINGS_ITEMSTOBILL` (plus reading count).
+  `NEEDS_REBILLING = 1` when that sum <> 0. NISS / account / offered
+  service via billing service -> contracted service.
+- **Route:** `POST /api/double-itb/detect` (no parameters).
+- **Page:** menu id `doubleitb`, built on the hx design: collapsed About,
+  command bar, gauges (needs rebilling / zero usage / twin billed in
+  another period), tiles (ready usage to rebill, items, NISS, accounts,
+  periods), offered-service split, filter panel (search, billing period,
+  service, Rebilling segmented control), CSV export.
+- Live 2026-09-27: 141 anomalous items with a billed twin, 107 needing
+  rebilling, ~2s.
+
+## App-wide "hx" design (2026-09-27)
+
+RJ: "i dont want it to be filters the gauge, i want it to be used in kpis
+not as filters, apply the same design to all of my menus".
+
+- Hierarchy gauges are now display-only KPIs (no click, no filtering).
+- Shared toolkit in app.js: `hxGaugesHtml`, `hxTilesHtml`, `hxSplitHtml`,
+  `hxRenderDashboard(containerId, {gauges, tiles, split})`,
+  `hxGaugesAbove(kpiRowSelector, gauges)`, `hxCountBy`, `hxSum`.
+- Gauge dashboards (recomputed from the visible/filtered rows) on: DIFF
+  DATES Detect All, Reading Validation, TNB CYCLE/DISC, Wrong Stuck in
+  Hierarchy (both tabs), Disconnection TNB, Incorrect Billing Period.
+  Gauge strips above the existing KPI rows on Bill Issuance Case 1/2/3
+  and Bulk Checker.
+- Global restyle of shared components: every `.kpi-card` (tile look),
+  every `*-filter-row` (filter panel), tables (rounded frame, hover).
+- `hxCollapseInfo()` runs at boot: every page's `.warning-banner` becomes
+  a collapsed "⚠ Notes" pill and every long static `p.hint-text` a
+  collapsed "ⓘ How this works" pill. Text with an id (live status) is
+  never touched.
+
 ## Wrong Stuck in Hierarchy ITB (2026-09-25)
 
 RJ's "HIERARCHY BUT BILLED PRIMARY" query. First built one period per
@@ -2809,9 +2998,58 @@ hard-coded id.
   client-side by billing period (newest first, with row counts), search
   (account / NISS / ITB id), main MP, and service-190 ITB status
   (including "(none)"). Sortable columns, CSV export.
+- **Update script (2026-09-27):** RJ's template, STTOBILL09 → STTOBILL01
+  (`UPDATE_PROGRAM` default `WRONG_ITB_HIERARCHY_STATUS`, user `RMA`,
+  `UPDATE_DATE = getdate()`, `WHERE ... AND STATUS = 'STTOBILL09'`). The
+  id list is each checked row's stuck item plus its service-190 item when
+  that item is also STTOBILL09, de-duplicated, 500 ids per UPDATE. Every
+  row is checked after a scan. `POST /api/wrong-stuck-hierarchy/generate`
+  (editor role) re-runs detection and only uses rows still stuck, so ids
+  come from the DB, not the browser (same pattern as Incorrect Billing
+  Period). Recorded in Script History.
+- **Tabs (2026-09-27):** the page now has a sub-nav. "Billed Primary" is
+  everything above; "Sanitary Stuck, Water Billed/Pending" is new.
+- **Sanitary Stuck, Water Billed/Pending:** RJ - "find the ones where the
+  sanitary service is in hierarchy status, but the water is already
+  billed or pending for the same billing period and billing_date".
+  Sanitary (offered service 190) item in STTOBILL09, linked through the
+  same account (`ID_PAYMENT_FORM`) to a Water (19) item with the same
+  `ID_BILLING_PERIOD` and same `BILLING_DATE` (date only) that is Billed
+  (STTOBILL07) or Pending (STTOBILL01). Sanitary contract uses the same
+  Active/Pending termination/Suspended filter as tab 1. Route `POST
+  /api/wrong-stuck-hierarchy/sanitary/detect`; filters: billing period,
+  search, water status; CSV export. Live 2026-09-27: 0 rows - all 10,345
+  stuck sanitary items had a water item also in STTOBILL09.
 - **Menu Access:** legacy saved configs (no `known_ids`) are now upgraded
   in place on first load, so pages added after this one appear without
   touching `MENU_IDS_ADDED_BEFORE_TRACKING` again.
+
+## Disconnection TNB (2026-09-27)
+
+RJ: "ideally, this disconnection should not be TNB ... find for me all the
+reading where the Disconnection reading type is having Terminated not
+bill status and the ready usage is not zero. Then add the contract
+end_date from gccom_contracted_service linking with the id_sector_supply,
+find the nearest ID_CONTRACTED service base on the reading date".
+
+- **Query:** `app/core/disconnection_tnb.py`. GCGT_RE_READING with
+  `READING_TYPE = 'TIPTL00010'` (Disconnection), `READ_STATUS =
+  '8000STSRED'` (Terminated Not Billed) and `ISNULL(READY_USAGE, 0) <> 0`.
+- **Nearest contracted service:** `OUTER APPLY` picks one
+  `OUC_COMMON_ADMIN.GCCOM_CONTRACTED_SERVICE` row on the same
+  `ID_SECTOR_SUPPLY` whose `END_DATE` is closest to the reading date
+  (either direction). Open contracts (no END_DATE) rank after dated ones;
+  ties go to the newest id. Shown: contracted service id, its status (in
+  English), from date, end date, and `DAYS_FROM_END` (reading date minus
+  end date; positive = reading after the contract ended, shown in red).
+  No contract-status filter - the status is displayed instead.
+- **Columns:** NISS, Billing Period (English), ID Reading, Prev. Date,
+  Reading Date, Prev. Value, Value, Reading Usage, Corrected Usage, Ready
+  Usage, Read Status, Estimated, then the contract columns.
+- **Route:** `POST /api/disconnection-tnb/detect` (no parameters).
+- **Page:** menu id `disconnectiontnb`. Scan, then filter client-side by
+  billing period, NISS, contract status (incl. "(no contract)") and
+  estimated. Sortable, CSV export.
 
 ## Security note on stored credentials
 

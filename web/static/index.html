@@ -96,6 +96,15 @@
         <button class="nav-item" data-page="wrongstuckhierarchy" title="Wrong Stuck in Hierarchy ITB">
           <span class="nav-icon">🪜</span><span class="nav-label">Wrong Stuck in Hierarchy ITB</span>
         </button>
+        <button class="nav-item" data-page="disconnectiontnb" title="Disconnection TNB">
+          <span class="nav-icon">⛔</span><span class="nav-label">Disconnection TNB</span>
+        </button>
+        <button class="nav-item" data-page="doubleitb" title="DOUBLE ITB">
+          <span class="nav-icon">👯</span><span class="nav-label">DOUBLE ITB</span>
+        </button>
+        <button class="nav-item" data-page="wrongbilledconsumption" title="Wrong Billed Consumption">
+          <span class="nav-icon">⚖️</span><span class="nav-label">Wrong Billed Consumption</span>
+        </button>
         <button class="nav-item" data-page="billissuance" title="Bill Issuance Validator">
           <span class="nav-icon">🧾</span><span class="nav-label">Bill Issuance Validator</span>
         </button>
@@ -640,7 +649,8 @@
             <button type="button" class="btn btn-pill-sm" id="da-cleanup-filter-clear-btn">✕ Clear filters</button>
           </div>
 
-          <div class="kpi-row" id="da-cleanup-kpi-row" style="margin:18px 0 4px;"></div>
+          <div class="hx-dashboard" id="da-cleanup-dash" hidden style="margin-top:14px;"></div>
+          <div class="kpi-row" id="da-cleanup-kpi-row" style="margin:18px 0 4px;" hidden></div>
           <div class="da-cleanup-chart-grid" id="da-cleanup-chart-grid" hidden>
             <div>
               <div class="hint-text">By offered service <span class="chart-hint-tap">— click a bar to filter</span></div>
@@ -706,115 +716,111 @@
       <section class="page" id="page-hierarchy">
         <header class="page-header">
           <h1>Hierarchy Analysis</h1>
-          <p class="page-subtitle">Finds every PRIMARY meter hierarchy (GCGT_RE_MEASUREMENT_POINT.MP_TYPE = Principal or Principal acoplado, MP status Active or Disconnected) with a reading that hasn't been billed yet, narrowed to each primary's earliest pending billing period.</p>
+          <p class="page-subtitle">Primary meter hierarchies with a reading that still isn't billed — earliest pending period per primary.</p>
         </header>
 
-        <div class="warning-banner">
-          ℹ️ <strong>Draft feature.</strong> The "primary" definition (MP_TYPE IN Principal / Principal acoplado, via GCGT_RE_MP_TYPE) and MP status filter (Active or Disconnected only, via GCGT_RE_MEASURE_POINT_STATUS) reflect your own correction to an earlier IND_DIST_PPAL-based draft. The pending read-status/reading-type filters were derived from live schema lookups, not yet confirmed against your own judgment — see chat for the exact query and assumptions, and flag anything that looks wrong. Results are also floored to billing periods after <strong>10000000193</strong> (MIN_BILLING_PERIOD) — older pending periods are left out.
-        </div>
-
-        <div class="card" id="hier-dashboard-card" hidden>
-          <div class="card-header">
-            <h2>Overview</h2>
+        <!-- RJ 2026-09-27: "by default the information about the
+             functionality should be collapsed, it is eating space". -->
+        <details class="hx-info">
+          <summary>ℹ️ About this page</summary>
+          <div class="hx-info-body">
+            <p><strong>What it scans.</strong> Every primary measuring point (MP_TYPE Principal / Principal acoplado, MP status Active or Disconnected) with a Cycle or Distribution reading in Available, Anomalous or Sent-to-Bill status, for billing periods after <strong>10000000193</strong>. Only the earliest pending period per primary is shown (capped at 1,000 rows).</p>
+            <p><strong>Primary-only</strong> <span class="hx-legend hx-legend-green"></span> — every secondary is already sent to bill (or further); the primary's own reading is the only thing left to fix.</p>
+            <p><strong>Period billed</strong> <span class="hx-pill hx-pill-billed">Billed</span> — a non-cancelled contract covering the reading date already has a TFGEN00001 bill whose LAST_BILLING_DATE is the reading's prev date (or +1 day) and whose BILLING_DATE is the reading date.</p>
+            <p><strong>Details / readings.</strong> Click a row (or 🔗) to open the hierarchy's members in a pop-out; from there, 📖 opens that supply's reading history. Both windows can be maximized.</p>
+            <p class="hint-text">Draft rules: the pending read-status / reading-type sets were derived from live lookups — flag anything that looks wrong.</p>
           </div>
-          <p class="hint-text">Recomputed from whatever's currently visible below — apply a filter and this updates with it.</p>
-          <div class="kpi-row" id="hier-dashboard-kpi-row"></div>
-          <div class="kpi-row" id="hier-dashboard-type-row" style="margin-top:10px;"></div>
-        </div>
+        </details>
 
-        <div class="card">
-          <div class="card-header">
-            <h2>Pending Primary Hierarchies</h2>
-            <div class="card-header-actions">
-              <button type="button" class="btn btn-pill" id="hier-detect-btn">🔍 Detect Pending Primaries</button>
-              <label class="field-label" style="display:flex;align-items:center;gap:6px;" id="hier-export-all-wrap" hidden title="Unchecked = only the rows the current filters show. Checked = every detected row.">
-                <input type="checkbox" id="hier-export-all" />
-                Export all rows
-              </label>
-              <button type="button" class="btn btn-pill" id="hier-export-csv-btn" hidden>⬇ Export CSV</button>
-              <button type="button" class="btn btn-pill" id="hier-export-xlsx-btn" hidden>⬇ Export Excel</button>
+        <!-- Command bar: one action row instead of buttons + hints spread
+             over the card header. -->
+        <div class="hx-commandbar">
+          <button type="button" class="btn btn-primary" id="hier-detect-btn">🔍 Detect Pending Primaries</button>
+          <div class="hx-summary">
+            <span id="hier-summary">Click Detect to scan every primary.</span>
+            <span id="hier-filtered-count" class="hx-filtered"></span>
+          </div>
+          <details class="hx-export" id="hier-export-all-wrap" hidden>
+            <summary class="btn btn-pill">⬇ Export</summary>
+            <div class="hx-export-menu">
+              <label class="hx-check"><input type="checkbox" id="hier-export-all" /> Include rows hidden by filters</label>
+              <button type="button" class="btn btn-pill-sm" id="hier-export-csv-btn">CSV</button>
+              <button type="button" class="btn btn-pill-sm" id="hier-export-xlsx-btn">Excel</button>
             </div>
-          </div>
-          <p class="hint-text">Scans <strong>every</strong> primary measuring point at once for a not-yet-billed Cycle/Distribution reading — no NISS/id needed here. Click 🔗 on a row to drill into that hierarchy's full member list. <span class="row-primary-only-swatch">■</span> green rows have every secondary already sent to bill (or further) — the primary's own reading is the only thing left to fix in that hierarchy.</p>
-          <div class="hint-text" id="hier-summary"></div>
-          <div class="hint-text" id="hier-filtered-count"></div>
+          </details>
+        </div>
 
-          <div class="key-panel-row" id="hier-filter-row" hidden>
-            <label class="field-label">Search</label>
-            <input id="hier-filter-search" class="text-input text-input-sm" placeholder="NISS or measuring point…" style="width:180px;" />
-            <label class="field-label">Read status</label>
-            <select id="hier-filter-status" class="text-input text-input-sm"><option value="">All</option></select>
-            <label class="field-label">Reading type</label>
-            <select id="hier-filter-type" class="text-input text-input-sm"><option value="">All</option></select>
-            <label class="field-label">MP status</label>
-            <select id="hier-filter-mpstatus" class="text-input text-input-sm"><option value="">All</option></select>
-            <label class="field-label">Billing period</label>
-            <select id="hier-filter-billingperiod" class="text-input text-input-sm"><option value="">All</option></select>
-            <label class="field-label" style="display:flex;align-items:center;gap:6px;">
-              <input type="checkbox" id="hier-filter-primaryonly" />
-              Primary-only <span class="row-primary-only-swatch">■</span>
-            </label>
-            <button type="button" class="btn btn-pill-sm" id="hier-filter-clear-btn">✕ Clear filters</button>
-          </div>
+        <!-- Dashboard: gauges (click to filter) + stat tiles + calc-module
+             split. Recomputed from whatever the filters currently show. -->
+        <div class="hx-dashboard" id="hier-dashboard-card" hidden>
+          <div class="hx-gauges" id="hier-gauge-row"></div>
+          <div class="hx-tiles" id="hier-dashboard-kpi-row"></div>
+          <div class="hx-split" id="hier-dashboard-type-row"></div>
+        </div>
 
-          <div class="kpi-row" id="hier-kpi-row" style="margin:18px 0 4px;"></div>
+        <div class="card hx-card">
+          <details class="hx-filters" id="hier-filter-row" open hidden>
+            <summary>
+              <span>⚙️ Filters</span>
+              <span class="hx-badge" id="hier-filter-badge" hidden>0</span>
+              <button type="button" class="btn btn-pill-sm" id="hier-filter-clear-btn">✕ Clear</button>
+            </summary>
+            <div class="hx-filter-grid">
+              <label class="hx-field hx-field-wide">
+                <span>Search</span>
+                <input id="hier-filter-search" class="text-input text-input-sm" placeholder="NISS or measuring point…" />
+              </label>
+              <label class="hx-field">
+                <span>Billing period</span>
+                <select id="hier-filter-billingperiod" class="text-input text-input-sm"><option value="">All</option></select>
+              </label>
+              <label class="hx-field">
+                <span>Read status</span>
+                <select id="hier-filter-status" class="text-input text-input-sm"><option value="">All</option></select>
+              </label>
+              <label class="hx-field">
+                <span>Reading type</span>
+                <select id="hier-filter-type" class="text-input text-input-sm"><option value="">All</option></select>
+              </label>
+              <label class="hx-field">
+                <span>MP status</span>
+                <select id="hier-filter-mpstatus" class="text-input text-input-sm"><option value="">All</option></select>
+              </label>
+              <div class="hx-field">
+                <span>Period billed</span>
+                <div class="hx-seg" id="hier-filter-periodbilled" role="radiogroup">
+                  <button type="button" data-value="" class="is-active">All</button>
+                  <button type="button" data-value="1">Billed</button>
+                  <button type="button" data-value="0">Not billed</button>
+                </div>
+              </div>
+              <div class="hx-field">
+                <span>Hierarchy</span>
+                <label class="hx-toggle">
+                  <input type="checkbox" id="hier-filter-primaryonly" />
+                  <span class="hx-toggle-track"></span>
+                  Primary-only
+                </label>
+              </div>
+            </div>
+          </details>
 
-          <div class="grid-wrap" style="margin-top:18px;">
+          <div class="grid-wrap hx-grid">
             <table class="data-grid" id="hier-table">
               <thead><tr>
-                <th class="stats-table-th-sortable" data-sort="id_measuring_point">Measuring Point</th>
-                <th class="stats-table-th-sortable" data-sort="id_main_mp">Main MP</th>
                 <th class="stats-table-th-sortable" data-sort="niss">Supply (NISS)</th>
-                <th class="stats-table-th-sortable" data-sort="mp_type">MP Type</th>
-                <th class="stats-table-th-sortable" data-sort="mp_status">MP Status</th>
-                <th class="stats-table-th-sortable" data-sort="secondary_count">Secondaries</th>
-                <th class="stats-table-th-sortable" data-sort="secondaries_not_sent_count" title="How many secondaries still have a not-yet-sent (Available/Anomalous) reading, or none at all in scope — 0 means only the primary itself needs attention">Sec. Not Sent</th>
-                <th class="stats-table-th-sortable" data-sort="calc_module_type">Type (Calc Module)</th>
-                <th class="stats-table-th-sortable" data-sort="id_billing_period">Billing Period</th>
-                <th class="stats-table-th-sortable" data-sort="id_reading">Reading</th>
-                <th class="stats-table-th-sortable" data-sort="reading_date">Reading Date</th>
-                <th class="stats-table-th-sortable" data-sort="reading_type">Reading Type</th>
-                <th class="stats-table-th-sortable" data-sort="read_status">Read Status</th>
-                <th class="stats-table-th-sortable" data-sort="ready_usage" title="READY_USAGE — the analyst's own most-important field on this page">★ Ready Usage</th>
-                <th class="stats-table-th-sortable" data-sort="reading_usage">Usage</th>
-                <th></th>
-              </tr></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="card" id="hier-detail-card" hidden>
-          <div class="card-header">
-            <h2>Hierarchy Detail <span id="hier-detail-title" class="hint-text"></span></h2>
-            <div class="card-header-actions">
-              <button type="button" class="btn btn-pill-sm" id="hier-detail-close-btn">✕ Close</button>
-            </div>
-          </div>
-          <p class="hint-text">Every member of this hierarchy (its own row plus any children whose ID_MAIN_MP points to it) across its full reading history — the analyst's own drill-down query, run for this one measuring point. <span class="row-not-billed-swatch">■</span> = supply not yet billed (always sorted to the top).</p>
-          <div class="key-panel-row" id="hier-detail-filter-row">
-            <label class="field-label" style="display:flex;align-items:center;gap:6px;">
-              <input type="checkbox" id="hier-detail-filter-notbilled" />
-              Not billed only
-            </label>
-          </div>
-          <div class="grid-wrap">
-            <table class="data-grid" id="hier-detail-table">
-              <thead><tr>
                 <th class="stats-table-th-sortable" data-sort="id_measuring_point">Measuring Point</th>
-                <th class="stats-table-th-sortable" data-sort="id_main_mp">Main MP</th>
-                <th class="stats-table-th-sortable" data-sort="niss">NISS</th>
-                <th>Primary?</th>
-                <th class="stats-table-th-sortable" data-sort="perc_dist">% Dist</th>
-                <th class="stats-table-th-sortable" data-sort="mp_type">MP Type</th>
-                <th class="stats-table-th-sortable" data-sort="status">MP Status</th>
                 <th class="stats-table-th-sortable" data-sort="id_billing_period">Billing Period</th>
-                <th class="stats-table-th-sortable" data-sort="id_reading">Reading</th>
+                <th class="stats-table-th-sortable" data-sort="read_status">Read Status</th>
+                <th class="stats-table-th-sortable" data-sort="period_billed" title="Billed = a non-cancelled contract covering the reading date already has a TFGEN00001 bill matching the reading's dates">Period</th>
+                <th class="stats-table-th-sortable" data-sort="ready_usage" title="READY_USAGE — the most important field on this page">★ Ready Usage</th>
+                <th class="stats-table-th-sortable" data-sort="secondary_count">Secondaries</th>
+                <th class="stats-table-th-sortable" data-sort="secondaries_not_sent_count" title="Secondaries still not sent to bill (Available/Anomalous, or no reading in scope). 0 = primary-only.">Not Sent</th>
                 <th class="stats-table-th-sortable" data-sort="reading_date">Reading Date</th>
                 <th class="stats-table-th-sortable" data-sort="reading_type">Reading Type</th>
-                <th class="stats-table-th-sortable" data-sort="read_status">Read Status</th>
-                <th class="stats-table-th-sortable" data-sort="ready_usage" title="READY_USAGE — the analyst's own most-important field on this page">★ Ready Usage</th>
-                <th class="stats-table-th-sortable" data-sort="value">Value</th>
+                <th class="stats-table-th-sortable" data-sort="calc_module_type">Calc Module</th>
+                <th class="stats-table-th-sortable" data-sort="mp_status">MP Status</th>
+                <th class="stats-table-th-sortable" data-sort="id_reading">Reading</th>
                 <th></th>
               </tr></thead>
               <tbody></tbody>
@@ -865,8 +871,9 @@
             </div>
           </div>
           <div class="hint-text" id="rv-filtered-count"></div>
+          <div class="hx-dashboard" id="rv-dash" hidden></div>
 
-          <div class="key-panel-row" style="flex-wrap:wrap;">
+          <div class="key-panel-row" id="rv-filter-row" style="flex-wrap:wrap;">
             <label class="field-label">Billing period</label>
             <select id="rv-filter-billing-period" class="text-input text-input-sm"><option value="">All</option></select>
             <label class="field-label">Reading date from</label>
@@ -954,6 +961,7 @@
             </div>
           </div>
           <div class="hint-text" id="tcd-summary">Click Scan to load (takes ~20–30s — it scans every reading).</div>
+          <div class="hx-dashboard" id="tcd-dash" hidden></div>
 
           <div class="key-panel-row" id="tcd-filter-row" hidden>
             <label class="field-label">Billing period</label>
@@ -997,8 +1005,15 @@
       <section class="page" id="page-wrongstuckhierarchy">
         <header class="page-header">
           <h1>Wrong Stuck in Hierarchy ITB</h1>
-          <p class="page-subtitle">Hierarchy but billed primary: secondary items to bill still held in hierarchy (STTOBILL09) whose main measuring point's item is already billed (STTOBILL07) in the same billing period. Scans every billing period at once; each row is checked against its own period.</p>
         </header>
+
+        <nav class="da-subnav" aria-label="Wrong Stuck in Hierarchy functions">
+          <button type="button" class="da-subnav-btn is-active" data-wsh-sub="primary">Billed Primary</button>
+          <button type="button" class="da-subnav-btn" data-wsh-sub="sanitary">Sanitary Stuck, Water Billed/Pending</button>
+        </nav>
+
+        <div class="da-subpage is-active" data-wsh-sub="primary">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Hierarchy but billed primary: secondary items to bill still held in hierarchy (STTOBILL09) whose main measuring point's item is already billed (STTOBILL07) in the same billing period. Scans every billing period at once; each row is checked against its own period.</p>
 
         <div class="card">
           <div class="card-header">
@@ -1009,6 +1024,7 @@
             </div>
           </div>
           <div class="hint-text" id="wsh-summary">Click Scan to list every stuck item across all billing periods.</div>
+          <div class="hx-dashboard" id="wsh-dash" hidden></div>
 
           <div class="key-panel-row" id="wsh-filter-row" hidden>
             <label class="field-label">Billing period</label>
@@ -1025,6 +1041,252 @@
 
           <div class="grid-wrap" style="margin-top:14px;">
             <table class="data-grid" id="wsh-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>Generate Update Script</h2></div>
+          <p class="hint-text">Sets the checked rows' stuck items to bill — plus their service-190 item when it is also STTOBILL09 — from STTOBILL09 to STTOBILL01. Every row is checked after a scan; untick any you want to leave out.</p>
+          <p class="hint-text" id="wsh-selection-hint" style="font-weight:600;">No rows selected.</p>
+          <div class="key-panel-row" style="margin:10px 0;">
+            <label class="field-label">Jira / Program #</label>
+            <input id="wsh-program" class="text-input text-input-sm" value="WRONG_ITB_HIERARCHY_STATUS" style="width:230px;" />
+            <label class="field-label">Audit user</label>
+            <input id="wsh-audit-user" class="text-input text-input-sm" value="RMA" style="width:100px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input type="checkbox" id="wsh-clean-toggle" /> Clean script (no comments)
+            </label>
+            <button type="button" class="btn btn-primary" id="wsh-generate-btn" disabled>📝 Generate Update Script</button>
+          </div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" id="wsh-copy-btn">📋 Copy</button>
+            <button type="button" class="btn btn-pill" id="wsh-download-btn">⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" id="wsh-output">No script generated yet — Scan, then Generate.</pre>
+        </div>
+        </div>
+
+        <div class="da-subpage" data-wsh-sub="sanitary">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Sanitary (service 190) items to bill still in hierarchy (STTOBILL09) while the same account's Water (service 19) item for the same billing period and billing date is already Billed (STTOBILL07) or Pending (STTOBILL01).</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Sanitary Stuck, Water Billed/Pending</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="wshs-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="wshs-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="wshs-summary">Click Scan to check every billing period.</div>
+          <div class="hx-dashboard" id="wshs-dash" hidden></div>
+          <div class="key-panel-row" id="wshs-filter-row" hidden>
+            <label class="field-label">Billing period</label>
+            <select id="wshs-filter-period" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Search</label>
+            <input id="wshs-filter-search" class="text-input text-input-sm" placeholder="Account, NISS, ITB id…" style="width:180px;" />
+            <label class="field-label">Water status</label>
+            <select id="wshs-filter-water" class="text-input text-input-sm">
+              <option value="">All</option><option value="STTOBILL07">Billed (STTOBILL07)</option><option value="STTOBILL01">Pending (STTOBILL01)</option>
+            </select>
+            <button type="button" class="btn btn-pill-sm" id="wshs-filter-clear-btn">✕ Clear filters</button>
+          </div>
+          <div class="hint-text" id="wshs-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:14px;">
+            <table class="data-grid" id="wshs-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        </div>
+      </section>
+
+      <!-- ===== DOUBLE ITB page (RJ 2026-09-27) ===== -->
+      <section class="page" id="page-doubleitb">
+        <header class="page-header">
+          <h1>DOUBLE ITB</h1>
+          <p class="page-subtitle">Billing services with an Anomalous item to bill and a Billed twin for the same INI_DATE / END_DATE.</p>
+        </header>
+
+        <details class="hx-info">
+          <summary>ℹ️ About this page</summary>
+          <div class="hx-info-body">
+            <p><strong>What it finds.</strong> Two or more GCCOM_ITEMS_TO_BILL on the same ID_BILLING_SERVICE with the same INI_DATE and END_DATE, where one is <strong>Billed</strong> (STTOBILL07) and another is <strong>Anomalous</strong> (STTOBILL00). One row per anomalous item + billed twin.</p>
+            <p><strong>Ready usage.</strong> Summed from GCCOM_READINGS_ITEMSTOBILL for the anomalous item (it can carry several readings).</p>
+            <p><strong>Needs rebilling</strong> <span class="hx-pill hx-pill-billed">Rebill</span> — the anomalous item's ready usage is not zero.</p>
+          </div>
+        </details>
+
+        <div class="hx-commandbar">
+          <button type="button" class="btn btn-primary" id="ditb-detect-btn">🔍 Scan</button>
+          <div class="hx-summary">
+            <span id="ditb-summary">Click Scan to find double items to bill.</span>
+            <span id="ditb-filtered-count" class="hx-filtered"></span>
+          </div>
+          <button type="button" class="btn btn-pill" id="ditb-export-btn" disabled>⬇ Export CSV</button>
+        </div>
+
+        <div class="hx-dashboard" id="ditb-dash" hidden></div>
+
+        <div class="card hx-card">
+          <details class="hx-filters" id="ditb-filters" open hidden>
+            <summary>
+              <span>⚙️ Filters</span>
+              <button type="button" class="btn btn-pill-sm" id="ditb-filter-clear-btn">✕ Clear</button>
+            </summary>
+            <div class="hx-filter-grid">
+              <label class="hx-field hx-field-wide">
+                <span>Search</span>
+                <input id="ditb-filter-search" class="text-input text-input-sm" placeholder="NISS, account, ITB id…" />
+              </label>
+              <label class="hx-field">
+                <span>Billing period</span>
+                <select id="ditb-filter-bp" class="text-input text-input-sm"><option value="">All</option></select>
+              </label>
+              <label class="hx-field">
+                <span>Offered service</span>
+                <select id="ditb-filter-service" class="text-input text-input-sm"><option value="">All</option></select>
+              </label>
+              <div class="hx-field">
+                <span>Rebilling</span>
+                <div class="hx-seg" id="ditb-filter-rebill">
+                  <button type="button" data-value="" class="is-active">All</button>
+                  <button type="button" data-value="1">Needs rebilling</button>
+                  <button type="button" data-value="0">Zero usage</button>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <div class="grid-wrap hx-grid">
+            <table class="data-grid" id="ditb-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Wrong Billed Consumption page (RJ 2026-09-27) ===== -->
+      <section class="page" id="page-wrongbilledconsumption">
+        <header class="page-header">
+          <h1>Wrong Billed Consumption</h1>
+          <p class="page-subtitle">Cycle readings whose billed consumption (GCCOM_READINGS_ITEMSTOBILL) doesn't match the reading's READY_USAGE. One billing period per scan.</p>
+        </header>
+
+        <details class="hx-info">
+          <summary>ℹ️ About this page</summary>
+          <div class="hx-info-body">
+            <p><strong>What it compares.</strong> For every Cycle reading (reading date from 1 Feb 2023) in the chosen billing period: the READY_USAGE billed for it in GCCOM_READINGS_ITEMSTOBILL, summed <em>per item to bill</em>, against the reading's own READY_USAGE. Rows are listed when they differ.</p>
+            <p><strong>Why per item to bill.</strong> A water reading is normally billed twice — on the water item and on the sanitary item — each with the full usage. Summing both would flag every such reading.</p>
+            <p><strong>Formula check.</strong> <em>Expected</em> = (VALUE − PREV_VALUE) × MULTIPLIER (GCGT_ME_USAGE_TYPE_METER by device + usage type; missing = 1). <span class="hx-pill hx-pill-amber">Off formula</span> marks readings whose own READY_USAGE doesn't follow it. <em>Billed prev / value</em> show the start/end the link row used — a different start is the usual cause.</p>
+            <p><strong>Speed.</strong> About 20–30 seconds per billing period.</p>
+          </div>
+        </details>
+
+        <div class="hx-commandbar">
+          <label class="hx-field" style="min-width:220px;">
+            <span>Billing period</span>
+            <select id="wbc-period" class="text-input text-input-sm"><option value="">Loading…</option></select>
+          </label>
+          <button type="button" class="btn btn-primary" id="wbc-detect-btn">🔍 Scan period</button>
+          <div class="hx-summary">
+            <span id="wbc-summary">Pick a billing period and click Scan.</span>
+            <span id="wbc-filtered-count" class="hx-filtered"></span>
+          </div>
+          <button type="button" class="btn btn-pill" id="wbc-export-btn" disabled>⬇ Export CSV</button>
+        </div>
+
+        <div class="hx-dashboard" id="wbc-dash" hidden></div>
+
+        <div class="card hx-card">
+          <details class="hx-filters" id="wbc-filters" open hidden>
+            <summary>
+              <span>⚙️ Filters</span>
+              <button type="button" class="btn btn-pill-sm" id="wbc-filter-clear-btn">✕ Clear</button>
+            </summary>
+            <div class="hx-filter-grid">
+              <label class="hx-field hx-field-wide">
+                <span>Search</span>
+                <input id="wbc-filter-search" class="text-input text-input-sm" placeholder="NISS, reading id, ITB id…" />
+              </label>
+              <label class="hx-field">
+                <span>Usage type</span>
+                <select id="wbc-filter-usage" class="text-input text-input-sm"><option value="">All</option></select>
+              </label>
+              <label class="hx-field">
+                <span>Read status</span>
+                <select id="wbc-filter-status" class="text-input text-input-sm"><option value="">All</option></select>
+              </label>
+              <div class="hx-field">
+                <span>Direction</span>
+                <div class="hx-seg" id="wbc-filter-dir">
+                  <button type="button" data-value="" class="is-active">All</button>
+                  <button type="button" data-value="over">Over-billed</button>
+                  <button type="button" data-value="under">Under-billed</button>
+                </div>
+              </div>
+              <div class="hx-field hx-field-wide">
+                <span>MP type</span>
+                <div class="wbc-mp-checks" id="wbc-filter-mptype">
+                  <label><input type="checkbox" id="wbc-mp-TIPEQM0001" value="TIPEQM0001" checked /> Normal</label>
+                  <label><input type="checkbox" id="wbc-mp-TIPEQM0003" value="TIPEQM0003" /> Main</label>
+                  <label><input type="checkbox" id="wbc-mp-TIPEQM0002" value="TIPEQM0002" /> Secondary</label>
+                  <label><input type="checkbox" id="wbc-mp-TIPEQM0004" value="TIPEQM0004" /> Control</label>
+                  <label><input type="checkbox" id="wbc-mp-TIPEQM0005" value="TIPEQM0005" /> Main coupled</label>
+                  <label><input type="checkbox" id="wbc-mp-none" value="" /> (no MP type)</label>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <div class="grid-wrap hx-grid">
+            <table class="data-grid" id="wbc-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hx-pager" id="wbc-pager" hidden></div>
+        </div>
+      </section>
+
+      <!-- ===== Disconnection TNB page ===== -->
+      <section class="page" id="page-disconnectiontnb">
+        <header class="page-header">
+          <h1>Disconnection TNB</h1>
+          <p class="page-subtitle">Disconnection readings in Terminated Not Billed with a non-zero ready usage — ideally these should not be TNB. Each is shown with the nearest contracted service (by end date) on the same sector supply.</p>
+        </header>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>TNB Disconnections</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="dtnb-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="dtnb-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="dtnb-summary">Click Scan to load.</div>
+          <div class="hx-dashboard" id="dtnb-dash" hidden></div>
+
+          <div class="key-panel-row" id="dtnb-filter-row" hidden>
+            <label class="field-label">Billing period</label>
+            <select id="dtnb-filter-bp" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">NISS</label>
+            <input id="dtnb-filter-niss" class="text-input text-input-sm" placeholder="NISS (partial ok)…" style="width:170px;" />
+            <label class="field-label">Contract status</label>
+            <select id="dtnb-filter-contract" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Estimated</label>
+            <select id="dtnb-filter-est" class="text-input text-input-sm">
+              <option value="">All</option><option value="1">Yes</option><option value="0">No</option>
+            </select>
+            <button type="button" class="btn btn-pill-sm" id="dtnb-filter-clear-btn">✕ Clear filters</button>
+          </div>
+          <div class="hint-text" id="dtnb-filtered-count"></div>
+
+          <div class="grid-wrap" style="margin-top:14px;">
+            <table class="data-grid" id="dtnb-table">
               <thead><tr></tr></thead>
               <tbody></tbody>
             </table>
@@ -1351,6 +1613,7 @@
             </div>
           </div>
           <div class="hint-text" id="ibp-summary"></div>
+          <div class="hx-dashboard" id="ibp-dash" hidden></div>
           <div class="hint-text" id="ibp-filtered-count"></div>
 
           <div class="key-panel-row" id="ibp-filter-row" hidden>
@@ -1753,16 +2016,66 @@
            button's own API call and DOM update both worked, the popup
            was just invisible because #page-hierarchy wasn't the active
            page). -->
-      <div class="hier-reading-modal-overlay" id="hier-reading-modal-overlay" hidden>
-        <div class="hier-reading-modal">
-          <div class="card-header">
-            <h2>Reading History <span id="hier-reading-modal-title" class="hint-text"></span></h2>
-            <div class="card-header-actions">
-              <button type="button" class="btn btn-pill-sm" id="hier-reading-modal-close-btn">✕ Close</button>
+      <!-- Hierarchy Detail pop-out (RJ 2026-09-27: "the reading and details,
+           i want it to be a popout when you press it that can be
+           maximized"). Same "direct child of <main>" placement as the
+           reading-history popup below, for the same reason. Sits UNDER the
+           reading popup (lower z-index) so 📖 Readings opens on top. -->
+      <div class="hier-reading-modal-overlay hx-modal-overlay" id="hier-detail-card" hidden>
+        <div class="hier-reading-modal hx-modal hx-modal-wide" id="hier-detail-modal">
+          <div class="hx-modal-head">
+            <div>
+              <h2>Hierarchy Detail</h2>
+              <div id="hier-detail-title" class="hint-text"></div>
+            </div>
+            <div class="hx-modal-actions">
+              <label class="hx-toggle hx-toggle-sm">
+                <input type="checkbox" id="hier-detail-filter-notbilled" />
+                <span class="hx-toggle-track"></span>
+                Not billed only
+              </label>
+              <button type="button" class="hx-icon-btn" data-maximize="hier-detail-modal" title="Maximize / restore">⤢</button>
+              <button type="button" class="hx-icon-btn" id="hier-detail-close-btn" title="Close (Esc)">✕</button>
             </div>
           </div>
-          <p class="hint-text">Every reading for this supply (ID_SECTOR_SUPPLY), newest billing period first. <span class="row-checking-swatch">■</span> = the billing period being reviewed on the row you opened this from.</p>
-          <div class="grid-wrap">
+          <div class="hx-modal-stats" id="hier-detail-stats"></div>
+          <div class="grid-wrap hx-modal-body">
+            <table class="data-grid" id="hier-detail-table">
+              <thead><tr>
+                <th class="stats-table-th-sortable" data-sort="niss">NISS</th>
+                <th class="stats-table-th-sortable" data-sort="id_measuring_point">Measuring Point</th>
+                <th>Role</th>
+                <th class="stats-table-th-sortable" data-sort="perc_dist">% Dist</th>
+                <th class="stats-table-th-sortable" data-sort="read_status">Read Status</th>
+                <th class="stats-table-th-sortable" data-sort="ready_usage" title="READY_USAGE">★ Ready Usage</th>
+                <th class="stats-table-th-sortable" data-sort="value">Value</th>
+                <th class="stats-table-th-sortable" data-sort="reading_date">Reading Date</th>
+                <th class="stats-table-th-sortable" data-sort="reading_type">Reading Type</th>
+                <th class="stats-table-th-sortable" data-sort="id_billing_period">Billing Period</th>
+                <th class="stats-table-th-sortable" data-sort="status">MP Status</th>
+                <th class="stats-table-th-sortable" data-sort="id_reading">Reading</th>
+                <th></th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="hier-reading-modal-overlay" id="hier-reading-modal-overlay" hidden>
+        <div class="hier-reading-modal hx-modal" id="hier-reading-modal-box">
+          <div class="hx-modal-head">
+            <div>
+              <h2>Reading History</h2>
+              <div id="hier-reading-modal-title" class="hint-text"></div>
+            </div>
+            <div class="hx-modal-actions">
+              <button type="button" class="hx-icon-btn" data-maximize="hier-reading-modal-box" title="Maximize / restore">⤢</button>
+              <button type="button" class="hx-icon-btn" id="hier-reading-modal-close-btn" title="Close (Esc)">✕</button>
+            </div>
+          </div>
+          <p class="hint-text hx-modal-note">Newest billing period first. <span class="row-checking-swatch">■</span> = the period you opened this from.</p>
+          <div class="grid-wrap hx-modal-body">
             <table class="data-grid" id="hier-reading-modal-table">
               <thead><tr>
                 <th>Billing Period</th><th>ID Reading</th><th>Reading Type</th><th>Usage Type</th>

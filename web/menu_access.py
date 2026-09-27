@@ -54,7 +54,7 @@ from web.auth import ROLES, ROLE_ADMIN
 # these ARE the ids used everywhere (server config, the admin panel, and
 # the frontend's own nav-item lookup), so there's exactly one place
 # (here) that has to change if a page is ever added/renamed/removed.
-MENU_IDS = ("overview", "workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "readingvalidation", "tnbcycledisc", "wrongstuckhierarchy", "billissuance", "incorrectbillingperiod", "bulkchecker", "tools", "settings")
+MENU_IDS = ("overview", "workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "readingvalidation", "tnbcycledisc", "wrongstuckhierarchy", "disconnectiontnb", "doubleitb", "wrongbilledconsumption", "billissuance", "incorrectbillingperiod", "bulkchecker", "tools", "settings")
 
 MENU_LABELS = {
     "overview": "Overview",
@@ -68,6 +68,9 @@ MENU_LABELS = {
     "readingvalidation": "Reading Validation/Modif",
     "tnbcycledisc": "TNB CYCLE/DISC Analysis",
     "wrongstuckhierarchy": "Wrong Stuck in Hierarchy ITB",
+    "disconnectiontnb": "Disconnection TNB",
+    "doubleitb": "DOUBLE ITB",
+    "wrongbilledconsumption": "Wrong Billed Consumption",
     "billissuance": "Bill Issuance Validator",
     "incorrectbillingperiod": "Incorrect Billing Period",
     "bulkchecker": "Bulk Checker",
@@ -109,7 +112,7 @@ ALWAYS_VISIBLE_MENU = "overview"
 # every id except the ones listed here is treated as already known. When
 # adding a new page in future, nothing needs to go here - known_ids
 # handles it; this tuple only covers ids added before the tracking.
-MENU_IDS_ADDED_BEFORE_TRACKING = ("tnbcycledisc", "wrongstuckhierarchy")
+MENU_IDS_ADDED_BEFORE_TRACKING = ("tnbcycledisc", "wrongstuckhierarchy", "disconnectiontnb")
 # A legacy file is upgraded in place on first load (known_ids written
 # back), so from then on new pages are detected purely via known_ids and
 # this tuple never needs to grow again.

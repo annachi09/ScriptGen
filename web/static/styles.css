@@ -1390,6 +1390,265 @@ button { font-family: inherit; }
 :root[data-theme="dark"] #tcd-table tbody tr:nth-child(even) td.tcd-cell-disc { background: #2d230f; }
 :root[data-theme="dark"] #tcd-table td.tcd-tnb { color: #f87171; }
 
+/* =====================================================================
+   Hierarchy Analysis redesign (RJ 2026-09-27: "change the layout it is
+   confusing, also the colors and KPI, i want it to be modern, using gauge
+   meter style ... details a popout that can be maximized ... filters are
+   not organized ... info collapsed by default"). All classes are hx-*.
+   ===================================================================== */
+
+/* Collapsible "About this page" */
+.hx-info { margin: -4px 0 14px; border: 1px solid var(--card-border); border-radius: 12px; background: var(--card-bg); }
+.hx-info > summary { cursor: pointer; padding: 9px 14px; font-size: 13px; font-weight: 600; color: var(--text-secondary); list-style: none; user-select: none; }
+.hx-info > summary::-webkit-details-marker { display: none; }
+.hx-info > summary::after { content: "▸"; float: right; transition: transform .2s; }
+.hx-info[open] > summary::after { transform: rotate(90deg); }
+.hx-info-body { padding: 2px 16px 12px; font-size: 13px; color: var(--text-secondary); line-height: 1.55; }
+.hx-info-body p { margin: 6px 0; }
+.hx-legend { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: middle; }
+.hx-legend-green { background: #10b981; }
+
+/* Command bar */
+.hx-commandbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
+.hx-summary { flex: 1; min-width: 200px; font-size: 13px; color: var(--text-secondary); }
+.hx-filtered { margin-left: 8px; color: var(--accent); font-weight: 600; }
+.hx-export { position: relative; }
+.hx-export > summary { list-style: none; cursor: pointer; }
+.hx-export > summary::-webkit-details-marker { display: none; }
+.hx-export-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 230px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 12px; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; box-shadow: 0 12px 30px rgba(16,24,40,.18); }
+.hx-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); width: 100%; }
+
+/* Dashboard */
+.hx-dashboard { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 14px; margin-bottom: 16px; }
+.hx-gauges { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.hx-gauge { position: relative; border: 1px solid var(--card-border); background: var(--card-bg); border-radius: 16px; padding: 12px 10px 12px;
+  text-align: center; cursor: pointer; font: inherit; color: inherit; transition: transform .15s, box-shadow .15s, border-color .15s; }
+.hx-gauge-svg { width: 100%; max-width: 160px; height: auto; display: block; margin: 0 auto; }
+.hx-gauge-track { fill: none; stroke: var(--card-border); stroke-width: 10; stroke-linecap: round; }
+.hx-gauge-fill { fill: none; stroke-width: 10; stroke-linecap: round; transition: stroke-dasharray .6s ease; }
+.hx-gauge-needle { stroke: var(--text-primary); stroke-width: 2.5; stroke-linecap: round; }
+.hx-gauge-hub { fill: var(--text-primary); }
+.hx-gauge-value { font-size: 24px; font-weight: 800; margin-top: -6px; letter-spacing: -.02em; }
+.hx-gauge-value small { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-left: 1px; }
+.hx-gauge-label { font-size: 12px; font-weight: 600; margin-top: 2px; }
+.hx-gauge-count { font-size: 11px; color: var(--text-secondary); }
+
+.hx-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-content: start; }
+.hx-tile { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 14px; background: var(--card-bg); border: 1px solid var(--card-border); }
+.hx-tile-icon { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; font-size: 17px; background: var(--accent-bg-soft); flex: none; }
+.hx-tile-value { font-size: 18px; font-weight: 800; letter-spacing: -.01em; line-height: 1.15; }
+.hx-tile-value small { font-size: 11px; font-weight: 500; color: var(--text-secondary); }
+.hx-tile-label { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .04em; }
+.hx-tile-accent { grid-column: 1 / -1; background: var(--gradient-accent); border: none; color: #fff; }
+.hx-tile-accent .hx-tile-icon { background: rgba(255,255,255,.2); }
+.hx-tile-accent .hx-tile-label { color: rgba(255,255,255,.85); }
+.hx-tile-accent .hx-tile-value { font-size: 24px; }
+
+.hx-split { grid-column: 1 / -1; padding: 12px 14px; border-radius: 14px; background: var(--card-bg); border: 1px solid var(--card-border); }
+.hx-split:empty { display: none; }
+.hx-split-title { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary); margin-bottom: 8px; }
+.hx-split-bar { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: var(--card-border); }
+.hx-split-bar span { display: block; height: 100%; }
+.hx-split-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 12px; }
+.hx-split-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
+.hx-split-legend em { color: var(--text-secondary); font-style: normal; margin-left: 2px; }
+
+/* Filters panel */
+.hx-card { padding-top: 6px; }
+.hx-filters { border-bottom: 1px solid var(--card-border); margin: 0 -4px 12px; padding: 0 4px 12px; }
+.hx-filters > summary { display: flex; align-items: center; gap: 10px; cursor: pointer; list-style: none; padding: 8px 0; font-weight: 700; font-size: 14px; user-select: none; }
+.hx-filters > summary::-webkit-details-marker { display: none; }
+.hx-filters > summary > span:first-child::after { content: "▾"; margin-left: 6px; color: var(--text-secondary); display: inline-block; transition: transform .2s; }
+.hx-filters:not([open]) > summary > span:first-child::after { transform: rotate(-90deg); }
+.hx-filters > summary .btn { margin-left: auto; }
+.hx-badge { background: var(--accent); color: #fff; border-radius: 999px; font-size: 11px; font-weight: 700; padding: 1px 8px; }
+.hx-filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px 14px; }
+.hx-field { display: flex; flex-direction: column; gap: 5px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary); }
+.hx-field .text-input { width: 100%; text-transform: none; letter-spacing: normal; font-weight: 400; }
+.hx-field-wide { grid-column: span 2; }
+.hx-seg { display: inline-flex; background: var(--content-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 3px; gap: 2px; }
+.hx-seg button { flex: 1; border: 0; background: transparent; font: inherit; font-size: 12px; text-transform: none; letter-spacing: normal; font-weight: 600;
+  color: var(--text-secondary); padding: 5px 8px; border-radius: 7px; cursor: pointer; white-space: nowrap; }
+.hx-seg button.is-active { background: var(--card-bg); color: var(--text-primary); box-shadow: 0 1px 3px rgba(16,24,40,.12); }
+.hx-toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; font-weight: 600; text-transform: none; letter-spacing: normal; color: var(--text-primary); padding-top: 4px; }
+.hx-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.hx-toggle-track { position: relative; width: 36px; height: 20px; border-radius: 999px; background: var(--card-border); transition: background .2s; flex: none; }
+.hx-toggle-track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .2s; }
+.hx-toggle input:checked + .hx-toggle-track { background: #10b981; }
+.hx-toggle input:checked + .hx-toggle-track::after { transform: translateX(16px); }
+.hx-toggle-sm { font-size: 12px; padding-top: 0; }
+
+/* Table */
+.hx-grid { max-height: 62vh; overflow: auto; }
+.hx-grid thead th { position: sticky; top: 0; z-index: 2; }
+#hier-table tbody tr.hx-row { cursor: pointer; }
+#hier-table tbody tr.hx-row td:first-child { border-left: 3px solid transparent; }
+#hier-table tbody tr.hx-row-primaryonly td:first-child { border-left-color: #10b981; }
+#hier-table tbody tr.hx-row-anomalous td:first-child { border-left-color: #f59e0b; }
+#hier-table tbody tr.hx-row:hover td { background: var(--accent-bg-soft); }
+.hx-niss { font-weight: 700; }
+.hx-mono { font-variant-numeric: tabular-nums; }
+.hx-sub { font-size: 11px; color: var(--text-secondary); }
+.hx-num { text-align: right; font-variant-numeric: tabular-nums; }
+.hx-clip { max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hx-pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; white-space: nowrap; line-height: 1.6; }
+.hx-pill-blue { background: #dbeafe; color: #1d4ed8; }
+.hx-pill-amber { background: #fef3c7; color: #b45309; }
+.hx-pill-violet { background: #ede9fe; color: #6d28d9; }
+.hx-pill-green { background: #d1fae5; color: #047857; }
+.hx-pill-gray { background: #f1f5f9; color: #475569; }
+.hx-pill-billed { background: #fee2e2; color: #b91c1c; }
+.hx-pill-ghost { background: transparent; color: var(--text-secondary); border: 1px dashed var(--card-border); }
+.hx-icon-btn { border: 1px solid var(--card-border); background: var(--card-bg); color: var(--text-primary); width: 30px; height: 30px; border-radius: 9px;
+  cursor: pointer; font-size: 14px; line-height: 1; display: inline-grid; place-items: center; transition: background .15s, border-color .15s; }
+.hx-icon-btn:hover { border-color: var(--accent); background: var(--accent-bg-soft); }
+
+/* Pop-outs (detail + readings). Readings (1100, existing) stacks above
+   detail (1050). .is-max = maximized to (almost) the full viewport. */
+.hx-modal-overlay { z-index: 1050; }
+body.hx-modal-open { overflow: hidden; }
+.hx-modal { display: flex; flex-direction: column; padding: 0; overflow: hidden; max-height: 88vh;
+  transition: width .2s ease, height .2s ease, max-height .2s ease; }
+.hx-modal-wide { width: min(1200px, 100%); }
+.hx-modal.is-max { width: calc(100vw - 24px); height: calc(100vh - 24px); max-height: none; border-radius: 12px; }
+.hier-reading-modal-overlay:has(.hx-modal.is-max) { padding: 12px; }
+.hx-modal-head { display: flex; align-items: flex-start; gap: 12px; padding: 16px 20px 12px; border-bottom: 1px solid var(--card-border); }
+.hx-modal-head h2 { margin: 0; font-size: 17px; }
+.hx-modal-head > div:first-child { flex: 1; min-width: 0; }
+.hx-modal-actions { display: flex; align-items: center; gap: 8px; }
+.hx-modal-stats { display: flex; gap: 10px; flex-wrap: wrap; padding: 12px 20px 0; }
+.hx-modal-stats:empty { display: none; }
+.hx-mstat { display: flex; flex-direction: column; padding: 8px 14px; border-radius: 12px; background: var(--content-bg); min-width: 110px; }
+.hx-mstat b { font-size: 18px; }
+.hx-mstat span { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .04em; }
+.hx-mstat-warn b { color: #dc2626; }
+.hx-mstat-ok b { color: #059669; }
+.hx-modal-note { padding: 8px 20px 0; margin: 0; }
+.hx-modal-body { flex: 1; min-height: 0; overflow: auto; margin: 12px 20px 18px; }
+.hx-modal-body thead th { position: sticky; top: 0; z-index: 2; }
+
+/* Gauges are KPIs only (RJ 2026-09-27: "i dont want it to be filters the
+   gauge") - no pointer, no active/filtering state. */
+.hx-gauge { cursor: default; }
+.hx-gauge:hover { transform: none; box-shadow: var(--card-shadow); }
+.hx-gauges-1 { grid-template-columns: minmax(0, 1fr); }
+.hx-gauges-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.hx-gauges-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.hx-gauges-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.hx-dashboard-nogauges { grid-template-columns: 1fr; }
+.hx-dashboard-nogauges .hx-tiles { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.hx-dashboard-nogauges .hx-tile-accent { grid-column: auto; }
+.hx-dashboard[hidden] { display: none; }
+.hx-gauge-strip { display: grid; gap: 12px; margin: 14px 0 10px; }
+.hx-gauge-strip[hidden] { display: none; }
+.card .hx-dashboard { margin: 12px 0 14px; }
+
+/* =====================================================================
+   App-wide "hx" look (RJ 2026-09-27: "apply the same design to all of my
+   menus"). These restyle the SHARED components every page already uses,
+   so older pages pick up the new look without per-page markup changes.
+   ===================================================================== */
+
+/* Existing KPI cards -> modern tiles (every page's .kpi-row). */
+.kpi-row { gap: 10px; }
+.kpi-card { border-radius: 14px; padding: 14px 16px 12px; box-shadow: none; }
+.kpi-card::before { height: 3px; border-radius: 0 0 3px 3px; left: 14px; right: auto; width: 34px; }
+.kpi-card .kpi-value { font-size: 22px; font-weight: 800; letter-spacing: -.02em; }
+.kpi-card .kpi-label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+.kpi-card .kpi-card-icon { margin-right: 5px; }
+
+/* Filter rows (every page names them *-filter-row) -> a tidy panel. */
+.key-panel-row[id*="filter-row"] {
+  background: var(--content-bg); border: 1px solid var(--card-border); border-radius: 12px;
+  padding: 10px 12px; gap: 8px 12px; margin: 10px 0;
+}
+.key-panel-row[id*="filter-row"] > .field-label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary); margin-right: -4px;
+}
+.key-panel-row[id*="filter-row"] > .text-input { border-radius: 9px; }
+.key-panel-row[id*="filter-row"] > .btn:last-child { margin-left: auto; }
+
+/* Tables: rounded frame, calmer grid lines, hover. */
+.grid-wrap { border-radius: 12px; }
+.data-grid th, .data-grid td { border-right: 0; }
+.data-grid tbody tr:hover td { background-color: var(--accent-bg-soft); }
+
+/* Collapsed "How this works" / notes (hxCollapseInfo() in app.js wraps
+   each page's static explanation paragraphs and banners into these). */
+.hx-hint { margin: 2px 0 10px; }
+.hx-hint > summary {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; user-select: none;
+  font-size: 12px; font-weight: 600; color: var(--text-secondary); padding: 3px 10px; border-radius: 999px;
+  border: 1px solid var(--card-border); background: var(--card-bg);
+}
+.hx-hint > summary::-webkit-details-marker { display: none; }
+.hx-hint > summary:hover { border-color: var(--accent); color: var(--accent); }
+.hx-hint[open] > summary { margin-bottom: 6px; }
+.hx-hint-warn > summary { color: #b45309; border-color: #fde68a; }
+.hx-hint > .hint-text, .hx-hint > .warning-banner, .hx-hint > .page-subtitle { margin: 0; }
+
+/* Wrong Billed Consumption: a billed start/end value that differs from the
+   reading's own value - usually the cause of the mismatch. */
+#wbc-table .wbc-diff { color: #b91c1c; font-weight: 700; text-decoration: underline dotted; }
+.wbc-mp-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; padding-top: 4px; }
+.wbc-mp-checks label { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.hx-pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+.hx-pager[hidden] { display: none; }
+.hx-pager .hx-icon-btn:disabled { opacity: .4; cursor: default; }
+:root[data-theme="dark"] #wbc-table .wbc-diff { color: #f87171; }
+
+/* ⟳ Refresh on every menu (RJ 2026-09-27) - top-right of each page header. */
+.page-header.hx-has-refresh { position: relative; padding-right: 130px; }
+.hx-refresh-btn {
+  position: absolute; top: 2px; right: 0;
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 14px; border-radius: 999px; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 700;
+  color: var(--accent); background: var(--card-bg);
+  border: 1px solid var(--card-border); box-shadow: var(--card-shadow);
+  transition: border-color .15s, box-shadow .15s, transform .15s;
+}
+.hx-refresh-btn:hover:not(:disabled) { border-color: var(--accent); box-shadow: var(--glow-accent); transform: translateY(-1px); }
+.hx-refresh-btn:disabled { cursor: progress; opacity: .8; }
+.hx-refresh-icon { display: inline-block; font-size: 16px; line-height: 1; }
+.hx-refresh-btn.is-spinning .hx-refresh-icon { animation: hx-spin .9s linear infinite; }
+@keyframes hx-spin { to { transform: rotate(360deg); } }
+@media (max-width: 640px) {
+  .page-header.hx-has-refresh { padding-right: 0; }
+  .hx-refresh-btn { position: static; margin-top: 8px; }
+}
+
+@media (max-width: 1100px) {
+  .hx-dashboard { grid-template-columns: 1fr; }
+  .hx-gauges-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .hx-gauges { grid-template-columns: 1fr; }
+  .hx-field-wide { grid-column: auto; }
+}
+
+/* Dark theme */
+:root[data-theme="dark"] .hx-pill-blue { background: rgba(59,130,246,.18); color: #93c5fd; }
+:root[data-theme="dark"] .hx-pill-amber { background: rgba(245,158,11,.18); color: #fcd34d; }
+:root[data-theme="dark"] .hx-pill-violet { background: rgba(139,92,246,.2); color: #c4b5fd; }
+:root[data-theme="dark"] .hx-pill-green { background: rgba(16,185,129,.18); color: #6ee7b7; }
+:root[data-theme="dark"] .hx-pill-gray { background: rgba(148,163,184,.15); color: #cbd5e1; }
+:root[data-theme="dark"] .hx-pill-billed { background: rgba(239,68,68,.2); color: #fca5a5; }
+:root[data-theme="dark"] .hx-mstat-warn b { color: #f87171; }
+:root[data-theme="dark"] .hx-mstat-ok b { color: #34d399; }
+:root[data-theme="dark"] .hx-export-menu { box-shadow: 0 12px 30px rgba(0,0,0,.5); }
+
+/* Disconnection TNB (2026-09-27): nearest-contract columns tinted as a
+   group; ready usage bold; a reading dated after its contract ended in red. */
+#dtnb-table th.dtnb-col-contract { background: #eef2ff; }
+#dtnb-table td.dtnb-cell-contract { background: #f7f8ff; }
+#dtnb-table td.dtnb-ready { font-weight: 700; }
+#dtnb-table td.dtnb-after-end { color: #b91c1c; font-weight: 700; }
+:root[data-theme="dark"] #dtnb-table th.dtnb-col-contract { background: #1e1b4b; }
+:root[data-theme="dark"] #dtnb-table td.dtnb-cell-contract { background: #16163a; }
+:root[data-theme="dark"] #dtnb-table td.dtnb-after-end { color: #f87171; }
+
 /* RJ, 2026-09-25 (follow-up round): "make the values that are updated
    to be know, maybe make it bold and change the color to mark it as
    modified" - a per-CELL marker (rv-edit-dirty, set in app.js's

@@ -4250,6 +4250,144 @@ def test_wrong_stuck_hierarchy_detect_returns_rows(client, monkeypatch):
     assert "10000000236" in captured["sql"]
 
 
+def test_wrong_stuck_hierarchy_generate_requires_editor(client):
+    _create_and_login_as(client, "wsh-viewer", "viewer")
+    resp = client.post("/api/wrong-stuck-hierarchy/generate", json={"item_ids": ["11"]})
+    assert resp.status_code == 403
+
+
+def test_wrong_stuck_hierarchy_generate_requires_selection(client):
+    _login(client)
+    resp = client.post("/api/wrong-stuck-hierarchy/generate", json={"item_ids": []})
+    assert resp.status_code == 400
+
+
+def test_wrong_stuck_hierarchy_generate_uses_redetected_rows(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    cols = ["REFERENCE", "ID_ITEM_TO_BILL", "ID_ITEM_TO_BILL_190", "STATUS_190"]
+    rows = [
+        ["A", 11, 21, "STTOBILL09"],
+        ["B", 12, 22, "STTOBILL07"],
+        ["C", 13, None, None],  # not selected
+    ]
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=cols, rows=rows, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/wrong-stuck-hierarchy/generate", json={"item_ids": ["11", "12", "99"]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["item_count"] == 3  # 11, 21, 12
+    assert body["stuck_count"] == 2
+    assert body["partner_count"] == 1
+    assert body["not_found"] == 1  # 99 no longer stuck
+    assert "(11,\n       21,\n       12)" in body["sql_text"]
+    assert "13" not in body["sql_text"].split("where")[1]
+
+
+def test_wrong_stuck_hierarchy_sanitary_detect(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    cols = ["REFERENCE", "ID_BILLING_PERIOD", "ID_ITEM_TO_BILL_SANITARY", "STATUS_WATER"]
+    rows = [["A", 1, 11, "STTOBILL07"], ["A", 2, 12, "STTOBILL01"]]
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=cols, rows=rows, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/wrong-stuck-hierarchy/sanitary/detect")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 2
+    assert body["account_count"] == 1
+    assert body["period_count"] == 2
+    assert body["rows"][1]["status_water"] == "STTOBILL01"
+
+
+# ---------------- Wrong Billed Consumption (2026-09-27) ----------------
+
+def test_wrong_billed_consumption_requires_period(client):
+    _login(client)
+    resp = client.post("/api/wrong-billed-consumption/detect", json={"id_billing_period": ""})
+    assert resp.status_code == 400
+
+
+def test_wrong_billed_consumption_detect_counts(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    cols = ["NISS", "ID_READING", "ID_ITEM_TO_BILL", "READY_USAGE", "BILLED_READY_USAGE", "DIFFERENCE"]
+    rows = [["100-101", 1, 11, 10, 20, 10], ["100-101", 1, 12, 10, 5, -5], ["200-101", 2, 13, 3, 4, 1]]
+    captured = {}
+
+    def fake_run(conn, sql):
+        captured["sql"] = sql
+        return QueryResult(columns=cols, rows=rows, elapsed_ms=1.0)
+
+    monkeypatch.setattr(server_mod.mssql, "run_query", fake_run)
+    resp = client.post("/api/wrong-billed-consumption/detect", json={"id_billing_period": "10000000237"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 3
+    assert body["reading_count"] == 2
+    assert body["supply_count"] == 2
+    assert "r.ID_BILLING_PERIOD = 10000000237" in captured["sql"]
+
+
+# ---------------- DOUBLE ITB (2026-09-27) ----------------
+
+def test_double_itb_detect_requires_login(client):
+    resp = client.post("/api/double-itb/detect")
+    assert resp.status_code == 401
+
+
+def test_double_itb_detect_counts(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    cols = ["NISS", "ANOM_ID_ITEM_TO_BILL", "BILLED_ID_ITEM_TO_BILL", "ANOM_READY_USAGE", "NEEDS_REBILLING"]
+    rows = [["100-101", 11, 21, 5, 1], ["100-101", 11, 22, 5, 1], ["200-101", 12, 23, 0, 0]]
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=cols, rows=rows, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/double-itb/detect")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 3
+    assert body["anomalous_item_count"] == 2
+    assert body["needs_rebilling_count"] == 2
+    assert body["rows"][2]["needs_rebilling"] == "0"
+
+
+# ---------------- Disconnection TNB (2026-09-27) ----------------
+
+def test_disconnection_tnb_detect_requires_login(client):
+    resp = client.post("/api/disconnection-tnb/detect")
+    assert resp.status_code == 401
+
+
+def test_disconnection_tnb_detect_returns_rows_and_counts(client, monkeypatch):
+    import web.server as server_mod
+
+    _login(client)
+    cols = ["ID_SECTOR_SUPPLY", "NISS", "ID_READING", "READY_USAGE", "ID_CONTRACTED_SERVICE"]
+    rows = [[1, "100-101", 11, 5, 900], [1, "100-101", 12, 3, None], [2, "200-101", 13, 7, 901]]
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=cols, rows=rows, elapsed_ms=1.0),
+    )
+    resp = client.post("/api/disconnection-tnb/detect")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 3
+    assert body["supply_count"] == 2
+    assert body["no_contract_count"] == 1
+    assert body["rows"][0]["niss"] == "100-101"
+
+
 # ---------------- RBAC / User management ----------------
 # The bootstrapped first-run account _login(client) uses is always role
 # "admin" (see web/auth.py's _bootstrap), so most of test_web_api.py's

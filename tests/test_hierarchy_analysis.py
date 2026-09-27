@@ -66,6 +66,22 @@ def test_build_pending_primaries_query_qualifies_measurement_point_and_reading()
     assert "OUC_COMMON_ADMIN.GCGT_RE_READING" in sql
 
 
+def test_build_pending_primaries_query_period_billed_column():
+    sql = ha.build_pending_primaries_query()
+    assert "AS PERIOD_BILLED" in sql
+    assert "SELECT TOP (1000) A.*," in sql
+    assert "OUC_COMMON_ADMIN.GCCOM_CONTRACTED_SERVICE pcs" in sql
+    assert "JOIN OUC_COMMON_ADMIN.GCCOM_BILL pb ON pb.ID_CONTRACTED_SERVICE = pcs.ID_CONTRACTED_SERVICE" in sql
+    assert "pcs.ID_SECTOR_SUPPLY = A.ID_SECTOR_SUPPLY" in sql
+    assert "pcs.STATUS <> 'ESTSC00005'" in sql
+    assert "pcs.FROM_DATE <= A.READING_DATE" in sql
+    assert "(pcs.END_DATE IS NULL OR pcs.END_DATE >= A.READING_DATE)" in sql
+    assert "pb.BILL_TYPE = 'TFGEN00001'" in sql
+    assert "CAST(pb.BILLING_DATE AS date) = CAST(A.READING_DATE AS date)" in sql
+    assert "CAST(A.READING_PREV_DATE AS date)," in sql
+    assert "DATEADD(day, 1, CAST(A.READING_PREV_DATE AS date))" in sql
+
+
 def test_build_pending_primaries_query_default_limit_adds_top_clause():
     sql = ha.build_pending_primaries_query()
     assert f"TOP ({ha.HIERARCHY_DEFAULT_LIMIT})" in sql
