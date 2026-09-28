@@ -4318,8 +4318,8 @@ def test_wrong_billed_consumption_detect_counts(client, monkeypatch):
     import web.server as server_mod
 
     _login(client)
-    cols = ["NISS", "ID_READING", "ID_ITEM_TO_BILL", "READY_USAGE", "BILLED_READY_USAGE", "DIFFERENCE"]
-    rows = [["100-101", 1, 11, 10, 20, 10], ["100-101", 1, 12, 10, 5, -5], ["200-101", 2, 13, 3, 4, 1]]
+    cols = ["NISS", "ID_READINGS", "ID_ITEM_TO_BILL", "READY_USAGE", "BILLED_READY_USAGE", "DIFFERENCE"]
+    rows = [["100-101", "1", 11, 10, 20, 10], ["100-101", "1", 12, 10, 5, -5], ["200-101", "2,3", 13, 3, 4, 1]]
     captured = {}
 
     def fake_run(conn, sql):
@@ -4331,9 +4331,9 @@ def test_wrong_billed_consumption_detect_counts(client, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["count"] == 3
-    assert body["reading_count"] == 2
+    assert body["reading_count"] == 3
     assert body["supply_count"] == 2
-    assert "r.ID_BILLING_PERIOD = 10000000237" in captured["sql"]
+    assert "r0.ID_BILLING_PERIOD = 10000000237" in captured["sql"]
 
 
 # ---------------- DOUBLE ITB (2026-09-27) ----------------

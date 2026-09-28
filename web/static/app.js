@@ -5822,34 +5822,39 @@ $("#wshs-export-btn").addEventListener("click", () => {
 // ---------------- Wrong Billed Consumption (RJ 2026-09-27) ----------------
 // See app/core/wrong_billed_consumption.py. One billing period per scan
 // (server side, ~20-30s); filters/sort client-side.
+// Column order (RJ, 2026-09-28): "important columns first, NISS,
+// READ_STATUS, USAGE_TYPE, PREV_VALUE, VALUE, READING usage, corrected
+// usage, multiplier from usage_type_meter, item to bill of the same
+// contracted service base on the niss, id_bill, id_item_to_bill, ready
+// usage in reading item_to_bill, billed value, expected, then the
+// difference". Then (2026-09-28) simplified to readings' READY_USAGE vs
+// the bill's calculation base only. Supporting columns follow a divider.
 const WBC_COLUMNS = [
-  { key: "niss", label: "NISS", render: (r) => `<span class="hx-niss">${escapeHtml(r.niss ?? "")}</span>` },
-  { key: "billing_period", label: "Billing Period" },
+  { key: "niss", label: "NISS", render: (r) => `<span class="hx-niss">${escapeHtml(r.niss ?? "")}</span>` +
+      (Number(r.reading_count) > 1 ? ` <span class="hx-pill hx-pill-amber" title="${escapeHtml((r.reading_details || "").split(" ; ").join("\n"))}">${escapeHtml(r.reading_count)} meters</span>` : "") },
   { key: "read_status", label: "Read Status", render: (r) => hxStatusPill(r.read_status) },
   { key: "usage_type", label: "Usage Type", render: (r) => `<span title="${escapeHtml(r.usage_type ?? "")}">${escapeHtml(r.usage_type_desc || r.usage_type || "")}</span>` },
-  { key: "mp_type", label: "MP Type", render: (r) => `<span class="hx-pill ${r.mp_type === "TIPEQM0001" ? "hx-pill-blue" : "hx-pill-amber"}" title="${escapeHtml(r.mp_type ?? "")} · MP ${escapeHtml(r.id_measuring_point ?? "")}">${escapeHtml(r.mp_type_desc || r.mp_type || "—")}</span>` },
   { key: "prev_value", label: "Prev Value", num: true },
   { key: "value", label: "Value", num: true },
   { key: "reading_usage", label: "Reading Usage", num: true },
   { key: "corrected_usage", label: "Corrected Usage", num: true },
-  { key: "ready_usage", label: "★ Ready Usage", num: true, render: (r) => `<strong>${escapeHtml(r.ready_usage ?? "")}</strong>` +
-      (String(r.ready_usage_off_formula) === "1" ? ` <span class="hx-pill hx-pill-amber" title="Expected ${escapeHtml(r.expected_ready_usage ?? "")} = (VALUE − PREV) × ${escapeHtml(r.multiplier ?? "1")}">Off formula</span>` : "") },
-  { key: "id_item_to_bill", label: "Item To Bill", mono: true },
+  { key: "multiplier", label: "Multiplier", num: true },
+  { key: "ready_usage", label: "★ Ready Usage (readings)", num: true, render: (r) => `<strong>${escapeHtml(r.ready_usage ?? "")}</strong>` },
+  { key: "id_contracted_service", label: "Contracted Service", mono: true },
   { key: "id_bill", label: "Bill", mono: true },
-  { key: "bill_status", label: "Bill Status", render: (r) => `<span class="hx-pill ${r.bill_status === "ESTFAC0005" ? "hx-pill-green" : "hx-pill-blue"}" title="${escapeHtml(r.bill_status ?? "")}">${escapeHtml(r.bill_status_desc || r.bill_status || "")}</span>` },
-  { key: "billing_type", label: "Billing Type", render: (r) => `<span title="${escapeHtml(r.billing_type ?? "")}">${escapeHtml(r.billing_type_desc || r.billing_type || "")}</span>` },
-  { key: "billed_ready_usage", label: "★ Billed (ITB)", num: true, render: (r) => `<strong class="wbc-billed">${escapeHtml(r.billed_ready_usage ?? "")}</strong>` },
-  // Bill's consumption concepts (CONCSMO003 + CC210): SUM(CALCULATION_BASE).
-  // Red when it differs from the reading's READY_USAGE.
-  { key: "billed_consumption", label: "Billed Consumption", num: true, render: (r) => wbcMarkDiff(r.billed_consumption, r.ready_usage) },
+  { key: "id_item_to_bill", label: "Item To Bill", mono: true },
+  // RJ 2026-09-28: "compare base on the readings, and base on the
+  // calculation base" - bill's SUM(CALCULATION_BASE) for CONCSMO003 + CC210.
+  { key: "billed_consumption", label: "★ Calculation Base (bill)", num: true, render: (r) => `<strong class="wbc-billed">${escapeHtml(r.billed_consumption ?? "")}</strong>` },
   { key: "difference", label: "Difference", num: true, render: (r) => {
       const d = Number(r.difference);
-      return `<span class="hx-pill ${d > 0 ? "hx-pill-billed" : "hx-pill-blue"}">${d > 0 ? "+" : ""}${escapeHtml(r.difference ?? "")}</span>`;
+      return `<span class="hx-pill ${d > 0 ? "hx-pill-billed" : "hx-pill-blue"}" title="Calculation base − Ready usage">${d > 0 ? "+" : ""}${escapeHtml(r.difference ?? "")}</span>`;
     } },
-  { key: "billed_prev_value", label: "Billed Prev", num: true, render: (r) => wbcMarkDiff(r.billed_prev_value, r.prev_value) },
-  { key: "billed_value", label: "Billed Value", num: true, render: (r) => wbcMarkDiff(r.billed_value, r.value) },
-  { key: "expected_ready_usage", label: "Expected", num: true },
-  { key: "id_reading", label: "Reading", mono: true },
+  // ---- supporting columns ----
+  { key: "mp_type", label: "MP Type", divider: true, render: (r) => `<span class="hx-pill ${r.mp_type === "TIPEQM0001" ? "hx-pill-blue" : "hx-pill-amber"}" title="${escapeHtml(r.mp_types || r.mp_type || "")}">${escapeHtml(r.mp_type_desc || r.mp_type || "—")}</span>` },
+  { key: "billing_period", label: "Billing Period" },
+  { key: "id_readings", label: "Readings", mono: true, render: (r) =>
+      `<span title="${escapeHtml((r.reading_details || "").split(" ; ").join("\n"))}">${escapeHtml(r.id_readings || r.id_reading || "")}</span>` },
   { key: "reading_date", label: "Reading Date", date: true },
 ];
 let wbcRows = [];
@@ -5896,12 +5901,14 @@ function wbcVisibleRows() {
   // MP type checkboxes (default: Normal only). "" = readings with no MP type.
   const mpTypes = new Set($$("#wbc-filter-mptype input:checked").map((c) => c.value));
   let rows = wbcRows.filter((r) => {
-    if (!mpTypes.has(r.mp_type || "")) return false;
+    // A grouped row passes when ANY of its readings' MP types is ticked.
+    const rowTypes = r.mp_types != null ? String(r.mp_types).split(",") : [r.mp_type || ""];
+    if (!rowTypes.some((t) => mpTypes.has(t.trim()))) return false;
     if (usage && r.usage_type !== usage) return false;
     if (status && r.read_status !== status) return false;
     if (wbcDir === "over" && !(Number(r.difference) > 0)) return false;
     if (wbcDir === "under" && !(Number(r.difference) < 0)) return false;
-    if (q && ![r.niss, r.id_reading, r.id_item_to_bill].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    if (q && ![r.niss, r.id_readings, r.id_reading, r.id_item_to_bill].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
     return true;
   });
   if (wbcSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[wbcSortKey], b[wbcSortKey], wbcSortDir));
@@ -5912,7 +5919,7 @@ function wbcRenderTable() {
   const head = document.querySelector("#wbc-table thead tr");
   head.innerHTML = WBC_COLUMNS.map((c) => {
     const arrow = wbcSortKey === c.key ? `<span class="stats-table-sort-arrow">${wbcSortDir === 1 ? "▲" : "▼"}</span>` : "";
-    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+    return `<th class="stats-table-th-sortable${c.divider ? " wbc-divider" : ""}" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
   }).join("");
   head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
     const k = th.dataset.sort;
@@ -5927,7 +5934,7 @@ function wbcRenderTable() {
   const rows = all.slice(wbcPage * WBC_PAGE_SIZE, (wbcPage + 1) * WBC_PAGE_SIZE);
   document.querySelector("#wbc-table tbody").innerHTML = rows.length
     ? rows.map((r) => `<tr class="hx-row ${Number(r.difference) > 0 ? "hx-row-anomalous" : ""}">` +
-        WBC_COLUMNS.map((c) => `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${c.render ? c.render(r) : (c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? ""))}</td>`).join("") +
+        WBC_COLUMNS.map((c) => `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}${c.divider ? " wbc-divider" : ""}">${c.render ? c.render(r) : (c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? ""))}</td>`).join("") +
         "</tr>").join("")
     : `<tr><td colspan="${WBC_COLUMNS.length}" class="hint-text">${wbcRows.length ? "No rows match the current filters." : "No mismatches in this billing period."}</td></tr>`;
   const pager = $("#wbc-pager");
@@ -5942,17 +5949,15 @@ function wbcRenderTable() {
     const over = all.filter((r) => Number(r.difference) > 0);
     hxRenderDashboard("wbc-dash", {
       gauges: [
-        { label: "Over-billed", count: over.length, total: n, c1: "#ef4444", c2: "#f97316", hint: "Billed more than the reading's READY_USAGE" },
-        { label: "Billed from a different start", count: all.filter((r) => String(r.billed_prev_value) !== String(r.prev_value)).length, total: n, c1: "#6366f1", c2: "#06b6d4",
-          hint: "The link row's PREV_VALUE differs from the reading's" },
-        { label: "Reading off formula", count: all.filter((r) => String(r.ready_usage_off_formula) === "1").length, total: n, c1: "#f59e0b", c2: "#eab308",
-          hint: "READY_USAGE ≠ (VALUE − PREV_VALUE) × MULTIPLIER" },
+        { label: "Over-billed", count: over.length, total: n, c1: "#ef4444", c2: "#f97316", hint: "Calculation base higher than the readings' READY_USAGE" },
+        { label: "Under-billed", count: all.filter((r) => Number(r.difference) < 0).length, total: n, c1: "#6366f1", c2: "#06b6d4", hint: "Calculation base lower than the readings' READY_USAGE" },
+        { label: "Multi-meter", count: all.filter((r) => Number(r.reading_count) > 1).length, total: n, c1: "#f59e0b", c2: "#eab308", hint: "Rows where several readings were summed" },
       ],
       tiles: [
-        { icon: "⚖️", label: "Net difference (billed − ready)", value: hxSum(all, "difference").toLocaleString(), accent: true },
+        { icon: "⚖️", label: "Net difference (calc base − ready)", value: hxSum(all, "difference").toLocaleString(), accent: true },
         { icon: "📈", label: "Over-billed usage", value: hxSum(over, "difference").toLocaleString() },
         { icon: "📉", label: "Under-billed usage", value: hxSum(all.filter((r) => Number(r.difference) < 0), "difference").toLocaleString() },
-        { icon: "📏", label: "Readings", value: new Set(all.map((r) => r.id_reading)).size.toLocaleString() },
+        { icon: "📏", label: "Readings", value: hxSum(all, "reading_count").toLocaleString() },
         { icon: "🔌", label: "NISS", value: new Set(all.map((r) => r.niss).filter(Boolean)).size.toLocaleString() },
       ],
       split: { title: "Usage type", entries: hxCountBy(all, (r) => r.usage_type_desc || r.usage_type) },
@@ -6025,10 +6030,9 @@ $("#wbc-filter-clear-btn").addEventListener("click", (ev) => {
 $("#wbc-export-btn").addEventListener("click", () => {
   const rows = wbcVisibleRows();
   if (!rows.length) return;
-  const keys = ["id_billing_period", "billing_period", "niss", "id_reading", "id_measuring_point", "mp_type", "mp_type_desc", "read_status", "usage_type", "reading_prev_date", "reading_date",
-    "prev_value", "value", "reading_usage", "corrected_usage", "ready_usage", "multiplier", "expected_ready_usage", "ready_usage_off_formula",
-    "id_item_to_bill", "itb_status", "id_bill", "bill_status", "bill_status_desc", "billing_type", "billing_type_desc",
-    "billed_ready_usage", "billed_consumption", "billed_prev_value", "billed_value", "difference"];
+  const keys = ["niss", "read_status", "usage_type", "prev_value", "value", "reading_usage", "corrected_usage", "multiplier", "ready_usage",
+    "id_contracted_service", "id_bill", "id_item_to_bill", "billed_consumption", "difference",
+    "reading_count", "id_readings", "reading_details", "mp_type", "mp_types", "mp_type_desc", "id_billing_period", "billing_period", "reading_date"];
   const lines = [keys.join(",")];
   rows.forEach((r) => lines.push(keys.map((k) => `"${String(r[k] ?? "").replace(/ 00:00:00(\.0+)?$/, "").replace(/"/g, '""')}"`).join(",")));
   const blob = new Blob([lines.join("\n")], { type: "text/csv" });

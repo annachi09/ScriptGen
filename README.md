@@ -2903,6 +2903,44 @@ readings from Feb 2023. Example given: reading 1046340065 - READY_USAGE
   `COD_CONCEPT IN ('CONCSMO003','CC210')`, via OUTER APPLY on the row's
   ID_BILL. Shown red when it differs from READY_USAGE. Example reading
   1046340065: bill 1073781052 -> 7799 (ready usage 4452).
+- **Grouped rows (same day):** "group it by sector supply and
+  reading_type and items_to_bill, for example 10005514-301, should only
+  show 1 record where the usage should be sum". One row per (sector
+  supply, reading type, usage type, item to bill); READY_USAGE and the
+  billed usage are both summed and the mismatch test (> 0.001) runs on
+  the sums (HAVING). Usage type is in the key so water sums on its own and
+  electricity's active / reactive / power usages are never added together.
+  10005514-301, August 2026: readings 1045145278 + 1045146343 on item
+  1037750522 -> one row (17,382 ready vs 196,078 billed). New columns:
+  Meters ("N summed" pill; hover = per-reading prev -> value = ready |
+  billed prev -> value = billed), Readings (ID_READINGS list).
+  Prev/Value/Multiplier/Billed Prev/Billed Value only show for
+  single-meter rows. MP type becomes "Mixed" when the meters differ; the
+  MP checkboxes keep a row when any of its meters' types is ticked.
+- **Simplified definition (2026-09-28):** "to make it simpler, lets just
+  compare base on the readings, and base on the calculation base remove
+  the other unnecessary". Now one row per (sector supply, usage type,
+  bill): SUM of the readings' own READY_USAGE vs the bill's
+  SUM(CALCULATION_BASE) for CONCSMO003 + CC210; flagged when they differ
+  by > 0.001 (DIFFERENCE = calculation base - ready usage). Only bills of
+  the NISS's OWN contracted service (GCCOM_BILL.ID_CONTRACTED_SERVICE ->
+  GCCOM_CONTRACTED_SERVICE.ID_SECTOR_SUPPLY = reading's) - 10005514-301
+  had been linked to a bill of another supply's service (20711448), which
+  produced a false 196,078. Bills with no consumption-concept line are
+  left out. Removed: READINGS_ITEMSTOBILL usage / prev / value, the
+  formula "expected" and "off formula" flag, bill status / billing type
+  columns (still filtered: Invoiced/Generated, not Credit Note).
+  Only Active Energy (TPCONS0001) and Water (TPCONS0006) readings are
+  compared - Reactive (TPCONS0002) and Injected (TPCONS1010) were being
+  flagged against the consumption base by the thousand. Live, August 2026
+  (~57s): 1,023 active-energy + 12,800 water rows; 11,098 of the water
+  rows are READY_USAGE 0 with a calculation base > 0 (looks like
+  estimated/average billing on a zero reading), and some are fractional
+  (1 vs 0.97).
+  Columns in RJ's order: NISS, Read Status, Usage Type, Prev Value, Value,
+  Reading Usage, Corrected Usage, Multiplier, Ready Usage, Contracted
+  Service, Bill, Item To Bill, Calculation Base, Difference; then MP type,
+  period, readings, date.
 
 ## ⟳ Refresh on every menu (2026-09-27)
 

@@ -4066,7 +4066,9 @@ def wrong_billed_consumption_periods(user: str = Depends(require_login)):
     return {
         "periods": [
             {"id": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
-             "description": diff_engine.cell_display(_da_col(r, "DESCRIPTION"))}
+             "description": diff_engine.cell_display(_da_col(r, "DESCRIPTION")),
+             # "we start always with the current billing period" (RJ 2026-09-28)
+             "is_current": str(diff_engine.cell_display(_da_col(r, "IS_CURRENT"))) == "1"}
             for r in rows
         ]
     }
@@ -4097,7 +4099,13 @@ def wrong_billed_consumption_detect(body: WrongBilledConsumptionRequest, user: s
         "id_billing_period": int(raw),
         "rows": rows,
         "count": len(rows),
-        "reading_count": len({r.get("id_reading") for r in rows}),
+        # One row per bill; ID_READINGS lists the readings summed into it.
+        "reading_count": len({
+            rid.strip()
+            for r in rows
+            for rid in str(r.get("id_readings") or r.get("id_reading") or "").split(",")
+            if rid.strip()
+        }),
         "supply_count": len({r.get("niss") for r in rows}),
     }
 
