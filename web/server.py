@@ -55,6 +55,7 @@ from web.auth import (
 )
 from web.session_store import sessions, QueryState, date_anomaly_sessions, DateAnomalyState
 from web import batch_jobs
+from web import wbc_jobs
 from web import menu_access
 
 # Same sys.frozen check app/utils/paths.py uses: a PyInstaller --onefile
@@ -4078,8 +4079,16 @@ class WrongBilledConsumptionRequest(BaseModel):
     id_billing_period: str
 
 
+def _wbc_username(user) -> str:
+    return str(getattr(user, "username", user))
+
+
 @app.post("/api/wrong-billed-consumption/detect")
 def wrong_billed_consumption_detect(body: WrongBilledConsumptionRequest, user: str = Depends(require_login)):
+    """Starts the bill-centric scan of one billing period as a background
+    job (web/wbc_jobs.py - the period is scanned in ID_BILL chunks because
+    one query over ~1.7M bills can't fit the 120s timeout). Poll
+    GET /api/wrong-billed-consumption/jobs/{job_id}."""
     raw = (body.id_billing_period or "").strip()
     if not raw.isdigit():
         raise HTTPException(status_code=400, detail="Pick a billing period.")
@@ -4087,27 +4096,28 @@ def wrong_billed_consumption_detect(body: WrongBilledConsumptionRequest, user: s
     conn = config.get_active_connection()
     if not conn:
         raise HTTPException(status_code=400, detail="No connection configured.")
-    try:
-        result = mssql.run_query(conn, wrong_billed_consumption.build_wrong_billed_consumption_query(int(raw)))
-    except mssql.ConnectionError_ as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    rows = [
-        {c.lower(): diff_engine.cell_display(v) for c, v in zip(result.columns, r)}
-        for r in result.rows
-    ]
-    return {
-        "id_billing_period": int(raw),
-        "rows": rows,
-        "count": len(rows),
-        # One row per bill; ID_READINGS lists the readings summed into it.
-        "reading_count": len({
-            rid.strip()
-            for r in rows
-            for rid in str(r.get("id_readings") or r.get("id_reading") or "").split(",")
-            if rid.strip()
-        }),
-        "supply_count": len({r.get("niss") for r in rows}),
-    }
+    job = wbc_jobs.start(conn, int(raw), _wbc_username(user))
+    return job.summary()
+
+
+def _wbc_job_or_404(job_id: str, user) -> "wbc_jobs.WbcJob":
+    job = wbc_jobs.jobs.get(job_id)
+    if not job or job.created_by != _wbc_username(user):
+        raise HTTPException(status_code=404, detail="Scan not found (the server may have restarted).")
+    return job
+
+
+@app.get("/api/wrong-billed-consumption/jobs/{job_id}")
+def wrong_billed_consumption_job(job_id: str, user: str = Depends(require_login)):
+    job = _wbc_job_or_404(job_id, user)
+    return job.summary(include_rows=job.status != wbc_jobs.STATUS_RUNNING)
+
+
+@app.post("/api/wrong-billed-consumption/jobs/{job_id}/cancel")
+def wrong_billed_consumption_cancel(job_id: str, user: str = Depends(require_login)):
+    job = _wbc_job_or_404(job_id, user)
+    job.cancel_requested = True
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------

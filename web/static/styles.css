@@ -1591,6 +1591,8 @@ body.hx-modal-open { overflow: hidden; }
 /* Wrong Billed Consumption: a billed start/end value that differs from the
    reading's own value - usually the cause of the mismatch. */
 #wbc-table .wbc-diff { color: #b91c1c; font-weight: 700; text-decoration: underline dotted; }
+.wbc-progress { flex: 1 1 160px; max-width: 280px; height: 10px; border-radius: 999px; background: rgba(148, 163, 184, .25); overflow: hidden; align-self: center; }
+.wbc-progress-fill { height: 100%; width: 0; border-radius: 999px; background: linear-gradient(90deg, #6366f1, #06b6d4); transition: width .4s ease; }
 #wbc-table .wbc-divider { border-left: 3px solid var(--border-strong, #94a3b8); }
 .wbc-mp-checks {display: flex; flex-wrap: wrap; gap: 6px 14px; padding-top: 4px; }
 .wbc-mp-checks label { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; white-space: nowrap; }

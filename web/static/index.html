@@ -1173,16 +1173,15 @@
       <section class="page" id="page-wrongbilledconsumption">
         <header class="page-header">
           <h1>Wrong Billed Consumption</h1>
-          <p class="page-subtitle">Cycle readings whose billed consumption (GCCOM_READINGS_ITEMSTOBILL) doesn't match the reading's READY_USAGE. One billing period per scan.</p>
+          <p class="page-subtitle">Per bill of the billing period: calculation base vs READINGS_ITEMSTOBILL ready usage vs GCGT_RE_READING ready usage.</p>
         </header>
 
         <details class="hx-info">
           <summary>ℹ️ About this page</summary>
           <div class="hx-info-body">
-            <p><strong>What it compares.</strong> For every Cycle reading (reading date from 1 Feb 2023) in the chosen billing period: the READY_USAGE billed for it in GCCOM_READINGS_ITEMSTOBILL, summed <em>per item to bill</em>, against the reading's own READY_USAGE. Rows are listed when they differ.</p>
-            <p><strong>Why per item to bill.</strong> A water reading is normally billed twice — on the water item and on the sanitary item — each with the full usage. Summing both would flag every such reading.</p>
-            <p><strong>Formula check.</strong> <em>Expected</em> = (VALUE − PREV_VALUE) × MULTIPLIER (GCGT_ME_USAGE_TYPE_METER by device + usage type; missing = 1). <span class="hx-pill hx-pill-amber">Off formula</span> marks readings whose own READY_USAGE doesn't follow it. <em>Billed prev / value</em> show the start/end the link row used — a different start is the usual cause.</p>
-            <p><strong>Speed.</strong> About 20–30 seconds per billing period.</p>
+            <p><strong>Starts from the bill.</strong> Every GCCOM_BILL of the chosen billing period (default: the current one) that is Invoiced/Generated and not a Credit Note.</p>
+            <p><strong>Three sources of usage per bill:</strong> (1) <em>Calculation base</em> = SUM(GCCOM_BILLING_CONCEPT_DETAIL.CALCULATION_BASE) for concepts CONCSMO003 + CC210; (2) <em>Ready usage (Reading ITB)</em> = SUM(GCCOM_READINGS_ITEMSTOBILL.READY_USAGE) over the bill's items to bill; (3) <em>Ready usage (RE_READING)</em> = SUM(GCGT_RE_READING.READY_USAGE) of those readings. A bill is listed when any two differ.</p>
+            <p><strong>Speed.</strong> A period has ~1.7M bills, so the scan runs in chunks in the background with a progress bar (a few minutes); you can cancel it.</p>
           </div>
         </details>
 
@@ -1192,8 +1191,10 @@
             <select id="wbc-period" class="text-input text-input-sm"><option value="">Loading…</option></select>
           </label>
           <button type="button" class="btn btn-primary" id="wbc-detect-btn">🔍 Scan period</button>
+          <button type="button" class="btn btn-pill-sm" id="wbc-cancel-btn" hidden>✕ Cancel scan</button>
+          <div class="wbc-progress" id="wbc-progress" hidden><div class="wbc-progress-fill"></div></div>
           <div class="hx-summary">
-            <span id="wbc-summary">Pick a billing period and click Scan.</span>
+            <span id="wbc-summary">The current billing period is selected - click Scan (runs in chunks, a few minutes).</span>
             <span id="wbc-filtered-count" class="hx-filtered"></span>
           </div>
           <button type="button" class="btn btn-pill" id="wbc-export-btn" disabled>⬇ Export CSV</button>
@@ -1217,15 +1218,16 @@
                 <select id="wbc-filter-usage" class="text-input text-input-sm"><option value="">All</option></select>
               </label>
               <label class="hx-field">
-                <span>Read status</span>
+                <span>Bill status</span>
                 <select id="wbc-filter-status" class="text-input text-input-sm"><option value="">All</option></select>
               </label>
               <div class="hx-field">
-                <span>Direction</span>
+                <span>Mismatch</span>
                 <div class="hx-seg" id="wbc-filter-dir">
                   <button type="button" data-value="" class="is-active">All</button>
-                  <button type="button" data-value="over">Over-billed</button>
-                  <button type="button" data-value="under">Under-billed</button>
+                  <button type="button" data-value="over" title="Calculation base &gt; Reading ITB ready usage">Calc &gt; ITB</button>
+                  <button type="button" data-value="under" title="Calculation base &lt; Reading ITB ready usage">Calc &lt; ITB</button>
+                  <button type="button" data-value="itbreading" title="Reading ITB ready usage ≠ RE_READING ready usage">ITB ≠ Reading</button>
                 </div>
               </div>
               <div class="hx-field hx-field-wide">

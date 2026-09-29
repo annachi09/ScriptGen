@@ -2942,6 +2942,46 @@ readings from Feb 2023. Example given: reading 1046340065 - READY_USAGE
   Service, Bill, Item To Bill, Calculation Base, Difference; then MP type,
   period, readings, date.
 
+### Rework: bill-centric three-way comparison (2026-09-28) - CURRENT
+
+RJ: "we start with GCCOM_BILL and GCCOM_CONCEPT_DETAIL, we sum the
+calculation base for the concept given, then with the same ID_BILL, we
+connect to ITEMS_TO_BILL, then reading_items_to_bill ... then we get the
+id_reading, and sum it with the ready usage, so 3 source of ready usage we
+are comparing ... we start always with the current billing period".
+Replaces every reading-centric definition above.
+
+- Per bill of the period (`GCCOM_BILL.ID_BILLING_PERIOD`; Invoiced/
+  Generated, not Credit Note):
+  1. CALCULATION_BASE = SUM(`GCCOM_BILLING_CONCEPT_DETAIL.CALCULATION_BASE`)
+     for COD_CONCEPT CONCSMO003 / CC210;
+  2. RIT_READY_USAGE = SUM(`GCCOM_READINGS_ITEMSTOBILL.READY_USAGE`) over
+     the bill's items to bill (`GCCOM_ITEMS_TO_BILL.ID_BILL`);
+  3. READING_READY_USAGE = SUM(`GCGT_RE_READING.READY_USAGE`) of the
+     distinct readings behind those links.
+  Sources 2 and 3 count only Active Energy (TPCONS0001) and Water
+  (TPCONS0006) readings - otherwise electricity bills summed reactive /
+  power readings too (one 50k-bill chunk: 464 rows, 442 of them that
+  artefact; restricted: 31 rows, ~5s per chunk, ~3 min per period).
+  Listed when any two differ by > 0.001; DIFF_CALC_VS_RIT,
+  DIFF_CALC_VS_READING, DIFF_RIT_VS_READING columns.
+- The period picker defaults to the CURRENT period (today inside
+  INITIAL_DATE..END_DATE, `IS_CURRENT` from the periods query).
+- **Chunked background scan** (`web/wbc_jobs.py`): September 2026 has
+  1,693,261 bills and the calculation-base sum alone took ~115s as one
+  query, so the period is split into chunks of 50,000 bills each - chunk
+  starts = every 50,000th ID_BILL of the period (`build_bill_boundaries_query`,
+  ~1.6s; fixed-width id ranges were lopsided: one 100,000-wide range held
+  only 14 bills) - run on a background thread
+  with one reused connection. `POST /api/wrong-billed-consumption/detect`
+  returns a job id; `GET /api/wrong-billed-consumption/jobs/{id}` gives
+  progress (rows when finished); `POST .../jobs/{id}/cancel`. Page shows a
+  progress bar + Cancel. Rows capped at 50,000. In-memory: a server restart
+  drops the job.
+- Filters: search (NISS, bill, reading, item to bill), usage type, bill
+  status, MP type checkboxes, Mismatch (Calc > ITB / Calc < ITB / ITB ≠
+  Reading). CSV has all three sources and differences.
+
 ## ⟳ Refresh on every menu (2026-09-27)
 
 RJ: "add a refresh in all menu, this will refresh the data using the same

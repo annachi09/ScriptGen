@@ -4314,26 +4314,46 @@ def test_wrong_billed_consumption_requires_period(client):
     assert resp.status_code == 400
 
 
-def test_wrong_billed_consumption_detect_counts(client, monkeypatch):
-    import web.server as server_mod
+def test_wrong_billed_consumption_chunked_job(client, monkeypatch):
+    """Detect starts a background job that scans the period in ID_BILL
+    chunks; polling returns the merged rows when done."""
+    import contextlib
+    import time
+    import web.wbc_jobs as jobs_mod
 
     _login(client)
-    cols = ["NISS", "ID_READINGS", "ID_ITEM_TO_BILL", "READY_USAGE", "BILLED_READY_USAGE", "DIFFERENCE"]
-    rows = [["100-101", "1", 11, 10, 20, 10], ["100-101", "1", 12, 10, 5, -5], ["200-101", "2,3", 13, 3, 4, 1]]
-    captured = {}
+    sqls = []
 
     def fake_run(conn, sql):
-        captured["sql"] = sql
-        return QueryResult(columns=cols, rows=rows, elapsed_ms=1.0)
+        sqls.append(sql)
+        if "MIN_ID_BILL" in sql:
+            return QueryResult(columns=["MIN_ID_BILL", "MAX_ID_BILL", "BILL_COUNT"], rows=[[1, 250_000, 3]], elapsed_ms=1.0)
+        if "ROW_NUMBER()" in sql:
+            return QueryResult(columns=["ID_BILL"], rows=[[1], [100_001], [200_001]], elapsed_ms=1.0)
+        return QueryResult(columns=["NISS", "ID_BILL", "CALCULATION_BASE", "RIT_READY_USAGE", "READING_READY_USAGE", "DIFF_CALC_VS_RIT"],
+                           rows=[["100-101", len(sqls), 10, 5, 5, 5]], elapsed_ms=1.0)
 
-    monkeypatch.setattr(server_mod.mssql, "run_query", fake_run)
+    monkeypatch.setattr(jobs_mod.mssql, "run_query", fake_run)
+    monkeypatch.setattr(jobs_mod.mssql, "reuse_connection", lambda conn: contextlib.nullcontext())
     resp = client.post("/api/wrong-billed-consumption/detect", json={"id_billing_period": "10000000237"})
     assert resp.status_code == 200
-    body = resp.json()
+    job_id = resp.json()["job_id"]
+    for _ in range(100):
+        body = client.get(f"/api/wrong-billed-consumption/jobs/{job_id}").json()
+        if body["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert body["status"] == "done"
+    assert body["chunks_total"] == 3  # boundaries 1 / 100,001 / 200,001, last ends at max 250,000
     assert body["count"] == 3
-    assert body["reading_count"] == 3
-    assert body["supply_count"] == 2
-    assert "r0.ID_BILLING_PERIOD = 10000000237" in captured["sql"]
+    assert body["supply_count"] == 1
+    assert "b.ID_BILL BETWEEN 1 AND 100000" in sqls[2]
+    assert "b.ID_BILL BETWEEN 200001 AND 250000" in sqls[4]
+
+
+def test_wrong_billed_consumption_unknown_job(client):
+    _login(client)
+    assert client.get("/api/wrong-billed-consumption/jobs/nope").status_code == 404
 
 
 # ---------------- DOUBLE ITB (2026-09-27) ----------------

@@ -5819,44 +5819,43 @@ $("#wshs-export-btn").addEventListener("click", () => {
   URL.revokeObjectURL(url);
 });
 
-// ---------------- Wrong Billed Consumption (RJ 2026-09-27) ----------------
-// See app/core/wrong_billed_consumption.py. One billing period per scan
-// (server side, ~20-30s); filters/sort client-side.
-// Column order (RJ, 2026-09-28): "important columns first, NISS,
-// READ_STATUS, USAGE_TYPE, PREV_VALUE, VALUE, READING usage, corrected
-// usage, multiplier from usage_type_meter, item to bill of the same
-// contracted service base on the niss, id_bill, id_item_to_bill, ready
-// usage in reading item_to_bill, billed value, expected, then the
-// difference". Then (2026-09-28) simplified to readings' READY_USAGE vs
-// the bill's calculation base only. Supporting columns follow a divider.
+// ---------------- Wrong Billed Consumption (RJ 2026-09-27, reworked 09-28) ----------------
+// See app/core/wrong_billed_consumption.py + web/wbc_jobs.py. Bill-centric:
+// per bill of the chosen (default: current) billing period, three sources of
+// usage are compared - the bill's calculation base (CONCSMO003 + CC210), the
+// READINGS_ITEMSTOBILL ready usage of its items, and the GCGT_RE_READING
+// ready usage of those readings. The period is scanned in ID_BILL chunks as a
+// background job (one query over ~1.7M bills can't fit the 120s timeout);
+// the page polls for progress. Filters/sort client-side.
+function wbcDiffPill(v, title) {
+  const d = Number(v);
+  if (!v || Math.abs(d) < 0.001) return `<span class="hint-text">0</span>`;
+  return `<span class="hx-pill ${d > 0 ? "hx-pill-billed" : "hx-pill-blue"}" title="${escapeHtml(title)}">${d > 0 ? "+" : ""}${escapeHtml(v)}</span>`;
+}
 const WBC_COLUMNS = [
-  { key: "niss", label: "NISS", render: (r) => `<span class="hx-niss">${escapeHtml(r.niss ?? "")}</span>` +
-      (Number(r.reading_count) > 1 ? ` <span class="hx-pill hx-pill-amber" title="${escapeHtml((r.reading_details || "").split(" ; ").join("\n"))}">${escapeHtml(r.reading_count)} meters</span>` : "") },
-  { key: "read_status", label: "Read Status", render: (r) => hxStatusPill(r.read_status) },
-  { key: "usage_type", label: "Usage Type", render: (r) => `<span title="${escapeHtml(r.usage_type ?? "")}">${escapeHtml(r.usage_type_desc || r.usage_type || "")}</span>` },
-  { key: "prev_value", label: "Prev Value", num: true },
-  { key: "value", label: "Value", num: true },
-  { key: "reading_usage", label: "Reading Usage", num: true },
-  { key: "corrected_usage", label: "Corrected Usage", num: true },
-  { key: "multiplier", label: "Multiplier", num: true },
-  { key: "ready_usage", label: "★ Ready Usage (readings)", num: true, render: (r) => `<strong>${escapeHtml(r.ready_usage ?? "")}</strong>` },
-  { key: "id_contracted_service", label: "Contracted Service", mono: true },
+  { key: "niss", label: "NISS", render: (r) => `<span class="hx-niss">${escapeHtml(r.niss ?? "")}</span>` },
   { key: "id_bill", label: "Bill", mono: true },
-  { key: "id_item_to_bill", label: "Item To Bill", mono: true },
-  // RJ 2026-09-28: "compare base on the readings, and base on the
-  // calculation base" - bill's SUM(CALCULATION_BASE) for CONCSMO003 + CC210.
-  { key: "billed_consumption", label: "★ Calculation Base (bill)", num: true, render: (r) => `<strong class="wbc-billed">${escapeHtml(r.billed_consumption ?? "")}</strong>` },
-  { key: "difference", label: "Difference", num: true, render: (r) => {
-      const d = Number(r.difference);
-      return `<span class="hx-pill ${d > 0 ? "hx-pill-billed" : "hx-pill-blue"}" title="Calculation base − Ready usage">${d > 0 ? "+" : ""}${escapeHtml(r.difference ?? "")}</span>`;
-    } },
-  // ---- supporting columns ----
-  { key: "mp_type", label: "MP Type", divider: true, render: (r) => `<span class="hx-pill ${r.mp_type === "TIPEQM0001" ? "hx-pill-blue" : "hx-pill-amber"}" title="${escapeHtml(r.mp_types || r.mp_type || "")}">${escapeHtml(r.mp_type_desc || r.mp_type || "—")}</span>` },
-  { key: "billing_period", label: "Billing Period" },
+  { key: "usage_type", label: "Usage Type", render: (r) => `<span title="${escapeHtml(r.usage_type ?? "")}">${escapeHtml(r.usage_type_desc || r.usage_type || "")}</span>` },
+  { key: "calculation_base", label: "★ Calculation Base", num: true, render: (r) => `<strong class="wbc-billed">${escapeHtml(r.calculation_base ?? "")}</strong>` },
+  { key: "rit_ready_usage", label: "★ Ready Usage (Reading ITB)", num: true, render: (r) => `<strong>${wbcMarkDiff(r.rit_ready_usage, r.calculation_base)}</strong>` },
+  { key: "reading_ready_usage", label: "★ Ready Usage (RE_READING)", num: true, render: (r) => `<strong>${wbcMarkDiff(r.reading_ready_usage, r.calculation_base)}</strong>` },
+  { key: "diff_calc_vs_rit", label: "Calc − ITB", num: true, render: (r) => wbcDiffPill(r.diff_calc_vs_rit, "Calculation base − READINGS_ITEMSTOBILL ready usage") },
+  { key: "diff_calc_vs_reading", label: "Calc − Reading", num: true, render: (r) => wbcDiffPill(r.diff_calc_vs_reading, "Calculation base − GCGT_RE_READING ready usage") },
+  { key: "diff_rit_vs_reading", label: "ITB − Reading", num: true, render: (r) => wbcDiffPill(r.diff_rit_vs_reading, "READINGS_ITEMSTOBILL − GCGT_RE_READING ready usage") },
+  { key: "reading_count", label: "Readings #", num: true },
   { key: "id_readings", label: "Readings", mono: true, render: (r) =>
-      `<span title="${escapeHtml((r.reading_details || "").split(" ; ").join("\n"))}">${escapeHtml(r.id_readings || r.id_reading || "")}</span>` },
+      `<span title="${escapeHtml((r.reading_details || "").split(" ; ").join("\n"))}">${escapeHtml(r.id_readings || "")}</span>` },
+  { key: "id_item_to_bill", label: "Item To Bill", mono: true, render: (r) => escapeHtml(r.id_item_to_bill ?? "") +
+      (Number(r.item_to_bill_count) > 1 ? ` <span class="hint-text">(+${Number(r.item_to_bill_count) - 1})</span>` : "") },
+  // ---- supporting columns ----
+  { key: "bill_status", label: "Bill Status", divider: true, render: (r) => `<span class="hx-pill ${r.bill_status === "ESTFAC0005" ? "hx-pill-green" : "hx-pill-blue"}" title="${escapeHtml(r.bill_status ?? "")}">${escapeHtml(r.bill_status_desc || r.bill_status || "")}</span>` },
+  { key: "billing_type", label: "Billing Type", render: (r) => `<span title="${escapeHtml(r.billing_type ?? "")}">${escapeHtml(r.billing_type_desc || r.billing_type || "")}</span>` },
+  { key: "id_contracted_service", label: "Contracted Service", mono: true },
+  { key: "mp_type", label: "MP Type", render: (r) => `<span class="hx-pill ${r.mp_type === "TIPEQM0001" ? "hx-pill-blue" : "hx-pill-amber"}" title="${escapeHtml(r.mp_types || r.mp_type || "")}">${escapeHtml(r.mp_type_desc || r.mp_type || "—")}</span>` },
+  { key: "billing_period", label: "Billing Period" },
   { key: "reading_date", label: "Reading Date", date: true },
 ];
+let wbcJobId = null;
 let wbcRows = [];
 let wbcSortKey = null;
 let wbcSortDir = 1;
@@ -5884,9 +5883,10 @@ async function wbcOnPageShown() {
   try {
     const data = await api("/api/wrong-billed-consumption/billing-periods");
     const periods = data.periods || [];
-    sel.innerHTML = periods.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.description || p.id)}</option>`).join("");
-    // Default: the most recent period that's already underway (skip next month's).
-    if (periods.length > 1) sel.value = periods[1].id;
+    sel.innerHTML = periods.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.description || p.id)}${p.is_current ? " (current)" : ""}</option>`).join("");
+    // "we start always with the current billing period" (RJ 2026-09-28).
+    const cur = periods.find((p) => p.is_current) || periods[1] || periods[0];
+    if (cur) sel.value = cur.id;
     wbcPeriodsLoaded = true;
   } catch (err) {
     sel.innerHTML = `<option value="">(couldn't load periods)</option>`;
@@ -5905,10 +5905,11 @@ function wbcVisibleRows() {
     const rowTypes = r.mp_types != null ? String(r.mp_types).split(",") : [r.mp_type || ""];
     if (!rowTypes.some((t) => mpTypes.has(t.trim()))) return false;
     if (usage && r.usage_type !== usage) return false;
-    if (status && r.read_status !== status) return false;
-    if (wbcDir === "over" && !(Number(r.difference) > 0)) return false;
-    if (wbcDir === "under" && !(Number(r.difference) < 0)) return false;
-    if (q && ![r.niss, r.id_readings, r.id_reading, r.id_item_to_bill].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    if (status && r.bill_status !== status) return false;
+    if (wbcDir === "over" && !(Number(r.diff_calc_vs_rit) > 0)) return false;
+    if (wbcDir === "under" && !(Number(r.diff_calc_vs_rit) < 0)) return false;
+    if (wbcDir === "itbreading" && !(Math.abs(Number(r.diff_rit_vs_reading)) >= 0.001)) return false;
+    if (q && ![r.niss, r.id_bill, r.id_readings, r.id_item_to_bill].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
     return true;
   });
   if (wbcSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[wbcSortKey], b[wbcSortKey], wbcSortDir));
@@ -5933,7 +5934,7 @@ function wbcRenderTable() {
   wbcPage = Math.min(wbcPage, pages - 1);
   const rows = all.slice(wbcPage * WBC_PAGE_SIZE, (wbcPage + 1) * WBC_PAGE_SIZE);
   document.querySelector("#wbc-table tbody").innerHTML = rows.length
-    ? rows.map((r) => `<tr class="hx-row ${Number(r.difference) > 0 ? "hx-row-anomalous" : ""}">` +
+    ? rows.map((r) => `<tr class="hx-row ${Number(r.diff_calc_vs_rit) > 0 ? "hx-row-anomalous" : ""}">` +
         WBC_COLUMNS.map((c) => `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}${c.divider ? " wbc-divider" : ""}">${c.render ? c.render(r) : (c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? ""))}</td>`).join("") +
         "</tr>").join("")
     : `<tr><td colspan="${WBC_COLUMNS.length}" class="hint-text">${wbcRows.length ? "No rows match the current filters." : "No mismatches in this billing period."}</td></tr>`;
@@ -5946,18 +5947,18 @@ function wbcRenderTable() {
   renderFilteredCount("#wbc-filtered-count", all.length, wbcRows.length);
   if (wbcRows.length) {
     const n = all.length;
-    const over = all.filter((r) => Number(r.difference) > 0);
+    const nz = (k) => all.filter((r) => Math.abs(Number(r[k])) >= 0.001);
     hxRenderDashboard("wbc-dash", {
       gauges: [
-        { label: "Over-billed", count: over.length, total: n, c1: "#ef4444", c2: "#f97316", hint: "Calculation base higher than the readings' READY_USAGE" },
-        { label: "Under-billed", count: all.filter((r) => Number(r.difference) < 0).length, total: n, c1: "#6366f1", c2: "#06b6d4", hint: "Calculation base lower than the readings' READY_USAGE" },
-        { label: "Multi-meter", count: all.filter((r) => Number(r.reading_count) > 1).length, total: n, c1: "#f59e0b", c2: "#eab308", hint: "Rows where several readings were summed" },
+        { label: "Calc ≠ Reading ITB", count: nz("diff_calc_vs_rit").length, total: n, c1: "#ef4444", c2: "#f97316", hint: "Calculation base differs from READINGS_ITEMSTOBILL ready usage" },
+        { label: "Calc ≠ RE_READING", count: nz("diff_calc_vs_reading").length, total: n, c1: "#6366f1", c2: "#06b6d4", hint: "Calculation base differs from GCGT_RE_READING ready usage" },
+        { label: "ITB ≠ RE_READING", count: nz("diff_rit_vs_reading").length, total: n, c1: "#f59e0b", c2: "#eab308", hint: "READINGS_ITEMSTOBILL differs from GCGT_RE_READING ready usage" },
       ],
       tiles: [
-        { icon: "⚖️", label: "Net difference (calc base − ready)", value: hxSum(all, "difference").toLocaleString(), accent: true },
-        { icon: "📈", label: "Over-billed usage", value: hxSum(over, "difference").toLocaleString() },
-        { icon: "📉", label: "Under-billed usage", value: hxSum(all.filter((r) => Number(r.difference) < 0), "difference").toLocaleString() },
-        { icon: "📏", label: "Readings", value: hxSum(all, "reading_count").toLocaleString() },
+        { icon: "⚖️", label: "Net Calc − ITB", value: hxSum(all, "diff_calc_vs_rit").toLocaleString(), accent: true },
+        { icon: "📐", label: "Net Calc − Reading", value: hxSum(all, "diff_calc_vs_reading").toLocaleString() },
+        { icon: "🔗", label: "Net ITB − Reading", value: hxSum(all, "diff_rit_vs_reading").toLocaleString() },
+        { icon: "🧾", label: "Bills", value: n.toLocaleString() },
         { icon: "🔌", label: "NISS", value: new Set(all.map((r) => r.niss).filter(Boolean)).size.toLocaleString() },
       ],
       split: { title: "Usage type", entries: hxCountBy(all, (r) => r.usage_type_desc || r.usage_type) },
@@ -5965,15 +5966,47 @@ function wbcRenderTable() {
   }
 }
 
+function wbcSetProgress(done, total) {
+  const bar = $("#wbc-progress");
+  if (!bar) return;
+  bar.hidden = total === null;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  bar.querySelector(".wbc-progress-fill").style.width = `${pct}%`;
+}
+
+async function wbcPollJob(jobId, label) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000));
+    if (wbcJobId !== jobId) return null; // superseded
+    const s = await api(`/api/wrong-billed-consumption/jobs/${encodeURIComponent(jobId)}`);
+    wbcSetProgress(s.chunks_done, s.chunks_total || 1);
+    $("#wbc-summary").textContent = `Scanning ${label}… chunk ${s.chunks_done}/${s.chunks_total || "?"} · ` +
+      `${Number(s.bill_count || 0).toLocaleString()} bills in period · ${Number(s.count || 0).toLocaleString()} mismatch(es) so far`;
+    if (s.status !== "running") return s;
+  }
+}
+
+$("#wbc-cancel-btn")?.addEventListener("click", async () => {
+  if (!wbcJobId) return;
+  try { await api(`/api/wrong-billed-consumption/jobs/${encodeURIComponent(wbcJobId)}/cancel`, { method: "POST" }); } catch (_) { /* ignore */ }
+});
+
 $("#wbc-detect-btn").addEventListener("click", async () => {
   const id = $("#wbc-period").value;
   if (!id) { showToast("Pick a billing period first.", true); return; }
   const btn = $("#wbc-detect-btn");
   btn.disabled = true;
+  const cancelBtn = $("#wbc-cancel-btn");
+  if (cancelBtn) cancelBtn.hidden = false;
   const label = $("#wbc-period").selectedOptions[0]?.textContent || id;
-  $("#wbc-summary").textContent = `Scanning ${label}… (about 20–30s)`;
+  $("#wbc-summary").textContent = `Starting scan of ${label}…`;
+  wbcSetProgress(0, 1);
   try {
-    const data = await api("/api/wrong-billed-consumption/detect", { method: "POST", body: { id_billing_period: id } });
+    const start = await api("/api/wrong-billed-consumption/detect", { method: "POST", body: { id_billing_period: id } });
+    wbcJobId = start.job_id;
+    const data = await wbcPollJob(start.job_id, label);
+    if (!data) return;
+    if (data.status === "failed") throw new Error(data.error || "Scan failed.");
     wbcRows = data.rows || [];
     wbcPage = 0;
     const opts = (key, descKey) => {
@@ -5984,18 +6017,23 @@ $("#wbc-detect-btn").addEventListener("click", async () => {
     };
     const usageCur = $("#wbc-filter-usage").value, statusCur = $("#wbc-filter-status").value;
     $("#wbc-filter-usage").innerHTML = opts("usage_type", "usage_type_desc");
-    $("#wbc-filter-status").innerHTML = opts("read_status", "read_status_desc");
+    $("#wbc-filter-status").innerHTML = opts("bill_status", "bill_status_desc");
     $("#wbc-filter-usage").value = usageCur; $("#wbc-filter-status").value = statusCur;
     $("#wbc-filters").hidden = wbcRows.length === 0;
     $("#wbc-export-btn").disabled = wbcRows.length === 0;
     $("#wbc-dash").hidden = wbcRows.length === 0;
-    $("#wbc-summary").textContent = `${label}: ${data.count.toLocaleString()} mismatch(es) on ${data.reading_count.toLocaleString()} reading(s), ${data.supply_count.toLocaleString()} NISS.`;
+    $("#wbc-summary").textContent = `${label}: ${data.count.toLocaleString()} bill(s) with a mismatch out of ` +
+      `${Number(data.bill_count || 0).toLocaleString()} bills, ${Number(data.supply_count || 0).toLocaleString()} NISS` +
+      (data.status === "cancelled" ? ` — cancelled after ${data.chunks_done}/${data.chunks_total} chunks.` : ".") +
+      (data.truncated ? " (capped at 50,000 rows)" : "");
     wbcRenderTable();
   } catch (err) {
     $("#wbc-summary").textContent = "";
     showToast(err.message, true);
   } finally {
     btn.disabled = false;
+    if (cancelBtn) cancelBtn.hidden = true;
+    wbcSetProgress(0, null);
   }
 });
 ["#wbc-filter-usage", "#wbc-filter-status", "#wbc-filter-mptype"].forEach((id) => $(id).addEventListener("change", () => { wbcPage = 0; wbcRenderTable(); }));
@@ -6030,9 +6068,10 @@ $("#wbc-filter-clear-btn").addEventListener("click", (ev) => {
 $("#wbc-export-btn").addEventListener("click", () => {
   const rows = wbcVisibleRows();
   if (!rows.length) return;
-  const keys = ["niss", "read_status", "usage_type", "prev_value", "value", "reading_usage", "corrected_usage", "multiplier", "ready_usage",
-    "id_contracted_service", "id_bill", "id_item_to_bill", "billed_consumption", "difference",
-    "reading_count", "id_readings", "reading_details", "mp_type", "mp_types", "mp_type_desc", "id_billing_period", "billing_period", "reading_date"];
+  const keys = ["niss", "id_bill", "usage_type", "calculation_base", "rit_ready_usage", "reading_ready_usage",
+    "diff_calc_vs_rit", "diff_calc_vs_reading", "diff_rit_vs_reading", "reading_count", "id_readings", "reading_details",
+    "id_item_to_bill", "item_to_bill_count", "link_rows", "bill_status", "bill_status_desc", "billing_type", "billing_type_desc",
+    "id_contracted_service", "mp_type", "mp_types", "mp_type_desc", "id_billing_period", "billing_period", "reading_date"];
   const lines = [keys.join(",")];
   rows.forEach((r) => lines.push(keys.map((k) => `"${String(r[k] ?? "").replace(/ 00:00:00(\.0+)?$/, "").replace(/"/g, '""')}"`).join(",")));
   const blob = new Blob([lines.join("\n")], { type: "text/csv" });

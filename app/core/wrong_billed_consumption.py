@@ -49,16 +49,87 @@ CONTRACTED_SERVICE_TABLE = "GCCOM_CONTRACTED_SERVICE"
 BILLING_PERIOD_TABLE = "OUC_COMMON_ADMIN.GCCOM_BILLING_PERIOD"
 MIN_PERIOD_DATE = "2023-02-01"
 
+# Only consumption readings feed sources 2 and 3 (the calculation base is
+# consumption). Live 2026-09-28: without this, electricity bills summed
+# Reactive / Power / Demand readings too (e.g. bill 1073758383: base
+# 2,623,000 vs 6,546,000 over 7 readings) - a 50k-bill chunk gave 464 rows,
+# 442 of them that artefact; with it, 31 rows (9 active, 22 water).
+COMPARED_USAGE_TYPES = ("TPCONS0001", "TPCONS0006")  # Active Energy, Water
+
 MEASUREMENT_POINT_TABLE = "OUC_COMMON_ADMIN.GCGT_RE_MEASUREMENT_POINT"
 MP_TYPE_TABLE = "OUC_COMMON_ADMIN.GCGT_RE_MP_TYPE"
 MP_TYPE_NORMAL = "TIPEQM0001"
 
 
-def build_wrong_billed_consumption_query(id_billing_period: int) -> str:
+def build_bill_range_query(id_billing_period: int) -> str:
+    """MIN/MAX/COUNT of the period's bill ids - the scan is split into
+    ID_BILL ranges (live 2026-09-28: September 2026 has 1,693,261 bills;
+    summing their calculation base alone took ~115s, so one query over the
+    whole period can't fit the 120s timeout)."""
     bp = format_sql_literal(int(id_billing_period))
+    return f"""
+SELECT MIN(b.ID_BILL) AS MIN_ID_BILL, MAX(b.ID_BILL) AS MAX_ID_BILL, COUNT(*) AS BILL_COUNT
+FROM {BILL_TABLE} b
+WHERE b.ID_BILLING_PERIOD = {bp}
+"""
+
+
+def build_bill_boundaries_query(id_billing_period: int, bills_per_chunk: int) -> str:
+    """Every Nth ID_BILL of the period (1st, N+1th, ...) - chunk start
+    points with an equal number of bills each. Live 2026-09-28: bill ids of
+    a period are NOT evenly spread (a 100,000-wide id range held only 14 of
+    September's bills), so fixed-width id ranges would be lopsided. ~1.6s
+    for September 2026 (34 boundaries at 50,000)."""
+    bp = format_sql_literal(int(id_billing_period))
+    n = max(1, int(bills_per_chunk))
+    return f"""
+SELECT x.ID_BILL
+FROM (
+    SELECT b.ID_BILL, ROW_NUMBER() OVER (ORDER BY b.ID_BILL) AS RN
+    FROM {BILL_TABLE} b
+    WHERE b.ID_BILLING_PERIOD = {bp}
+) x
+WHERE (x.RN - 1) % {n} = 0
+ORDER BY x.ID_BILL
+"""
+
+
+def chunks_from_boundaries(starts: list[int], max_id: int) -> list[tuple[int, int]]:
+    """Inclusive (lo, hi) ranges from sorted chunk start ids; the last one
+    ends at max_id."""
+    s = sorted(int(x) for x in starts)
+    out = []
+    for i, lo in enumerate(s):
+        hi = s[i + 1] - 1 if i + 1 < len(s) else int(max_id)
+        if hi >= lo:
+            out.append((lo, hi))
+    return out
+
+
+def bill_id_chunks(min_id: int, max_id: int, chunk_size: int) -> list[tuple[int, int]]:
+    """Inclusive (lo, hi) ID_BILL ranges covering min_id..max_id."""
+    if min_id is None or max_id is None or max_id < min_id:
+        return []
+    chunk_size = max(1, int(chunk_size))
+    out = []
+    lo = int(min_id)
+    while lo <= max_id:
+        hi = min(lo + chunk_size - 1, int(max_id))
+        out.append((lo, hi))
+        lo = hi + 1
+    return out
+
+
+def build_wrong_billed_consumption_query(id_billing_period: int, bill_from: int | None = None,
+                                         bill_to: int | None = None) -> str:
+    bp = format_sql_literal(int(id_billing_period))
+    bill_range = ""
+    if bill_from is not None and bill_to is not None:
+        bill_range = f"\n      AND b.ID_BILL BETWEEN {format_sql_literal(int(bill_from))} AND {format_sql_literal(int(bill_to))}"
     bill_statuses = ", ".join(format_sql_literal(s) for s in BILL_STATUSES_ALLOWED)
     credit_note = format_sql_literal(BILLING_TYPE_CREDIT_NOTE)
     concepts = ", ".join(format_sql_literal(c) for c in CONSUMPTION_CONCEPTS)
+    usage_types = ", ".join(format_sql_literal(u) for u in COMPARED_USAGE_TYPES)
     tol = TOLERANCE
     return f"""
 WITH cb AS (
@@ -67,7 +138,7 @@ WITH cb AS (
     FROM {BILL_TABLE} b
     JOIN {BILLING_CONCEPT_TABLE} bc ON bc.ID_BILL = b.ID_BILL
     JOIN {BILLING_CONCEPT_DETAIL_TABLE} bd ON bd.ID_BILLING_CONCEPT = bc.ID_BILLING_CONCEPT
-    WHERE b.ID_BILLING_PERIOD = {bp}
+    WHERE b.ID_BILLING_PERIOD = {bp}{bill_range}
       AND bc.COD_CONCEPT IN ({concepts})
       AND b.BILLING_STATUS IN ({bill_statuses})
       AND ISNULL(b.BILLING_TYPE, '') <> {credit_note}
@@ -79,6 +150,7 @@ lk AS (
     FROM cb
     JOIN GCCOM_ITEMS_TO_BILL itb ON itb.ID_BILL = cb.ID_BILL
     JOIN {READINGS_ITEMS_TO_BILL_TABLE} rit ON rit.ID_ITEM_TO_BILL = itb.ID_ITEM_TO_BILL
+    JOIN GCGT_RE_READING r1 ON r1.ID_READING = rit.ID_READING AND r1.USAGE_TYPE IN ({usage_types})
 ),
 rs AS (
     -- 2. ready usage of READINGS_ITEMSTOBILL per bill
