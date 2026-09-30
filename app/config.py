@@ -83,6 +83,35 @@ class AIConfig:
 
 
 @dataclass
+class EmailConfig:
+    """SMTP settings for ScriptGen's own alert e-mails (RJ, 2026-09-30:
+    Wrong Bill CASE 1 - Unusual high Sanitary, daily from 7 AM). The
+    password is Fernet-encrypted like the DB password and is entered by RJ
+    in Settings > Email alerts (or SCRIPTGEN_SMTP_PASSWORD / .env)."""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    use_tls: bool = True          # STARTTLS on 587; port 465 uses SSL directly
+    username: str = ""
+    password_enc: str = ""
+    from_addr: str = ""
+    recipients: list[str] = field(default_factory=lambda: [
+        "dev.rj.magdurulan@gmail.com", "rjmagdurulan@indracompany.com",
+    ])
+    alerts_enabled: bool = True
+    send_hour: int = 7            # local time the daily check starts
+    retry_minutes: int = 15       # how often to retry until the day's e-mail is sent
+
+    def get_password(self) -> str:
+        return crypto.decrypt_text(self.password_enc) or os.environ.get("SCRIPTGEN_SMTP_PASSWORD", "")
+
+    def set_password(self, plain: str) -> None:
+        self.password_enc = crypto.encrypt_text(plain)
+
+    def is_configured(self) -> bool:
+        return bool(self.smtp_host and self.recipients and (self.from_addr or self.username))
+
+
+@dataclass
 class SavedQuery:
     """A deliberately-named, kept-until-deleted query - distinct from
     recent_queries (a rolling, unnamed history). You save one on purpose;
@@ -102,6 +131,7 @@ class AppConfig:
     theme: str = "flatly"   # ttkbootstrap theme name; see app/ui/theme.py for the light/dark pair
     recent_queries: list[str] = field(default_factory=list)  # most-recent-first, capped at RECENT_QUERIES_MAX
     saved_queries: list[SavedQuery] = field(default_factory=list)
+    email: EmailConfig = field(default_factory=EmailConfig)
 
     def get_active_connection(self) -> Optional[ConnectionConfig]:
         return self.connections.get(self.active_connection)
@@ -168,6 +198,13 @@ def _default_config() -> AppConfig:
     return cfg
 
 
+def _load_email(raw) -> EmailConfig:
+    if not isinstance(raw, dict):
+        return EmailConfig()
+    known = {f for f in EmailConfig.__dataclass_fields__}
+    return EmailConfig(**{k: v for k, v in raw.items() if k in known})
+
+
 def load_config() -> AppConfig:
     path = get_config_path()
     if not path.exists():
@@ -204,6 +241,7 @@ def load_config() -> AppConfig:
         theme=raw.get("theme", "flatly"),
         recent_queries=raw.get("recent_queries", []),
         saved_queries=[SavedQuery(**q) for q in raw.get("saved_queries", [])],
+        email=_load_email(raw.get("email")),
     )
     if ai_upgraded:
         save_config(cfg)
@@ -220,5 +258,6 @@ def save_config(cfg: AppConfig) -> None:
         "theme": cfg.theme,
         "recent_queries": cfg.recent_queries,
         "saved_queries": [asdict(q) for q in cfg.saved_queries],
+        "email": asdict(cfg.email),
     }
     get_config_path().write_text(json.dumps(raw, indent=2), encoding="utf-8")

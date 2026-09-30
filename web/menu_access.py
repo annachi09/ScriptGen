@@ -54,7 +54,7 @@ from web.auth import ROLES, ROLE_ADMIN
 # these ARE the ids used everywhere (server config, the admin panel, and
 # the frontend's own nav-item lookup), so there's exactly one place
 # (here) that has to change if a page is ever added/renamed/removed.
-MENU_IDS = ("overview", "workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "readingvalidation", "tnbcycledisc", "wrongstuckhierarchy", "disconnectiontnb", "doubleitb", "wrongbilledconsumption", "billissuance", "incorrectbillingperiod", "bulkchecker", "tools", "settings")
+MENU_IDS = ("overview", "workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "readingvalidation", "tnbcycledisc", "wrongstuckhierarchy", "disconnectiontnb", "doubleitb", "wrongbill", "wrongbilledconsumption", "billissuance", "incorrectbillingperiod", "bulkchecker", "tools", "settings")
 
 MENU_LABELS = {
     "overview": "Overview",
@@ -70,6 +70,7 @@ MENU_LABELS = {
     "wrongstuckhierarchy": "Wrong Stuck in Hierarchy ITB",
     "disconnectiontnb": "Disconnection TNB",
     "doubleitb": "DOUBLE ITB",
+    "wrongbill": "Wrong Bill",
     "wrongbilledconsumption": "Wrong Billed Consumption",
     "billissuance": "Bill Issuance Validator",
     "incorrectbillingperiod": "Incorrect Billing Period",

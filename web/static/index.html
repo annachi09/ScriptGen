@@ -102,6 +102,9 @@
         <button class="nav-item" data-page="doubleitb" title="DOUBLE ITB">
           <span class="nav-icon">👯</span><span class="nav-label">DOUBLE ITB</span>
         </button>
+        <button class="nav-item" data-page="wrongbill" title="Wrong Bill">
+          <span class="nav-icon">🚨</span><span class="nav-label">Wrong Bill</span>
+        </button>
         <button class="nav-item" data-page="wrongbilledconsumption" title="Wrong Billed Consumption">
           <span class="nav-icon">⚖️</span><span class="nav-label">Wrong Billed Consumption</span>
         </button>
@@ -1103,6 +1106,87 @@
         </div>
       </section>
 
+      <!-- ===== Wrong Bill CASE 1 - Unusual high Sanitary (RJ 2026-09-30) ===== -->
+      <section class="page" id="page-wrongbill">
+        <header class="page-header">
+          <h1>🚨 Wrong Bill</h1>
+          <p class="page-subtitle">CRITICAL — wrongly issued bills that need rebilling as early as possible. One tab per case.</p>
+        </header>
+
+        <nav class="da-subnav wb-subnav">
+          <button type="button" class="da-subnav-btn is-active" data-wb-sub="case1">Case 1 - Unusual high Sanitary <span class="wb-tab-count" data-wb-count="case1">…</span></button>
+        </nav>
+
+        <div class="da-subpage is-active" data-wb-sub="case1">
+        <details class="hx-info">
+          <summary>ℹ️ About this case</summary>
+          <div class="hx-info-body">
+            <p><strong>What it finds.</strong> Bills with ID_BILLING_PERIOD &gt; 10000000228 that carry a <code>SANITARY</code> billing concept, are not Rebilled (ESTFAC0042) or Cancelled (ESTFAC0007), and whose TOTAL_AMOUNT is above 14,158. BASE = TOTAL_AMOUNT / 0.155. NISS comes from the account's Water contracted service.</p>
+            <p><strong>Compared with the Water bill.</strong> A bill is only listed when its amount is <strong>greater than the Water bill</strong> of the same payment form (GCCOM_BILL.ID_PAYMENT_FORM) with the same billing period and billing date, on a Water (19) contracted service, not a credit note and not Cancelled / Rebilled. Several Water bills are summed. No Water bill = not listed.</p>
+            <p><strong>E-mail alert.</strong> While ScriptGen is running, it checks every day from the configured hour (default 7:00) and retries every few minutes until that day's e-mail has been sent. The e-mail goes only when cases are found, with the list attached as CSV. SMTP settings are in <em>Settings › Email alerts</em>.</p>
+          </div>
+        </details>
+
+        <div class="hx-commandbar">
+          <button type="button" class="btn btn-primary" id="usan-detect-btn">🔍 Scan</button>
+          <div class="hx-summary">
+            <span id="usan-summary">Click Scan to find unusual high Sanitary bills.</span>
+            <span id="usan-filtered-count" class="hx-filtered"></span>
+          </div>
+          <button type="button" class="btn btn-pill" id="usan-export-btn" disabled>⬇ Export CSV</button>
+        </div>
+
+        <div class="hx-dashboard" id="usan-dash" hidden></div>
+
+        <div class="card hx-card">
+          <details class="hx-filters" id="usan-filters" open hidden>
+            <summary>
+              <span>⚙️ Filters</span>
+              <button type="button" class="btn btn-pill-sm" id="usan-filter-clear-btn">✕ Clear</button>
+            </summary>
+            <div class="hx-filter-grid">
+              <label class="hx-field hx-field-wide">
+                <span>Search</span>
+                <input id="usan-filter-search" class="text-input text-input-sm" placeholder="Account, NISS, bill id, bill number…" />
+              </label>
+              <label class="hx-field">
+                <span>Billing period</span>
+                <select id="usan-filter-bp" class="text-input text-input-sm"><option value="">All</option></select>
+              </label>
+              <label class="hx-field">
+                <span>Bill status</span>
+                <select id="usan-filter-status" class="text-input text-input-sm"><option value="">All</option></select>
+              </label>
+            </div>
+          </details>
+
+          <div class="grid-wrap hx-grid">
+            <table class="data-grid" id="usan-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card hx-card usan-alert-card">
+          <div class="usan-alert-head">
+            <h3>📧 Daily e-mail alert</h3>
+            <div class="usan-alert-actions">
+              <button type="button" class="btn btn-pill" id="usan-alert-refresh-btn">↻ Status</button>
+              <button type="button" class="btn btn-primary" id="usan-send-now-btn">📨 Check &amp; send e-mail now</button>
+            </div>
+          </div>
+          <p class="hint-text" id="usan-alert-summary">Loading alert status…</p>
+          <div class="grid-wrap">
+            <table class="data-grid" id="usan-alert-log">
+              <thead><tr><th>Attempted</th><th>Status</th><th>Rows</th><th>Detail</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        </div><!-- /case1 -->
+      </section>
+
       <!-- ===== DOUBLE ITB page (RJ 2026-09-27) ===== -->
       <section class="page" id="page-doubleitb">
         <header class="page-header">
@@ -1358,6 +1442,7 @@
               max
               <input type="number" id="billiss-ahead-max" class="text-input text-input-sm" style="width:64px;" min="1" max="11" value="11" />
             </label>
+            <button type="button" class="btn btn-pill-sm" data-hx-clear-row title="Reset every filter in this row">✕ Clear filters</button>
           </div>
 
           <div class="grid-wrap" style="margin-top:12px;">
@@ -1439,9 +1524,18 @@
 
           <div class="kpi-row" id="biss2-kpi-row" style="margin:18px 0 4px;"></div>
 
+          <!-- RJ 2026-09-30: sub-tabs for the known Case 2 combinations -->
+          <div class="biss2-tabs" id="biss2-tabs" role="tablist">
+            <button type="button" class="biss2-tab is-active" data-biss2-tab="missing-rate">❓ Missing Rate bill <span class="biss2-tab-count" data-count="missing-rate">0</span></button>
+            <button type="button" class="biss2-tab" data-biss2-tab="period-mismatch">🔧 Needs action - period mismatch <span class="biss2-tab-count" data-count="period-mismatch">0</span></button>
+            <button type="button" class="biss2-tab" data-biss2-tab="complete">✅ Already complete <span class="biss2-tab-count" data-count="complete">0</span></button>
+            <button type="button" class="biss2-tab" data-biss2-tab="all">All <span class="biss2-tab-count" data-count="all">0</span></button>
+          </div>
+          <div class="hint-text" id="biss2-tab-hint"></div>
+
           <div class="key-panel-row" style="margin:10px 0 0;gap:16px;flex-wrap:wrap;align-items:center;">
             <input type="text" id="biss2-search" class="text-input text-input-sm" placeholder="Search account #..." style="width:200px;" />
-            <label class="field-label" style="display:flex;align-items:center;gap:6px;">
+            <label class="field-label" id="biss2-status-wrap" style="display:flex;align-items:center;gap:6px;">
               Status
               <select id="biss2-status-filter" class="text-input text-input-sm" style="width:200px;">
                 <option value="needs-action" selected>Needs action (all reasons)</option>
@@ -1455,6 +1549,13 @@
               <input type="checkbox" id="biss2-missing-bill-only" />
               Missing bill only
             </label>
+            <label class="field-label" style="display:flex;align-items:center;gap:6px;" title="Accounts where THIS service's final bill is missing">
+              Missing bill:
+              <select id="biss2-missing-service" class="text-input text-input-sm">
+                <option value="">Any</option>
+              </select>
+            </label>
+            <button type="button" class="btn btn-pill-sm" data-hx-clear-row title="Reset every filter in this row">✕ Clear filters</button>
           </div>
 
           <div class="grid-wrap" style="margin-top:12px;">
@@ -1465,6 +1566,7 @@
                 <th class="stats-table-th-sortable" data-sort="reference">Account</th>
                 <th class="stats-table-th-sortable" data-sort="service_count">Services</th>
                 <th class="stats-table-th-sortable" data-sort="needs_update_count">Need Update</th>
+                <th class="stats-table-th-sortable" data-sort="missing_bill_count">Missing Bill</th>
                 <th class="stats-table-th-sortable" data-sort="target_period">Target Period</th>
                 <th class="stats-table-th-sortable" data-sort="complete">Status</th>
               </tr></thead>
@@ -1539,6 +1641,7 @@
                 <option value="no">NO</option>
               </select>
             </label>
+            <button type="button" class="btn btn-pill-sm" data-hx-clear-row title="Reset every filter in this row">✕ Clear filters</button>
           </div>
 
           <div class="grid-wrap" style="margin-top:12px;">
@@ -1584,6 +1687,7 @@
 
           <div class="key-panel-row" style="margin:10px 0 0;gap:16px;flex-wrap:wrap;align-items:center;">
             <input type="text" id="biss4-search" class="text-input text-input-sm" placeholder="Search account #..." style="width:200px;" />
+            <button type="button" class="btn btn-pill-sm" data-hx-clear-row title="Reset every filter in this row">✕ Clear filters</button>
           </div>
 
           <div class="grid-wrap" style="margin-top:12px;">
@@ -1985,6 +2089,32 @@
               <span class="hint-text" id="conn-test-result"></span>
             </div>
           </form>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>📧 Email alerts</h2></div>
+          <p class="hint-text">SMTP account ScriptGen uses to send alert e-mails (Wrong Bill CASE 1 - Unusual high Sanitary). For Gmail use smtp.gmail.com, port 587, TLS on, and a Google <em>App password</em> (not your normal password). Alerts only run while ScriptGen is running.</p>
+          <div class="form-grid">
+            <div><label class="field-label">SMTP host</label><input id="em-host" class="text-input" placeholder="smtp.gmail.com" /></div>
+            <div><label class="field-label">Port</label><input id="em-port" class="text-input" type="number" value="587" /></div>
+            <div><label class="field-label">Username</label><input id="em-username" class="text-input" autocomplete="off" /></div>
+            <div><label class="field-label">Password</label><input id="em-password" class="text-input" type="password" autocomplete="new-password" placeholder="(leave blank to keep existing)" /></div>
+            <div><label class="field-label">From address (blank = username)</label><input id="em-from" class="text-input" /></div>
+            <div class="form-grid-wide"><label class="field-label">Recipients (separate with ; or ,)</label><input id="em-recipients" class="text-input" /></div>
+            <div><label class="field-label">Daily start hour (0-23)</label><input id="em-hour" class="text-input" type="number" min="0" max="23" value="7" /></div>
+            <div><label class="field-label">Retry every (minutes)</label><input id="em-retry" class="text-input" type="number" min="1" value="15" /></div>
+          </div>
+          <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:8px;">
+            <input type="checkbox" id="em-tls" checked /> Use STARTTLS (port 465 always uses SSL)
+          </label>
+          <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:4px;">
+            <input type="checkbox" id="em-enabled" checked /> Daily alert enabled
+          </label>
+          <div class="generate-row">
+            <button type="button" class="btn btn-primary" id="em-save-btn">Save</button>
+            <button type="button" class="btn btn-secondary" id="em-test-btn">Send test e-mail</button>
+            <span class="hint-text" id="em-result"></span>
+          </div>
         </div>
 
         <div class="card">

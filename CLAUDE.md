@@ -42,6 +42,21 @@ already authenticated into the running app. `mcp__workspace__bash` /
 pytest are NOT used for SQL validation — the shell sandbox can't reach the
 tunnel DB, only the app's own Windows process can.
 
+## Standing rule: always say whether a restart is needed (RJ, 2026-09-30)
+
+"always tell me if i need to restart like before". End every change with
+an explicit line: **Restart needed** (any change to Python - web/server.py,
+app/core/*, web/*.py - the server doesn't auto-reload) or **No restart,
+just refresh (Ctrl+F5)** (only web/static files changed).
+
+## Standing rule: always run the unit tests (RJ, 2026-09-30)
+
+STOPPED - RJ, 2026-09-30 (later same day): "just do your usual test, no
+need for the unit test". Don't run pytest by default any more; keep the
+usual verification (live-checking queries / the running app via
+`/api/query/run` and the browser). Earlier the same day he had asked for
+unit tests by default "just stop when i say" - this is that stop.
+
 ## Code shape
 
 - `app/core/*.py` modules are pure logic: they build SQL text and never

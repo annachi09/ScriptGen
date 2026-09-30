@@ -691,3 +691,67 @@ def test_build_unclassified_query_no_limit_omits_top_clause():
 def test_build_unclassified_query_orders_by_reference_and_period():
     sql = biv.build_unclassified_query()
     assert "ORDER BY pf.REFERENCE, b.ID_BILLING_PERIOD;" in sql
+
+
+# ---------------- Case 2: missing Rate bill -> anomaly INSERTs (2026-09-30) ----------------
+
+def test_case2_query_returns_contracted_service_id():
+    sql = biv.build_terminated_period_mismatch_query()
+    assert "f.ID_OFFERED_SERVICE, f.ID_CONTRACTED_SERVICE," in sql
+
+
+def test_missing_rate_bill_context_query():
+    sql = biv.build_missing_rate_bill_context_query([900176, "900177", None])
+    assert "WHERE cs.ID_CONTRACTED_SERVICE IN (900176, 900177)" in sql
+    assert "SELECT TOP 1 bs.ID_BILLING_SERVICE FROM OUC_COMMON_ADMIN.GCCOM_BILLING_SERVICE bs" in sql
+    assert "ORDER BY CASE WHEN bs.BILL_SERV_STATUS = 'ESTSF00000' THEN 1 ELSE 0 END, bs.ID_BILLING_SERVICE DESC" in sql
+    assert "b.BILLING_STATUS = 'ESTFAC0005'" in sql
+    assert "NOT IN" not in sql
+    assert "ISNULL(b.BILLING_TYPE, '') <> 'TIPFAC0011'" in sql
+    assert "b.BILLING_DATE < DATEADD(DAY, 1, CAST(cs.END_DATE AS DATE))" in sql
+    assert "ORDER BY b.BILLING_DATE DESC, b.ID_BILL DESC" in sql
+
+
+def test_missing_rate_bill_context_query_needs_ids():
+    import pytest
+    with pytest.raises(ValueError):
+        biv.build_missing_rate_bill_context_query([None])
+
+
+def _rate_svc(**kw):
+    base = {"id_contracted_service": 900176, "reference": "3427021", "id_billing_service": 800176,
+            "termination_date": "2026-07-01", "last_billing_date": "2026-06-30 00:00:00"}
+    base.update(kw)
+    return base
+
+
+def test_missing_rate_anomaly_script_values():
+    res = biv.build_missing_rate_anomaly_script([_rate_svc(), _rate_svc(id_contracted_service=2, id_billing_service=801)])
+    assert res.anomaly_count == 2
+    sql = res.sql_text
+    assert "DECLARE @ID_ANOMALOUS_1 NUMERIC(15, 0) = NEXT VALUE FOR OUC_ADMIN.SEC_GCCOM_ANOMALOUS1;" in sql
+    assert "DECLARE @ID_ANOMALOUS_2" in sql
+    assert "'MISSING_RATE_BILL_TERRMI', 1, @ID_ANOMALOUS_1, 'ESTAN00001', 8, 800176, 'TIPFAC0001'" in sql
+    assert "'2026-07-01', null, null, null, null, '2026-07-01'" in sql
+    assert "NULL, 1, '2026-06-30', 'ANOMMOT000', 'ANRETYP000'" in sql
+    assert "@ID_ANOMALOUS_2, 801, 8" in sql
+    assert "'There is any delivery note pending to confirm'" in sql
+    assert res.warnings == []
+
+
+def test_missing_rate_anomaly_script_warnings():
+    res = biv.build_missing_rate_anomaly_script([
+        _rate_svc(last_billing_date="2026-07-15"),
+        _rate_svc(id_contracted_service=3, last_billing_date=None),
+        _rate_svc(id_contracted_service=4, id_billing_service=None),
+    ])
+    assert res.anomaly_count == 2
+    assert any("after termination" in w for w in res.warnings)
+    assert any("LAST_BILLING_DATE is NULL" in w for w in res.warnings)
+    assert any("skipped" in w for w in res.warnings)
+    assert "NULL, 1, NULL, 'ANOMMOT000'" in res.sql_text
+
+
+def test_missing_rate_anomaly_script_clean():
+    res = biv.build_missing_rate_anomaly_script([_rate_svc()], clean=True)
+    assert not any(line.strip().startswith("--") for line in res.sql_text.split("\n"))

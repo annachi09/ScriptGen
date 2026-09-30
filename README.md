@@ -1696,6 +1696,92 @@ alone was silently mis-flagging the large majority of these accounts - not becau
 actually broken, but because the query itself couldn't see their real final bill. Account 1059650711
 itself: all 4 services now show `NEEDS_UPDATE = 0`, confirmed live.
 
+## Bill Issuance Validator Case 2: missing Rate bill -> anomaly INSERTs (2026-09-30)
+
+RJ: "For Case 2, I need a new update script for those account that needs
+action, if the problematic bill is rate and no bill found we need to insert
+anomaly AND DETECTED ANOMALY" (RJ supplied both INSERTs).
+
+- Case 2's Generate script now also covers flagged services with
+  ID_OFFERED_SERVICE 176 (Rate) and no bill on the termination date
+  (previously skipped with a warning). Per such service:
+  `DECLARE @ID_ANOMALOUS_n = NEXT VALUE FOR OUC_ADMIN.SEC_GCCOM_ANOMALOUS1` (RJ corrected the schema from OUC_COMMON_ADMIN),
+  then RJ's `GCCOM_ANOMALOUS` INSERT and his `GCCOM_DETECTED_ANOMALY`
+  INSERT (which uses @ID_ANOMALOUS_n). Program `MISSING_RATE_BILL_TERRMI`,
+  user `RMA`. Run the script as one batch.
+- Filled values: ID_BILLING_SERVICE = latest
+  `OUC_COMMON_ADMIN.GCCOM_BILLING_SERVICE` row for the Rate contracted
+  service; BILLING_DATE and DETECTION_DATE = termination date
+  (`GCCOM_CONTRACTED_SERVICE.END_DATE`, date part); LAST_BILLING_DATE =
+  BILLING_DATE of the service's latest **Invoiced (ESTFAC0005)** bill dated
+  on/before the contract END_DATE, not a Credit Note (TIPFAC0011) - RJ
+  follow-up: "only up to the contract end date, where status is invoiced",
+  **plus 1 day** (RJ, same day: "the last_billing_date should be + 1";
+  e.g. last invoiced bill 2026-08-31 -> LAST_BILLING_DATE '2026-09-01').
+  Live: accounts 120753 / 149009 went from 2026-09-30 (Compensated bills
+  after termination) to 2026-08-31.
+- Billing service: the non-Cancelled one is preferred (BILL_SERV_STATUS
+  ESTSF00000 = Cancelled). Live: 43 contracted services have 2 billing
+  services, all Sanitary (190), e.g. contracted service 20821455 (account
+  110239292): 20821439 Cancelled + 21020899 Drop -> 21020899.
+- Warnings in the script header: no Invoiced previous bill
+  (LAST_BILLING_DATE NULL) or no billing service (skipped).
+- Detect query now also returns ID_CONTRACTED_SERVICE. Live 2026-09-30: 134
+  Rate services with no bill in the default 60-day window.
+- Response has `anomaly_count`; the toast shows it.
+- **Billing-service status + revert (same day):** "add an update of the
+  billing_service status to status ESTSF00004 from status ESTSF00005, then
+  at the end ... create a revert script". Per Rate service whose billing
+  service is Drop (ESTSF00005), before its INSERTs:
+  `UPDATE ... GCCOM_BILLING_SERVICE SET BILL_SERV_STATUS = 'ESTSF00004'`
+  (Pending to drop) + audit columns `WHERE ID_BILLING_SERVICE = n AND
+  BILL_SERV_STATUS = 'ESTSF00005'`. At the very end, one revert UPDATE
+  (all moved ids -> back to ESTSF00005, program `..._REVERT`, only where
+  still ESTSF00004), wrapped in `/* ... */` so running the whole script
+  never executes it; clean mode keeps it. Live: 70 of 132 Rate billing
+  services are Drop, 62 already Pending to drop (untouched).
+- **Sub-tabs (same day):** "create sub tab for the known combination of
+  case 2: 1. Accounts with missing rate bill, 2 is accounts needing action
+  period mismatch, 3 accounts already complete" (+ All). Each tab shows its
+  count, is the table's primary filter (the Status dropdown only shows on
+  All), and drives Generate: nothing selected = every account on the tab;
+  `mode` = `missing_rate` (anomaly INSERTs + COD_PERIODICITY fix only) or
+  `period_mismatch` (period UPDATEs only); Complete has nothing to
+  generate. Live 2026-09-30 (60-day window): Missing Rate 133, period
+  mismatch 0, complete 0, All 134.
+- **COD_PERIODICITY fix (same day):** "add another script only if the
+  GCCOM_BILLING_SERVICE.COD_PERIODICITY is null" - after a service's two
+  INSERTs, when its billing service's COD_PERIODICITY is NULL, RJ's
+  `UPDATE oucewa.OUC_COMMON_ADMIN.GCCOM_BILLING_SERVICE SET COD_PERIODICITY
+  = 'TIPER00001' WHERE ID_BILLING_SERVICE = n and COD_PERIODICITY is null;`
+  is added. Live 2026-09-30: 45 of the 134 Rate billing services are NULL
+  (e.g. 1005711 / account 120753), 89 already TIPER00001.
+- **Missing-bill indicator + filter (same day):** "an indicator to see
+  immediately what is the missing bill ... a filter on which bill is
+  missing". Each Case 2 account now carries `missing_services` (offered-
+  service names with no final bill, e.g. ["Rate"]); the table has a
+  "Missing Bill" column of pills (Rate in red - the one Generate adds the
+  anomaly INSERTs for; others amber), the drill-down names the missing
+  bill, a "Missing bill:" dropdown (built from the scan, with counts)
+  filters by it, and the CSV has `missing_bills`. Live 2026-09-30: 134 of
+  the 135 missing-bill accounts are missing the Rate bill.
+
+## Bill Issuance Validator: case priority / no overlap (2026-09-30)
+
+RJ: "what is in case 1 should not be in 2, 3, 4, and case 4 should not have
+case 1, 2, 3". An account belongs to the FIRST case that flags it:
+Case 1 (Stuck Bills + New Contract Match) > Case 2 > Case 3 > Case 4.
+
+- Case 2 detect AND generate drop accounts in Case 1 (`_biss_case1_ids`);
+  the response carries `excluded_case1_accounts` (shown on the summary).
+- Case 3 detect drops accounts in Case 1 or Case 2 (`_biss_case2_ids`, all
+  time); response `excluded_higher_case_accounts`.
+- Case 4 already excluded Case 1 + New Contract Match + Case 2 (all time) +
+  Case 3 - unchanged.
+- Live 2026-09-30: Case 1 0, New Contract Match 0, Case 2 134 (60 days) /
+  138 (all time), Case 3 0, Case 4 304 - no overlaps today; the rule now
+  holds structurally for when Case 1 / 3 have rows again.
+
 ## Bill Issuance Validator Case 3: All Contract Status - Bills Complete (2026-09-14)
 
 RJ, verbatim: "for the third case of bill issuance validator we will call it 'All Contract Status -
@@ -2839,6 +2925,39 @@ classes prefixed `hx-`); no server or query changes.
   (Esc closes the top-most first), and lock page scroll while open. The
   reading-history pop-out is shared with Bulk Checker, which gets the
   same maximize button.
+
+## Wrong Bill menu - Case 1: Unusual high Sanitary + daily e-mail alert (2026-09-30)
+
+Menu 🚨 **Wrong Bill** (menu id `wrongbill`) with one tab per case; each tab shows its count badge
+(red when > 0, green when 0). All tabs are scanned on the first visit so every badge fills in.
+To add a case: a `.da-subnav-btn[data-wb-sub=caseN]` with a `[data-wb-count=caseN]` badge, a
+`.da-subpage[data-wb-sub=caseN]`, an entry in `WB_TABS` (app.js) and in `HX_REFRESH.wrongbill`.
+Case 1 is also the first, red **Critical** card on Overview (pulses when the count is above 0).
+
+- **Query** (`app/core/unusual_sanitary.py`, RJ's SQL): bills with `ID_BILLING_PERIOD > 10000000228`
+  that have a `SANITARY` billing concept, are not Rebilled (ESTFAC0042) / Cancelled (ESTFAC0007), and
+  `TOTAL_AMOUNT > 14158`. `BASE = TOTAL_AMOUNT / 0.155`. NISS comes from the Water (19) contracted service.
+- **Water comparison** (RJ round 2): only kept when the sanitary bill's TOTAL_AMOUNT is **greater than
+  the Water bill** found by the same `GCCOM_BILL.ID_PAYMENT_FORM`, same `ID_BILLING_PERIOD` and
+  `BILLING_DATE`, on a Water (19) contracted service, not a credit note (TIPFAC0011), not
+  Cancelled/Rebilled. Several Water bills are summed; no Water bill = excluded. Extra columns:
+  WATER_ID_BILL, WATER_BILL_COUNT, WATER_TOTAL_AMOUNT, SANITARY_MINUS_WATER. Live 2026-09-30: 0 rows
+  (the only 2 bills > 14,158, account 1040244947, are below their water bills), ~2.7s.
+- **Page**: Scan, tiles, search / billing period / status filters + Clear, sortable table, CSV export,
+  and a "Daily e-mail alert" panel (status, last attempts, **Check & send e-mail now**).
+- **E-mail alert** (`web/alerts.py`): a background thread started with the server. From
+  `send_hour` (default 7:00 local) it runs the query every `retry_minutes` (default 15) until that
+  day's e-mail is **sent** successfully (once per day). No cases → nothing sent, it keeps checking that day.
+  Errors (tunnel down, SMTP failure) are logged and retried. Every attempt is logged in the internal
+  SQLite table `_scriptgen_alert_log`. The e-mail tells RJ to review and apply rebilling ASAP and
+  attaches the cases as CSV. **Only runs while ScriptGen is running.**
+- **Settings › Email alerts** (admin): SMTP host/port/TLS/username/password/from, recipients
+  (default dev.rj.magdurulan@gmail.com; rjmagdurulan@indracompany.com), enabled, start hour, retry
+  minutes, **Send test e-mail**. The password is Fernet-encrypted in `data/config.json`
+  (or set env `SCRIPTGEN_SMTP_PASSWORD`). Gmail: smtp.gmail.com, 587, TLS, Google App password.
+- **Routes**: `POST /api/unusual-sanitary/detect`, `GET /api/alerts/unusual-sanitary/status`,
+  `POST /api/alerts/unusual-sanitary/send-now` (editor), `GET/POST /api/settings/email`,
+  `POST /api/settings/email/test` (admin).
 
 ## Wrong Billed Consumption (2026-09-27)
 

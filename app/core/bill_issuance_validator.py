@@ -1210,7 +1210,7 @@ def build_terminated_period_mismatch_query(
         f"  WHERE cs.ID_PAYMENT_FORM IN (SELECT DISTINCT ID_PAYMENT_FORM FROM terminated_services)\n"
         f"  GROUP BY cs.ID_PAYMENT_FORM\n"
         f")\n"
-        f"SELECT {top_clause}f.ID_PAYMENT_FORM, pf.REFERENCE, f.ID_OFFERED_SERVICE,\n"
+        f"SELECT {top_clause}f.ID_PAYMENT_FORM, pf.REFERENCE, f.ID_OFFERED_SERVICE, f.{CONTRACTED_SERVICE_PK_COLUMN},\n"
         f"  f.END_DATE, f.ID_BILL, f.ID_BILLING_PERIOD, f.BILLING_STATUS,\n"
         f"  f.TARGET_PERIOD, f.NEEDS_UPDATE, f.ACCOUNT_HAS_ISSUE\n"
         f"FROM flagged f\n"
@@ -1528,3 +1528,240 @@ def build_terminated_period_fix_script(
         statement_count=len(stmts),
         warnings=warnings,
     )
+
+
+# ---------------------------------------------------------------------
+# Case 2 - missing Rate bill -> insert anomaly (RJ, 2026-09-30):
+# "For Case 2, I need a new update script for those account that needs
+# action, if the problematic bill is rate and no bill found we need to
+# insert anomaly AND DETECTED ANOMALY". RJ supplied the two INSERTs; the
+# quoted placeholders are filled as he described:
+#   ID_BILLING_SERVICE - "the ID_BILLING_SERVICE of our Rate service":
+#       OUC_COMMON_ADMIN.GCCOM_BILLING_SERVICE.ID_BILLING_SERVICE for the
+#       Rate contracted service (latest one - live: 4,679,252 contracted
+#       services have exactly 1, only 43 have 2);
+#   BILLING_DATE / DETECTION_DATE - the termination date
+#       (GCCOM_CONTRACTED_SERVICE.END_DATE, date part);
+#   LAST_BILLING_DATE - (RJ follow-up: "+ 1") the day AFTER the BILLING_DATE of the service's latest Invoiced
+#       (ESTFAC0005), non-credit-note (TIPFAC0011) bill dated on/before the
+#       contract END_DATE (RJ follow-up: "only up to the contract end date,
+#       where status is invoiced");
+#   GCCOM_DETECTED_ANOMALY.ID_ANOMALOUS - the id from the first INSERT, via
+#       a variable filled from the same sequence RJ's script uses.
+# Live 2026-09-30: 134 Rate services with no bill in the 60-day Case 2 window.
+# ---------------------------------------------------------------------
+ANOMALY_PROGRAM_MISSING_RATE = "MISSING_RATE_BILL_TERRMI"
+ANOMALY_USER = "RMA"
+# Cancelled (ESTFAC0007), Cancel and refund (0017), Disputed and Rebilled
+# (0028), Rebilled (0042), Rebilled For Back Dated process (0050), Rebilled
+# Swapped Meters (0051) - live GCCOM_BILL_STATUS descriptions.
+LAST_BILL_EXCLUDED_STATUSES = ("ESTFAC0007", "ESTFAC0017", "ESTFAC0028", "ESTFAC0042", "ESTFAC0050", "ESTFAC0051")
+BILLING_TYPE_CREDIT_NOTE = "TIPFAC0011"
+BILLING_SERVICE_TABLE = "GCCOM_BILLING_SERVICE"  # OUC_COMMON_ADMIN
+BILL_SERV_STATUS_CANCELLED = "ESTSF00000"  # GCCOM_BILL_SERV_STATUS, live: Cancelled
+
+
+def build_missing_rate_bill_context_query(contracted_service_ids: Iterable[Any]) -> str:
+    """Per Rate contracted service: its billing service, termination date
+    and the latest valid bill's BILLING_DATE (LAST_BILLING_DATE)."""
+    ids = sorted({int(x) for x in contracted_service_ids if x is not None})
+    if not ids:
+        raise ValueError("No contracted services given.")
+    id_list = ", ".join(str(i) for i in ids)
+    cs_tbl = _qualified(BILL_SCHEMA, CONTRACTED_SERVICE_TABLE)
+    bs_tbl = _qualified(BILL_SCHEMA, BILLING_SERVICE_TABLE)
+    bill_tbl = _qualified(BILL_SCHEMA, BILL_TABLE)
+    # RJ, 2026-09-30 (follow-up): "for the last billing dates, only up to the
+    # contract end date, where status is invoiced" - latest INVOICED
+    # (ESTFAC0005) non-credit-note bill with BILLING_DATE on/before the
+    # contracted service's END_DATE (date part). Replaces the earlier
+    # "not cancelled / not rebilled" exclusion list.
+    # Billing service: prefer a non-Cancelled one (BILL_SERV_STATUS
+    # ESTSF00000 = Cancelled). Live: the 43 contracted services with 2
+    # billing services are all Sanitary (190), typically one Cancelled +
+    # one Drop - e.g. 20821455: 20821439 (Cancelled) / 21020899 (Drop).
+    return (
+        f"SELECT cs.ID_CONTRACTED_SERVICE, cs.ID_PAYMENT_FORM, CAST(cs.END_DATE AS DATE) AS TERMINATION_DATE,\n"
+        f"  (SELECT TOP 1 bs.ID_BILLING_SERVICE FROM {bs_tbl} bs WHERE bs.ID_CONTRACTED_SERVICE = cs.ID_CONTRACTED_SERVICE\n"
+        f"     ORDER BY CASE WHEN bs.BILL_SERV_STATUS = {format_sql_literal(BILL_SERV_STATUS_CANCELLED)} THEN 1 ELSE 0 END, bs.ID_BILLING_SERVICE DESC) AS ID_BILLING_SERVICE,\n"
+        f"  (SELECT TOP 1 bs.COD_PERIODICITY FROM {bs_tbl} bs WHERE bs.ID_CONTRACTED_SERVICE = cs.ID_CONTRACTED_SERVICE\n"
+        f"     ORDER BY CASE WHEN bs.BILL_SERV_STATUS = {format_sql_literal(BILL_SERV_STATUS_CANCELLED)} THEN 1 ELSE 0 END, bs.ID_BILLING_SERVICE DESC) AS COD_PERIODICITY,\n"
+        f"  (SELECT TOP 1 bs.BILL_SERV_STATUS FROM {bs_tbl} bs WHERE bs.ID_CONTRACTED_SERVICE = cs.ID_CONTRACTED_SERVICE\n"
+        f"     ORDER BY CASE WHEN bs.BILL_SERV_STATUS = {format_sql_literal(BILL_SERV_STATUS_CANCELLED)} THEN 1 ELSE 0 END, bs.ID_BILLING_SERVICE DESC) AS BILL_SERV_STATUS,\n"
+        # RJ 2026-09-30: "the last_billing_date should be + 1" - the day after
+        # the last invoiced bill's BILLING_DATE goes into GCCOM_ANOMALOUS.
+        f"  lb.ID_BILL AS LAST_ID_BILL, lb.BILLING_DATE AS LAST_BILL_DATE,\n"
+        f"  DATEADD(DAY, 1, CAST(lb.BILLING_DATE AS DATE)) AS LAST_BILLING_DATE\n"
+        f"FROM {cs_tbl} cs\n"
+        f"OUTER APPLY (\n"
+        f"  SELECT TOP 1 b.ID_BILL, b.BILLING_DATE FROM {bill_tbl} b\n"
+        f"  WHERE b.ID_CONTRACTED_SERVICE = cs.ID_CONTRACTED_SERVICE\n"
+        f"    AND b.BILLING_STATUS = {format_sql_literal(BILL_STATUS_INVOICED)}\n"
+        f"    AND ISNULL(b.BILLING_TYPE, '') <> {format_sql_literal(BILLING_TYPE_CREDIT_NOTE)}\n"
+        f"    AND b.BILLING_DATE < DATEADD(DAY, 1, CAST(cs.END_DATE AS DATE))\n"
+        f"  ORDER BY b.BILLING_DATE DESC, b.ID_BILL DESC\n"
+        f") lb\n"
+        f"WHERE cs.ID_CONTRACTED_SERVICE IN ({id_list})\n"
+        f"ORDER BY cs.ID_PAYMENT_FORM, cs.ID_CONTRACTED_SERVICE;"
+    )
+
+
+def _date_only(v) -> str | None:
+    if v is None or v == "":
+        return None
+    if isinstance(v, (datetime.date, datetime.datetime)):
+        return v.strftime("%Y-%m-%d")
+    return str(v)[:10]
+
+
+# RJ, 2026-09-30: "add another script only if the GCCOM_BILLING_SERVICE.
+# COD_PERIODICITY is null" - his UPDATE, emitted per Rate billing service
+# whose COD_PERIODICITY is NULL (the WHERE also re-checks IS NULL).
+DEFAULT_COD_PERIODICITY = "TIPER00001"
+
+# RJ, 2026-09-30: "add an update of the billing_service status to status
+# ESTSF00004 from status ESTSF00005, then at the end, all the
+# id_billing_service updated, create a revert script". Live
+# GCCOM_BILL_SERV_STATUS: ESTSF00005 = Drop, ESTSF00004 = Pending to drop.
+# Only billing services currently in Drop are moved (the WHERE re-checks
+# it); the revert at the end puts exactly those back to Drop (ESTSF00005,
+# their original status). Live: 70 of the 132 Rate billing services are in
+# Drop, 62 already Pending to drop.
+BILL_SERV_STATUS_DROP = "ESTSF00005"
+BILL_SERV_STATUS_PENDING_DROP = "ESTSF00004"
+
+
+def _bill_serv_status_lines(id_billing_service, program: str, user: str) -> list[str]:
+    return [
+        f"-- Billing service {id_billing_service}: Drop (ESTSF00005) -> Pending to drop (ESTSF00004)",
+        f"UPDATE oucewa.OUC_COMMON_ADMIN.GCCOM_BILLING_SERVICE SET BILL_SERV_STATUS = {format_sql_literal(BILL_SERV_STATUS_PENDING_DROP)}, "
+        f"UPDATE_DATE = GETDATE(), UPDATE_USER = {format_sql_literal(user)}, UPDATE_PROGRAM = {format_sql_literal(program)} "
+        f"WHERE ID_BILLING_SERVICE = {id_billing_service} AND BILL_SERV_STATUS = {format_sql_literal(BILL_SERV_STATUS_DROP)};",
+        "",
+    ]
+
+
+def _bill_serv_revert_block(ids: list, program: str, user: str) -> str:
+    if not ids:
+        return ""
+    id_list = ", ".join(str(i) for i in ids)
+    return "\n".join([
+        "",
+        "-- ============================================================",
+        f"-- REVERT (run later): put the {len(ids)} billing service(s) updated above",
+        "-- back to Drop (ESTSF00005) - their status before this script.",
+        "-- ============================================================",
+        f"UPDATE oucewa.OUC_COMMON_ADMIN.GCCOM_BILLING_SERVICE SET BILL_SERV_STATUS = {format_sql_literal(BILL_SERV_STATUS_DROP)}, "
+        f"UPDATE_DATE = GETDATE(), UPDATE_USER = {format_sql_literal(user)}, UPDATE_PROGRAM = {format_sql_literal(program + '_REVERT')} "
+        f"WHERE ID_BILLING_SERVICE IN ({id_list}) AND BILL_SERV_STATUS = {format_sql_literal(BILL_SERV_STATUS_PENDING_DROP)};",
+        "",
+    ])
+
+
+def _periodicity_fix_lines(s: dict, id_billing_service) -> list[str]:
+    if "cod_periodicity" not in s or s.get("cod_periodicity") not in (None, ""):
+        return []
+    return [
+        "",
+        f"-- Billing service {id_billing_service}: COD_PERIODICITY is NULL",
+        f"UPDATE oucewa.OUC_COMMON_ADMIN.GCCOM_BILLING_SERVICE SET COD_PERIODICITY = {format_sql_literal(DEFAULT_COD_PERIODICITY)} "
+        f"WHERE ID_BILLING_SERVICE = {id_billing_service} and COD_PERIODICITY is null;",
+    ]
+
+
+@dataclass
+class MissingRateAnomalyScript:
+    sql_text: str
+    anomaly_count: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+
+def build_missing_rate_anomaly_script(
+    services: Iterable[dict],
+    *,
+    program: str = ANOMALY_PROGRAM_MISSING_RATE,
+    user: str = ANOMALY_USER,
+    clean: bool = False,
+) -> MissingRateAnomalyScript:
+    """RJ's two INSERTs (GCCOM_ANOMALOUS + GCCOM_DETECTED_ANOMALY) per Rate
+    service with no bill. `services` items: id_contracted_service,
+    id_payment_form, reference, id_billing_service, termination_date,
+    last_billing_date (from build_missing_rate_bill_context_query)."""
+    warnings: list[str] = []
+    blocks: list[str] = []
+    status_moved: list = []  # billing services moved Drop -> Pending to drop
+    n = 0
+    for s in services:
+        cs = s.get("id_contracted_service")
+        bsv = s.get("id_billing_service")
+        term = _date_only(s.get("termination_date"))
+        last = _date_only(s.get("last_billing_date"))
+        ref = s.get("reference") or s.get("id_payment_form") or ""
+        if bsv is None or term is None:
+            warnings.append(f"Contracted service {cs} (account {ref}): no billing service or termination date - skipped.")
+            continue
+        n += 1
+        var = f"@ID_ANOMALOUS_{n}"
+        note = []
+        if last is None:
+            note.append(f"-- WARNING: no valid previous bill found - LAST_BILLING_DATE left NULL")
+            warnings.append(f"Contracted service {cs} (account {ref}): no valid previous bill - LAST_BILLING_DATE is NULL.")
+        elif last > term:
+            note.append(f"-- WARNING: latest valid bill ({last}) is AFTER the termination date ({term}) - check LAST_BILLING_DATE")
+            warnings.append(f"Contracted service {cs} (account {ref}): latest valid bill {last} is after termination {term}.")
+        last_sql = format_sql_literal(last) if last else "NULL"
+        term_sql = format_sql_literal(term)
+        prog = format_sql_literal(program)
+        usr = format_sql_literal(user)
+        status_lines = []
+        if s.get("bill_serv_status") == BILL_SERV_STATUS_DROP:
+            status_lines = _bill_serv_status_lines(bsv, program, user)
+            status_moved.append(bsv)
+        blocks.append("\n".join([
+            f"-- Account {ref} - Rate contracted service {cs}, billing service {bsv}, terminated {term}, no Rate bill found",
+            *note,
+            *status_lines,
+            f"DECLARE {var} NUMERIC(15, 0) = NEXT VALUE FOR OUC_ADMIN.SEC_GCCOM_ANOMALOUS1;",  # RJ: correct schema is OUC_ADMIN
+            "INSERT INTO oucewa.OUC_ADMIN.GCCOM_ANOMALOUS (CREATE_DATE, UPDATE_DATE, UPDATE_USER, UPDATE_PROGRAM, OPTIMIST_LOCK,",
+            "                                              ID_ANOMALOUS, ANOMALOUS_STATUS, ID_PRINCIPAL_ANOMALY, ID_BILLING_SERVICE,",
+            "                                              BILLING_TYPE, BILLING_DATE, REMARKS, ID_BILL, RESOLUTION_TYPE,",
+            "                                              RESOLUTION_USER, DETECTION_DATE, RESOLUTION_DATE, IND_RECALCULATE,",
+            "                                              LAST_BILLING_DATE, MOTIVE, ANOM_RESOLUTION_TYPE, ID_LETTER_EVENT,",
+            "                                              ID_EMPLOYEE_CB, ID_ITEM_TO_BILL, SESSION_ID, EXPECTED_AMOUNT, ID_SERVREQ)",
+            f"VALUES (getdate(), getdate(), {usr},",
+            f"        {prog}, 1, {var}, 'ESTAN00001', 8, {bsv}, 'TIPFAC0001',",
+            f"        {term_sql}, null, null, null, null, {term_sql},",
+            f"        NULL, 1, {last_sql}, 'ANOMMOT000', 'ANRETYP000', null, null,",
+            "        null, NULL, NULL, null);",
+            "",
+            "INSERT INTO oucewa.OUC_ADMIN.GCCOM_DETECTED_ANOMALY (CREATE_DATE, UPDATE_DATE, UPDATE_USER, UPDATE_PROGRAM,",
+            "                                                     OPTIMIST_LOCK, ID_DETECTED_ANOMALY, ID_ANOMALOUS,",
+            "                                                     ID_BILLING_SERVICE, ID_ANOMALY_PARAM, COMMENTS, IND_ONLINE,",
+            "                                                     SESSION_ID, COD_ANOMALY_VALUE)",
+            f"VALUES (GETDATE(), GETDATE(), {usr},",
+            f"        {prog}, 1, NEXT VALUE FOR OUC_ADMIN.SEC_GCCOM_DETECTEDANOMALY1, {var}, {bsv}, 8,",
+            "        'There is any delivery note pending to confirm', null, null, null);",
+            *_periodicity_fix_lines(s, bsv),
+        ]))
+    header = [
+        "-- Bill Issuance Validator: Case 2 - missing Rate bill -> anomaly INSERTs",
+        f"-- Generated (UTC): {datetime.datetime.now(datetime.timezone.utc).isoformat()}",
+        f"-- Anomalies: {n}",
+        "-- Run the whole script as ONE batch (each @ID_ANOMALOUS_n variable links the",
+        "-- GCCOM_DETECTED_ANOMALY row to its GCCOM_ANOMALOUS row).",
+    ]
+    if status_moved:
+        header.append(f"-- Billing services moved Drop -> Pending to drop: {len(status_moved)} (revert at the end, commented out)")
+    for w in warnings:
+        header.append(f"-- WARNING: {w}")
+    header.append("")
+    body = "\n\n".join(blocks) if blocks else "-- Nothing to insert."
+    sql_text = "\n".join(header) + body + "\n\n-- Review the statements above before running them.\n"
+    if clean:
+        sql_text = _strip_sql_comments(sql_text)
+    # Revert goes LAST inside /* */ so running the whole script never
+    # executes it (and "clean" mode, which drops -- lines, keeps it).
+    revert = _bill_serv_revert_block(status_moved, program, user)
+    if revert:
+        sql_text = sql_text.rstrip("\n") + "\n\n/* REVERT - copy and run separately when needed:\n" + revert.strip("\n") + "\n*/\n"
+    return MissingRateAnomalyScript(sql_text=sql_text, anomaly_count=n, warnings=warnings)

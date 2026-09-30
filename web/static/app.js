@@ -252,6 +252,12 @@ $("#sign-out-btn").addEventListener("click", async () => {
 // heading instead of reading as 3 cards flatly mixed with unrelated areas.
 const OVERVIEW_CARDS = [
   {
+    // RJ 2026-09-30: critical - shown first, red, pulsing when > 0.
+    key: "unusualsanitary", icon: "🚨", label: "Wrong Bill · Case 1 - Unusual high Sanitary", color: "#ef4444",
+    desc: "CRITICAL: Sanitary bill > 14,158 and higher than the Water bill — rebill ASAP.",
+    page: "wrongbill", subAttr: "data-wb-sub", subValue: "case1", group: "Critical", critical: true,
+  },
+  {
     key: "dateanomaly", icon: "🩹", label: "DIFF DATES Anomaly", color: "#3b5bfd",
     desc: "Open billing/reading date anomalies system-wide.",
     page: "dateanomaly", subAttr: "data-da-sub", subValue: "detectall",
@@ -326,7 +332,7 @@ function overviewRenderCards(stats) {
         ? `<span class="overview-card-value is-empty">—</span>`
         : `<span class="overview-card-value">${value}</span>`;
       return (
-        `<button type="button" class="overview-card" style="--overview-accent:${c.color}" data-overview-card="${c.key}">` +
+        `<button type="button" class="overview-card${c.critical ? " overview-card-critical" : ""}${c.critical && Number(value) > 0 ? " is-alarm" : ""}" style="--overview-accent:${c.color}" data-overview-card="${c.key}">` +
         `<div class="overview-card-top"><span class="overview-card-icon">${c.icon}</span>${valueHtml}</div>` +
         `<div class="overview-card-label">${escapeHtml(c.label)}</div>` +
         `<div class="overview-card-desc">${escapeHtml(c.desc)}</div>` +
@@ -452,6 +458,7 @@ $$(".nav-item[data-page]").forEach((btn) => {
     if (page === "dateanomaly") { daBatchRefreshRecentRuns(); daHistoryRefresh(); }
     if (page === "bulkchecker") bcOnPageShown();
     if (page === "wrongbilledconsumption") wbcOnPageShown();
+    if (page === "wrongbill") wbOnPageShown();
   });
 });
 
@@ -905,7 +912,7 @@ let _editingConnectionKey = null; // null = the form is in "Add" mode
 async function loadSettingsPage() {
   const tasks = [];
   if (state.role === "admin") {
-    tasks.push(refreshConnectionsTable(), refreshAIConfigForm(), refreshUsersTable(), refreshMenuAccessTable());
+    tasks.push(refreshConnectionsTable(), refreshAIConfigForm(), refreshEmailSettingsForm(), refreshUsersTable(), refreshMenuAccessTable());
   }
   await Promise.all(tasks);
 }
@@ -1256,6 +1263,62 @@ async function refreshAIConfigForm() {
     showToast(err.message, true);
   }
 }
+
+// ---------------- Email alerts (admin; RJ 2026-09-30) ----------------
+async function refreshEmailSettingsForm() {
+  try {
+    const c = await api("/api/settings/email");
+    $("#em-host").value = c.smtp_host || "";
+    $("#em-port").value = c.smtp_port || 587;
+    $("#em-username").value = c.username || "";
+    $("#em-password").value = "";
+    $("#em-password").placeholder = c.has_password ? "(saved — leave blank to keep)" : "(no password saved yet)";
+    $("#em-from").value = c.from_addr || "";
+    $("#em-recipients").value = (c.recipients || []).join("; ");
+    $("#em-hour").value = c.send_hour ?? 7;
+    $("#em-retry").value = c.retry_minutes ?? 15;
+    $("#em-tls").checked = !!c.use_tls;
+    $("#em-enabled").checked = !!c.alerts_enabled;
+    $("#em-result").textContent = c.smtp_host ? "" : "Not configured yet.";
+  } catch (err) {
+    showToast(err.message, true);
+  }
+}
+async function saveEmailSettings() {
+  const body = {
+    smtp_host: $("#em-host").value.trim(),
+    smtp_port: Number($("#em-port").value) || 587,
+    use_tls: $("#em-tls").checked,
+    username: $("#em-username").value.trim(),
+    password: $("#em-password").value || null,
+    from_addr: $("#em-from").value.trim(),
+    recipients: $("#em-recipients").value.split(/[;,\s]+/).map((s) => s.trim()).filter(Boolean),
+    alerts_enabled: $("#em-enabled").checked,
+    send_hour: Number($("#em-hour").value),
+    retry_minutes: Number($("#em-retry").value) || 15,
+  };
+  await api("/api/settings/email", { method: "POST", body });
+}
+$("#em-save-btn").addEventListener("click", async () => {
+  try {
+    await saveEmailSettings();
+    showToast("Email alert settings saved.");
+    refreshEmailSettingsForm();
+  } catch (err) {
+    showToast(err.message, true);
+  }
+});
+$("#em-test-btn").addEventListener("click", async () => {
+  $("#em-result").textContent = "Saving + sending test…";
+  try {
+    await saveEmailSettings();
+    const r = await api("/api/settings/email/test", { method: "POST" });
+    $("#em-result").textContent = `✓ Test e-mail sent to ${(r.sent_to || []).join(", ")}`;
+    refreshEmailSettingsForm();
+  } catch (err) {
+    $("#em-result").textContent = `✗ ${err.message}`;
+  }
+});
 
 $("#ai-key-field").addEventListener("input", () => {
   if ($("#ai-key-field").value) $("#ai-enabled-checkbox").checked = true;
@@ -3581,10 +3644,26 @@ function hxCollapseInfo() {
     if (skip(el) || el.id || el.querySelector("[id]")) return;
     wrap(el, "⚠ Notes", true);
   });
-  $$(".page p.hint-text").forEach((el) => {
-    if (skip(el) || el.id || el.querySelector("[id]")) return;
+  $$(".page p.hint-text, .page div.hint-text").forEach((el) => {
+    if (skip(el) || el.id || el.querySelector("[id], input, select, button")) return;
     if (el.textContent.trim().length < 90) return;
     wrap(el, "ⓘ How this works", false);
+  });
+  // RJ 2026-09-30: "again the infos, should be minimized by default" - the
+  // Bill Issuance "How this works" banners and long page subtitles were
+  // still always open.
+  $$(".page .biss-info-banner").forEach((el) => {
+    if (skip(el) || el.id || el.querySelector("[id]")) return;
+    wrap(el, "ⓘ How this works", false);
+  });
+  $$(".page p.page-subtitle").forEach((el) => {
+    if (skip(el) || el.id || el.querySelector("[id]")) return;
+    const text = el.textContent.trim().replace(/\s+/g, " ");
+    if (text.length < 160) return;
+    const first = (text.match(/^.*?[.!?](\s|$)/) || [text])[0].trim();
+    const summary = first.length > 120 ? first.slice(0, 117) + "…" : first;
+    wrap(el, `ⓘ ${summary}`, false);
+    el.closest("details")?.classList.add("hx-hint-subtitle");
   });
 }
 
@@ -4455,7 +4534,11 @@ function biss2VisibleIndices(ignoreFilters = false) {
   // the status/search/missing-bill filters entirely.
   let indices = biss2Accounts.map((_, i) => i);
   if (!ignoreFilters) {
-    const statusFilter = $("#biss2-status-filter")?.value || "needs-action";
+    // RJ 2026-09-30 sub-tabs: the active tab is the primary filter; the
+    // Status dropdown only applies on the "All" tab.
+    const tabFn = BISS2_TABS[biss2Tab]?.match;
+    if (tabFn) indices = indices.filter((i) => tabFn(biss2Accounts[i]));
+    const statusFilter = biss2Tab === "all" ? ($("#biss2-status-filter")?.value || "needs-action") : "all";
     const term = ($("#biss2-search")?.value || "").trim().toLowerCase();
     const missingBillOnly = !!$("#biss2-missing-bill-only")?.checked;
     if (statusFilter === "needs-action") indices = indices.filter((i) => !biss2Accounts[i].complete);
@@ -4463,6 +4546,9 @@ function biss2VisibleIndices(ignoreFilters = false) {
     else if (statusFilter === "period-mismatch") indices = indices.filter((i) => biss2Accounts[i].period_mismatch_count > 0);
     else if (statusFilter === "complete") indices = indices.filter((i) => biss2Accounts[i].complete);
     if (missingBillOnly) indices = indices.filter((i) => biss2Accounts[i].missing_bill_count > 0);
+    // RJ 2026-09-30: "a filter on which bill is missing".
+    const missingSvc = $("#biss2-missing-service")?.value || "";
+    if (missingSvc) indices = indices.filter((i) => (biss2Accounts[i].missing_services || []).includes(missingSvc));
     if (term) indices = indices.filter((i) => String(biss2Accounts[i].reference ?? "").toLowerCase().includes(term));
   }
   if (biss2SortKey) {
@@ -4470,6 +4556,50 @@ function biss2VisibleIndices(ignoreFilters = false) {
   }
   return indices;
 }
+
+// Case 2 sub-tabs (RJ 2026-09-30): "1. Accounts with missing rate bill,
+// 2 is accounts needing action period mismatch, 3 accounts already complete".
+const BISS2_TABS = {
+  "missing-rate": {
+    match: (a) => (a.missing_services || []).includes("Rate"),
+    mode: "missing_rate",
+    hint: "Terminated accounts whose Rate final bill is missing. Generate = anomaly INSERTs (GCCOM_ANOMALOUS + GCCOM_DETECTED_ANOMALY) + COD_PERIODICITY fix where NULL.",
+  },
+  "period-mismatch": {
+    match: (a) => !a.complete && a.period_mismatch_count > 0,
+    mode: "period_mismatch",
+    hint: "Accounts with a final bill in the wrong billing period (still Invoicing). Generate = GCCOM_BILL + GCCOM_ITEMS_TO_BILL period UPDATEs.",
+  },
+  "complete": {
+    match: (a) => a.complete,
+    mode: null,
+    hint: "Every service's final bill already aligned (or already invoiced) - nothing to generate.",
+  },
+  "all": { match: null, mode: "", hint: "Every scanned account - use the Status dropdown to narrow." },
+};
+let biss2Tab = "missing-rate";
+
+function biss2UpdateTabs() {
+  Object.entries(BISS2_TABS).forEach(([k, t]) => {
+    const el = document.querySelector(`#biss2-tabs [data-count="${k}"]`);
+    if (el) el.textContent = (t.match ? biss2Accounts.filter(t.match) : biss2Accounts).length;
+  });
+  $$("#biss2-tabs [data-biss2-tab]").forEach((b) => b.classList.toggle("is-active", b.dataset.biss2Tab === biss2Tab));
+  $("#biss2-tab-hint").textContent = BISS2_TABS[biss2Tab].hint;
+  $("#biss2-status-wrap").hidden = biss2Tab !== "all";
+  const gen = $("#biss2-generate-btn");
+  if (gen) gen.disabled = state.role === "viewer" || BISS2_TABS[biss2Tab].mode === null;
+}
+
+biss2UpdateTabs(); // initial state (before the first scan)
+
+$("#biss2-tabs").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-biss2-tab]");
+  if (!b) return;
+  biss2Tab = b.dataset.biss2Tab;
+  biss2Selected = new Set();
+  biss2RenderTable();
+});
 
 function biss2RenderKpiRow() {
   const total = biss2Accounts.length;
@@ -4505,10 +4635,10 @@ function biss2RenderServiceRows(idx) {
     `<tr class="biss2-service-row ${s.needs_update ? "row-needs-action" : ""}">` +
       `<td></td><td></td>` +
       `<td title="ID_OFFERED_SERVICE ${escapeHtml(s.id_offered_service ?? "")}">${escapeHtml(s.offered_service_desc || s.id_offered_service || "")}</td>` +
-      `<td colspan="2">Final bill (termination date ${escapeHtml(s.end_date ?? "")}): ` +
+      `<td colspan="3">Final bill (termination date ${escapeHtml(s.end_date ?? "")}): ` +
         (s.id_bill
           ? `Bill ${escapeHtml(s.id_bill)}, period ${escapeHtml(s.id_billing_period ?? "")}, status ${escapeHtml(s.billing_status ?? "")}`
-          : `<strong>none found</strong> - no bill dated exactly this service's termination date`) +
+          : `<span class="hx-pill hx-pill-billed">❓ ${escapeHtml(s.offered_service_desc || "Bill")} bill missing</span> - no bill dated this service's termination date`) +
       `</td>` +
       `<td>${s.needs_update ? "⚠️ Needs update" : "✅ OK"}</td>` +
     `</tr>`
@@ -4554,6 +4684,9 @@ function biss2RenderTable() {
       `</div></td>` +
       `<td>${acct.service_count}</td>` +
       `<td>${acct.needs_update_count}</td>` +
+      // RJ 2026-09-30: "an indicator to see immediately what is the missing bill"
+      `<td>${(acct.missing_services || []).map((s) =>
+        `<span class="hx-pill ${s === "Rate" ? "hx-pill-billed" : "hx-pill-amber"}" title="${escapeHtml(s)} final bill missing${s === "Rate" ? " - Generate adds the anomaly INSERTs" : ""}">❓ ${escapeHtml(s)}</span>`).join(" ") || '<span class="hint-text">—</span>'}</td>` +
       `<td>${escapeHtml(acct.target_period ?? "")}</td>` +
       `<td><span class="biss2-status-pill ${acct.complete ? "is-complete" : "is-needs-action"}">${acct.complete ? "✅ Complete" : "⚠️ Needs action"}</span></td>`
     ));
@@ -4577,6 +4710,7 @@ function biss2RenderTable() {
     });
   });
   biss2RenderKpiRow();
+  biss2UpdateTabs();
   $("#biss2-export-csv-btn").hidden = biss2Accounts.length === 0;
   $("#biss2-export-all-wrap").hidden = biss2Accounts.length === 0;
   $("#biss2-select-all").checked = visible.length > 0 && visible.every((i) => biss2Selected.has(i));
@@ -4636,6 +4770,18 @@ $("#biss2-select-all").addEventListener("change", (e) => {
 $("#biss2-status-filter").addEventListener("change", () => biss2RenderTable());
 $("#biss2-search").addEventListener("input", () => biss2RenderTable());
 $("#biss2-missing-bill-only").addEventListener("change", () => biss2RenderTable());
+$("#biss2-missing-service").addEventListener("change", () => biss2RenderTable());
+
+// Missing-bill filter options = service names actually missing in this scan (with counts).
+function biss2FillMissingServiceOptions() {
+  const sel = $("#biss2-missing-service");
+  const cur = sel.value;
+  const counts = new Map();
+  biss2Accounts.forEach((a) => (a.missing_services || []).forEach((s) => counts.set(s, (counts.get(s) || 0) + 1)));
+  sel.innerHTML = `<option value="">Any</option>` + [...counts.entries()].sort((a, b) => b[1] - a[1])
+    .map(([s, n]) => `<option value="${escapeHtml(s)}">${escapeHtml(s)} (${n})</option>`).join("");
+  sel.value = counts.has(cur) ? cur : "";
+}
 
 $("#biss2-detect-btn").addEventListener("click", async () => {
   const btn = $("#biss2-detect-btn");
@@ -4651,6 +4797,7 @@ $("#biss2-detect-btn").addEventListener("click", async () => {
     biss2SortKey = null;
     biss2SortDir = 1;
     $("#biss2-search").value = "";
+    biss2FillMissingServiceOptions();
     document.querySelectorAll("#biss2-table thead th[data-sort]").forEach((h) => {
       h.querySelector(".stats-table-sort-arrow")?.remove();
     });
@@ -4658,6 +4805,7 @@ $("#biss2-detect-btn").addEventListener("click", async () => {
     $("#biss2-summary").textContent = data.possibly_truncated
       ? `${data.account_count}+ account(s) with a pending notice found (row cap of ${data.limit} hit - list may be incomplete, try a shorter lookback), ${data.accounts_needing_action} needing action (${data.accounts_with_missing_bill} with a missing bill).`
       : `${data.account_count} terminated account(s) with a pending notice found, ${data.accounts_needing_action} needing action (${data.accounts_with_missing_bill} with a missing bill).`;
+    if (data.excluded_case1_accounts) $("#biss2-summary").textContent += ` ${data.excluded_case1_accounts} account(s) hidden because they're already in Case 1.`;
   } catch (err) {
     showToast(err.message || "Scan failed.", true);
   } finally {
@@ -4683,7 +4831,7 @@ $("#biss2-export-csv-btn").addEventListener("click", () => {
   if (!visible.length) return;
   const header = [
     "id_payment_form", "reference", "service_count", "needs_update_count", "missing_bill_count",
-    "period_mismatch_count", "target_period", "complete",
+    "missing_bills", "period_mismatch_count", "target_period", "complete",
     "offered_services", "bills", "billing_periods", "billing_statuses",
   ];
   const lines = [header.join(",")];
@@ -4697,6 +4845,7 @@ $("#biss2-export-csv-btn").addEventListener("click", () => {
     const services = a.services || [];
     const row = {
       ...a,
+      missing_bills: (a.missing_services || []).join("; "),
       offered_services: services.map((s) => s.offered_service_desc || "?").join("; "),
       bills: services.map((s) => s.id_bill || "(none)").join("; "),
       billing_periods: services.map((s) => s.id_billing_period || "-").join("; "),
@@ -4716,18 +4865,23 @@ $("#biss2-generate-btn").addEventListener("click", async () => {
   const program = $("#biss2-program").value.trim();
   if (!program) { showToast("Enter the Jira/Program # this change is for.", true); return; }
   const clean = $("#biss2-clean-toggle").checked;
-  // Empty selection = every flagged account (server-side default - see
-  // bill_issuance_case2_generate's own docstring).
-  const selectedForms = [...new Set([...biss2Selected].map((idx) => String(biss2Accounts[idx].id_payment_form)))];
+  // Sub-tabs (RJ 2026-09-30): nothing selected = every account on the
+  // ACTIVE tab; the tab also picks which script parts are generated (mode).
+  const tab = BISS2_TABS[biss2Tab];
+  if (tab.mode === null) { showToast("Nothing to generate for complete accounts.", true); return; }
+  const picked = biss2Selected.size ? [...biss2Selected] : (biss2Tab === "all" ? [] : biss2VisibleIndices());
+  if (biss2Tab !== "all" && !picked.length) { showToast("No accounts on this tab.", true); return; }
+  const selectedForms = [...new Set(picked.map((idx) => String(biss2Accounts[idx].id_payment_form)))];
   const btn = $("#biss2-generate-btn");
   btn.disabled = true;
   try {
     const result = await api("/api/bill-issuance/case2/generate", {
       method: "POST",
-      body: { id_payment_forms: selectedForms, program, clean },
+      body: { id_payment_forms: selectedForms, program, clean, mode: tab.mode },
     });
     $("#biss2-output").textContent = result.sql_text;
-    let msg = `Update script generated: ${result.update_count} statement(s).`;
+    let msg = `Script generated: ${result.update_count} bill update(s)` +
+      (result.anomaly_count ? `, ${result.anomaly_count} missing-Rate-bill anomaly insert(s)` : "") + ".";
     if (result.warnings.length) msg += `  ${result.warnings.length} warning(s) - see comments at the top of the script.`;
     showToast(msg);
   } catch (err) {
@@ -6078,6 +6232,210 @@ $("#wbc-export-btn").addEventListener("click", () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = `wrong_billed_consumption_${$("#wbc-period").value}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------- Wrong Bill CASE 1 - Unusual high Sanitary (RJ 2026-09-30) ----------------
+// See app/core/unusual_sanitary.py + web/alerts.py (daily 7 AM e-mail).
+const USAN_COLUMNS = [
+  { key: "reference", label: "Account", render: (r) => `<span class="hx-niss">${escapeHtml(r.reference ?? "")}</span>` },
+  { key: "niss", label: "NISS", mono: true },
+  { key: "total_amount", label: "★ Total Amount", num: true, render: (r) => `<strong class="usan-amount">${escapeHtml(hxFmtNum(r.total_amount))}</strong>` },
+  { key: "water_total_amount", label: "Water Bill Amount", num: true, render: (r) => escapeHtml(hxFmtNum(r.water_total_amount)) },
+  { key: "sanitary_minus_water", label: "Sanitary − Water", num: true, render: (r) => `<span class="usan-amount">${escapeHtml(hxFmtNum(r.sanitary_minus_water))}</span>` },
+  { key: "base", label: "Base (÷0.155)", num: true, render: (r) => escapeHtml(hxFmtNum(r.base)) },
+  { key: "id_billing_period", label: "Billing Period", mono: true },
+  { key: "id_bill", label: "ID Bill", mono: true },
+  { key: "bill_number", label: "Bill Number", mono: true },
+  { key: "water_id_bill", label: "Water ID Bill", mono: true, render: (r) => escapeHtml(r.water_id_bill ?? "") + (Number(r.water_bill_count) > 1 ? ` <span class="hx-pill hx-pill-ghost" title="Water bills summed">×${escapeHtml(r.water_bill_count)}</span>` : "") },
+  { key: "billing_date", label: "Billing Date", date: true },
+  { key: "create_date", label: "Created", date: true },
+  { key: "billing_status", label: "Status", render: (r) => `<span class="hx-pill hx-pill-amber">${escapeHtml(r.billing_status ?? "")}</span>` },
+  { key: "cod_concept", label: "Concept", mono: true },
+  { key: "print_description", label: "Description" },
+];
+let usanRows = [];
+let usanSortKey = null;
+let usanSortDir = 1;
+let usanStatusLoaded = false;
+let usanScanned = false;
+
+function hxFmtNum(v) {
+  const n = Number(v);
+  if (v === null || v === undefined || v === "" || Number.isNaN(n)) return v ?? "";
+  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function usanVisibleRows() {
+  const q = $("#usan-filter-search").value.trim().toLowerCase();
+  const bp = $("#usan-filter-bp").value;
+  const st = $("#usan-filter-status").value;
+  let rows = usanRows.filter((r) => {
+    if (bp && String(r.id_billing_period) !== bp) return false;
+    if (st && r.billing_status !== st) return false;
+    if (q && ![r.reference, r.niss, r.id_bill, r.bill_number, r.water_id_bill].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    return true;
+  });
+  if (usanSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[usanSortKey], b[usanSortKey], usanSortDir));
+  return rows;
+}
+
+function usanRenderTable() {
+  const head = document.querySelector("#usan-table thead tr");
+  head.innerHTML = USAN_COLUMNS.map((c) => {
+    const arrow = usanSortKey === c.key ? `<span class="stats-table-sort-arrow">${usanSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    usanSortDir = usanSortKey === k ? -usanSortDir : 1;
+    usanSortKey = k;
+    usanRenderTable();
+  }));
+  const rows = usanVisibleRows();
+  document.querySelector("#usan-table tbody").innerHTML = rows.length
+    ? rows.map((r) => `<tr class="hx-row hx-row-anomalous">` + USAN_COLUMNS.map((c) =>
+        `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${c.render ? c.render(r) : c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? "")}</td>`).join("") + "</tr>").join("")
+    : `<tr><td colspan="${USAN_COLUMNS.length}" class="hint-text">${usanRows.length ? "No rows match the current filters." : "✅ No unusual high Sanitary bills found."}</td></tr>`;
+  renderFilteredCount("#usan-filtered-count", rows.length, usanRows.length);
+  if (usanRows.length) {
+    hxRenderDashboard("usan-dash", {
+      gauges: [],
+      tiles: [
+        { icon: "🚨", label: "Bills to rebill", value: new Set(rows.map((r) => r.id_bill)).size.toLocaleString(), accent: true },
+        { icon: "💰", label: "Total amount", value: hxFmtNum(hxSum(rows, "total_amount")) },
+        { icon: "👤", label: "Accounts", value: new Set(rows.map((r) => r.reference).filter(Boolean)).size.toLocaleString() },
+        { icon: "🔌", label: "NISS", value: new Set(rows.map((r) => r.niss).filter(Boolean)).size.toLocaleString() },
+        { icon: "📅", label: "Billing periods", value: new Set(rows.map((r) => r.id_billing_period).filter(Boolean)).size.toLocaleString() },
+      ],
+      split: { title: "Bill status", entries: hxCountBy(rows, (r) => r.billing_status) },
+    });
+  }
+}
+
+async function usanScan() {
+  const btn = $("#usan-detect-btn");
+  usanScanned = true;
+  btn.disabled = true;
+  $("#usan-summary").textContent = "Scanning…";
+  try {
+    const data = await api("/api/unusual-sanitary/detect", { method: "POST" });
+    usanRows = data.rows || [];
+    const keepBp = $("#usan-filter-bp").value, keepSt = $("#usan-filter-status").value;
+    $("#usan-filter-bp").innerHTML = `<option value="">All</option>` +
+      [...new Set(usanRows.map((r) => String(r.id_billing_period)))].sort().reverse().map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+    $("#usan-filter-status").innerHTML = `<option value="">All</option>` +
+      [...new Set(usanRows.map((r) => r.billing_status).filter(Boolean))].sort().map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+    $("#usan-filter-bp").value = keepBp; $("#usan-filter-status").value = keepSt;
+    $("#usan-filters").hidden = usanRows.length === 0;
+    $("#usan-dash").hidden = usanRows.length === 0;
+    $("#usan-export-btn").disabled = usanRows.length === 0;
+    $("#usan-summary").textContent = usanRows.length
+      ? `🚨 ${data.bill_count} bill(s) on ${data.account_count} account(s) — review and apply rebilling ASAP.`
+      : "✅ No unusual high Sanitary bills found.";
+    wbSetTabCount("case1", data.bill_count);
+    usanRenderTable();
+  } catch (err) {
+    wbSetTabCount("case1", null);
+    $("#usan-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+const USAN_STATUS_LABELS = { sent: "✅ Sent", no_cases: "— No cases", error: "⚠️ Error", already_sent: "Already sent" };
+async function usanLoadAlertStatus() {
+  try {
+    const s = await api("/api/alerts/unusual-sanitary/status");
+    const parts = [];
+    if (!s.configured) parts.push("⚠️ E-mail is NOT configured yet — an admin must fill in Settings › Email alerts.");
+    else if (!s.enabled) parts.push("⏸ Daily alert is disabled in Settings › Email alerts.");
+    else parts.push(`Daily from ${String(s.send_hour).padStart(2, "0")}:00, retrying every ${s.retry_minutes} min until sent.`);
+    parts.push(s.sent_today ? "Today's e-mail: ✅ sent." : "Today's e-mail: not sent yet.");
+    parts.push(`Recipients: ${(s.recipients || []).join(", ") || "—"}`);
+    $("#usan-alert-summary").textContent = parts.join("  ·  ");
+    const log = s.log || [];
+    document.querySelector("#usan-alert-log tbody").innerHTML = log.length
+      ? log.map((l) => `<tr><td class="hx-mono">${escapeHtml(l.attempted_at)}</td><td>${escapeHtml(USAN_STATUS_LABELS[l.status] || l.status)}</td>` +
+          `<td class="hx-num">${escapeHtml(l.row_count ?? "")}</td><td>${escapeHtml(l.detail ?? "")}</td></tr>`).join("")
+      : `<tr><td colspan="4" class="hint-text">No checks yet.</td></tr>`;
+    usanStatusLoaded = true;
+  } catch (err) {
+    $("#usan-alert-summary").textContent = `Couldn't load alert status: ${err.message}`;
+  }
+}
+
+// ---- Wrong Bill menu: case tabs with a count badge each (RJ 2026-09-30:
+// "WRONG Bill will be the menu and case 1 is a tab inside, will add more
+// tabs later ... show how many for each tab"). To add a case: a
+// .da-subnav-btn[data-wb-sub=caseN] with a [data-wb-count=caseN] badge, a
+// .da-subpage[data-wb-sub=caseN], an entry in WB_TABS, and HX_REFRESH.wrongbill.
+const WB_TABS = {
+  case1: { scan: () => usanScan(), loaded: () => usanScanned, onShow: () => usanLoadAlertStatus() },
+};
+function wbSetTabCount(sub, n) {
+  const el = document.querySelector(`[data-wb-count="${sub}"]`);
+  if (!el) return;
+  el.textContent = n === null || n === undefined ? "!" : String(n);
+  el.classList.toggle("is-alarm", Number(n) > 0);
+  el.classList.toggle("is-zero", Number(n) === 0);
+}
+function wbOnPageShown() {
+  // Fill every tab's count on first visit, so all badges show without opening each tab.
+  Object.entries(WB_TABS).forEach(([sub, t]) => {
+    t.onShow && t.onShow();
+    if (!t.loaded()) t.scan();
+  });
+}
+$$(".da-subnav-btn[data-wb-sub]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const sub = btn.dataset.wbSub;
+    $$(".da-subnav-btn[data-wb-sub]").forEach((b) => b.classList.toggle("is-active", b === btn));
+    $$(".da-subpage[data-wb-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.wbSub === sub));
+    const t = WB_TABS[sub];
+    if (t && t.onShow) t.onShow();
+  });
+});
+
+$("#usan-detect-btn").addEventListener("click", usanScan);
+["#usan-filter-bp", "#usan-filter-status"].forEach((id) => $(id).addEventListener("change", usanRenderTable));
+$("#usan-filter-search").addEventListener("input", usanRenderTable);
+$("#usan-filter-clear-btn").addEventListener("click", (ev) => {
+  ev.preventDefault();
+  ev.stopPropagation();
+  ["#usan-filter-bp", "#usan-filter-status", "#usan-filter-search"].forEach((id) => { $(id).value = ""; });
+  usanRenderTable();
+});
+$("#usan-alert-refresh-btn").addEventListener("click", usanLoadAlertStatus);
+$("#usan-send-now-btn").addEventListener("click", async () => {
+  if (!confirm("Run the check now and e-mail the detected cases to the configured recipients (even if today's e-mail was already sent)?")) return;
+  const btn = $("#usan-send-now-btn");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/alerts/unusual-sanitary/send-now", { method: "POST" });
+    if (r.status === "sent") showToast(`E-mail sent (${r.row_count} row(s)).`);
+    else if (r.status === "no_cases") showToast("No cases found — nothing to send.");
+    else showToast(r.detail || r.status, true);
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+    usanLoadAlertStatus();
+  }
+});
+$("#usan-export-btn").addEventListener("click", () => {
+  const rows = usanVisibleRows();
+  if (!rows.length) return;
+  const cols = ["reference", "niss", "id_billing_period", "id_bill", "bill_number", "billing_date", "create_date", "billing_status", "cod_concept", "print_description", "total_amount", "base",
+    "water_id_bill", "water_bill_count", "water_total_amount", "sanitary_minus_water"];
+  const lines = [cols.map((c) => `"${c.toUpperCase()}"`).join(",")];
+  rows.forEach((r) => lines.push(cols.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `unusual_high_sanitary_${new Date().toISOString().slice(0, 10)}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 });
@@ -7968,6 +8326,8 @@ const HX_REFRESH = {
   tnbcycledisc: () => ({ btn: "#tcd-detect-btn" }),
   wrongstuckhierarchy: () => ({ btn: hxActiveSub("data-wsh-sub") === "sanitary" ? "#wshs-detect-btn" : "#wsh-detect-btn" }),
   doubleitb: () => ({ btn: "#ditb-detect-btn" }),
+  // Wrong Bill: one entry per case tab (add more as cases are added).
+  wrongbill: () => ({ btn: ({ case1: "#usan-detect-btn" })[hxActiveSub("data-wb-sub") || "case1"] || "#usan-detect-btn" }),
   wrongbilledconsumption: () => ({ btn: "#wbc-detect-btn" }),
   disconnectiontnb: () => ({ btn: "#dtnb-detect-btn" }),
   billissuance: () => {
@@ -7977,6 +8337,25 @@ const HX_REFRESH = {
   incorrectbillingperiod: () => ({ btn: "#ibp-detect-btn" }),
   bulkchecker: () => ({ btn: "#bc-search-btn" }),
 };
+
+// "✕ Clear filters" (RJ 2026-09-30, Bill Issuance cases): resets every
+// input/select/checkbox in the button's own filter row to its HTML default
+// and fires input+change so the page re-renders with no filters.
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-hx-clear-row]");
+  if (!btn) return;
+  const row = btn.closest(".key-panel-row, .hx-filter-grid, .hx-filters");
+  if (!row) return;
+  row.querySelectorAll("input, select").forEach((el) => {
+    if (el.type === "checkbox" || el.type === "radio") el.checked = el.defaultChecked;
+    else if (el.tagName === "SELECT") {
+      const def = [...el.options].find((o) => o.defaultSelected) || el.options[0];
+      el.value = def ? def.value : "";
+    } else el.value = el.defaultValue;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+});
 
 function hxSnapshotFilters(page) {
   const skip = (el) => !el.id || el.closest("table, .hier-reading-modal, .hx-modal") ||

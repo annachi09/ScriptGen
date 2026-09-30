@@ -3447,6 +3447,64 @@ def test_bill_issuance_case2_generate_clean_strips_comments(client, monkeypatch)
     assert not any(line.strip().startswith("--") for line in body["sql_text"].split("\n"))
 
 
+def test_bill_issuance_case2_detect_lists_missing_services(client, monkeypatch):
+    """RJ 2026-09-30: indicator of WHICH bill is missing, for the filter."""
+    import web.server as server_mod
+
+    _login(client)
+    monkeypatch.setattr(
+        server_mod.mssql, "run_query",
+        lambda conn, sql: QueryResult(columns=_BISS2_COLS, rows=_BISS2_ALL_ROWS, elapsed_ms=1.0),
+    )
+    accounts = {a["id_payment_form"]: a for a in client.post("/api/bill-issuance/case2/detect").json()["accounts"]}
+    assert accounts["342702"]["missing_services"] == ["Rate"]
+    assert accounts["555555"]["missing_services"] == []
+
+
+def test_bill_issuance_case2_generate_inserts_anomaly_for_missing_rate_bill(client, monkeypatch):
+    """RJ 2026-09-30: a Rate (176) service with no bill -> GCCOM_ANOMALOUS +
+    GCCOM_DETECTED_ANOMALY INSERTs with billing service, termination date and
+    last valid bill date filled in."""
+    import web.server as server_mod
+
+    _login(client)
+    cols = _BISS2_COLS + ["ID_CONTRACTED_SERVICE"]
+    rows = [_BISS2_ROW_WATER + [900019], _BISS2_ROW_RATE_NO_BILL + [900176]]
+    sqls = []
+
+    def fake_run(conn, sql):
+        sqls.append(sql)
+        if "GCCOM_BILLING_SERVICE" in sql:
+            return QueryResult(
+                columns=["ID_CONTRACTED_SERVICE", "ID_PAYMENT_FORM", "TERMINATION_DATE", "ID_BILLING_SERVICE", "LAST_ID_BILL", "LAST_BILLING_DATE"],
+                rows=[[900176, 342702, "2026-07-01", 800176, 555, "2026-06-30 00:00:00"]], elapsed_ms=1.0)
+        return QueryResult(columns=cols, rows=rows, elapsed_ms=1.0)
+
+    monkeypatch.setattr(server_mod.mssql, "run_query", fake_run)
+    resp = client.post("/api/bill-issuance/case2/generate", json={"id_payment_forms": [], "program": "JIRA-7"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["update_count"] == 1
+    assert body["anomaly_count"] == 1
+    sql = body["sql_text"]
+    assert "WHERE ID_BILL = 1001" in sql
+    assert "INSERT INTO oucewa.OUC_ADMIN.GCCOM_ANOMALOUS" in sql
+    assert "INSERT INTO oucewa.OUC_ADMIN.GCCOM_DETECTED_ANOMALY" in sql
+    assert "@ID_ANOMALOUS_1, 'ESTAN00001', 8, 800176, 'TIPFAC0001'" in sql
+    assert "'2026-07-01', null, null, null, null, '2026-07-01'" in sql
+    assert "NULL, 1, '2026-06-30', 'ANOMMOT000', 'ANRETYP000'" in sql
+    assert "NEXT VALUE FOR OUC_ADMIN.SEC_GCCOM_DETECTEDANOMALY1, @ID_ANOMALOUS_1, 800176, 8" in sql
+    assert "WHERE cs.ID_CONTRACTED_SERVICE IN (900176)" in sqls[1]
+    assert not any("no bill matching" in w for w in body["warnings"])
+
+    # Rate-only selection: no empty "Nothing to update" UPDATE section.
+    rows[:] = [_BISS2_ROW_RATE_NO_BILL + [900176]]
+    body = client.post("/api/bill-issuance/case2/generate", json={"id_payment_forms": [], "program": "JIRA-7"}).json()
+    assert body["update_count"] == 0 and body["anomaly_count"] == 1
+    assert "Nothing to update" not in body["sql_text"]
+    assert body["sql_text"].startswith("-- Bill Issuance Validator: Case 2 - missing Rate bill")
+
+
 def test_bill_issuance_case2_generate_requires_editor_role(client, monkeypatch):
     import web.server as server_mod
 

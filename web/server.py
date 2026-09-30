@@ -44,6 +44,7 @@ from app.core import wrong_stuck_hierarchy
 from app.core import disconnection_tnb
 from app.core import double_itb
 from app.core import wrong_billed_consumption
+from app.core import unusual_sanitary
 from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -57,6 +58,7 @@ from web.session_store import sessions, QueryState, date_anomaly_sessions, DateA
 from web import batch_jobs
 from web import wbc_jobs
 from web import menu_access
+from web import alerts
 
 # Same sys.frozen check app/utils/paths.py uses: a PyInstaller --onefile
 # build extracts bundled data (see build_web_desktop.bat's --add-data)
@@ -84,6 +86,14 @@ SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_PID = os.getpid()
 
 app = FastAPI(title="ScriptGen Web")
+
+
+@app.on_event("startup")
+def _start_alert_scheduler() -> None:
+    # Daily 7 AM e-mail alerts (web/alerts.py) - Wrong Bill CASE 1.
+    alerts.start_scheduler()
+
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=get_session_secret(),
@@ -1309,6 +1319,12 @@ def overview_stats(user: str = Depends(require_login)):
             live["billissuance_case3"] = len(result.rows)
         except Exception:
             live["billissuance_case3"] = None
+        # Critical card (RJ 2026-09-30): Wrong Bill CASE 1 - Unusual high Sanitary.
+        try:
+            result = mssql.run_query(conn, unusual_sanitary.build_query())
+            live["unusualsanitary"] = len(result.rows)
+        except Exception:
+            live["unusualsanitary"] = None
 
     try:
         bulk_checker_search_count = len(bulk_checker_db.list_search_history(config.internal_db_path))
@@ -2933,7 +2949,7 @@ def bill_issuance_case1_new_contract_match_detect(user: str = Depends(require_lo
 # Case 2 comment block (above CONTRACTED_SERVICE_TABLE) for the full
 # business-rule narrative, RJ's own 342702 example, and the redesign's
 # account-grouped/drill-down/Complete-filter UI decisions.
-_OFFERED_SERVICE_NAMES = {1: "Electricity", 19: "Water", 176: "Rate"}
+_OFFERED_SERVICE_NAMES = {1: "Electricity", 19: "Water", 176: "Rate", 190: "Sanitary"}
 
 
 def _case2_group_rows_by_account(rows: list[dict]) -> list[dict]:
@@ -2981,6 +2997,10 @@ def _case2_group_rows_by_account(rows: list[dict]) -> list[dict]:
                 "needs_update_count": 0,
                 "missing_bill_count": 0,
                 "period_mismatch_count": 0,
+                # RJ, 2026-09-30: "an indicator to see immediately what is
+                # the missing bill" + a filter on it - offered-service names
+                # of the services with no final bill (e.g. ["Rate"]).
+                "missing_services": [],
                 "services": [],
             }
             accounts[pf] = acct
@@ -2994,6 +3014,9 @@ def _case2_group_rows_by_account(rows: list[dict]) -> list[dict]:
             acct["needs_update_count"] += 1
             if missing_bill:
                 acct["missing_bill_count"] += 1
+                name = _OFFERED_SERVICE_NAMES.get(offered_service_id) or f"Service {offered_service_id}"
+                if name not in acct["missing_services"]:
+                    acct["missing_services"].append(name)
             else:
                 acct["period_mismatch_count"] += 1
         acct["services"].append({
@@ -3007,6 +3030,31 @@ def _case2_group_rows_by_account(rows: list[dict]) -> list[dict]:
             "reason": reason,
         })
     return list(accounts.values())
+
+
+# Case priority (RJ, 2026-09-30): "what is in case 1 should not be in 2, 3,
+# 4, and case 4 should not have case 1, 2, 3" - i.e. an account belongs to
+# the FIRST case that flags it: Case 1 (Stuck Bills + New Contract Match)
+# > Case 2 > Case 3 > Case 4 (Unclassified). Each case's own detect (and
+# Case 2's generate) removes the account ids of every higher case. These
+# helpers return those id sets from the cases' own query builders
+# (unlimited), same approach Case 4 already used.
+def _biss_ids(result) -> set[str]:
+    idx = [c.upper() for c in result.columns].index("ID_PAYMENT_FORM")
+    return {diff_engine.cell_display(row[idx]) for row in result.rows}
+
+
+def _biss_case1_ids(conn) -> set[str]:
+    return (
+        _biss_ids(mssql.run_query(conn, bill_issuance_validator.build_stuck_bills_query(limit=None)))
+        | _biss_ids(mssql.run_query(conn, bill_issuance_validator.build_new_contract_match_query(limit=None)))
+    )
+
+
+def _biss_case2_ids(conn) -> set[str]:
+    return _biss_ids(mssql.run_query(
+        conn, bill_issuance_validator.build_terminated_period_mismatch_query(limit=None, days_back=None),
+    ))
 
 
 @app.post("/api/bill-issuance/case2/detect")
@@ -3043,12 +3091,17 @@ def bill_issuance_case2_detect(days_back: int | None = None, user: str = Depends
                 limit=limit, days_back=effective_days_back or None,
             ),
         )
+        case1_ids = _biss_case1_ids(conn)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    rows = [dict(zip(result.columns, r)) for r in result.rows]
+    all_rows = [dict(zip(result.columns, r)) for r in result.rows]
+    # Case priority: accounts already in Case 1 don't show in Case 2.
+    rows = [r for r in all_rows if diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM")) not in case1_ids]
+    excluded_case1 = len({diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM")) for r in all_rows} & case1_ids)
     accounts = _case2_group_rows_by_account(rows)
     return {
+        "excluded_case1_accounts": excluded_case1,
         "accounts": accounts,
         "account_count": len(accounts),
         "accounts_needing_action": sum(1 for a in accounts if not a["complete"]),
@@ -3075,6 +3128,9 @@ class BillIssuanceCase2GenerateRequest(BaseModel):
     program: str = script_generator.DEFAULT_AUDIT_PROGRAM
     clean: bool = False
     days_back: int | None = None
+    # RJ 2026-09-30 sub-tabs: "missing_rate" = only the anomaly INSERTs,
+    # "period_mismatch" = only the period UPDATEs, "" = both (as before).
+    mode: str = ""
 
 
 @app.post("/api/bill-issuance/case2/generate")
@@ -3119,25 +3175,69 @@ def bill_issuance_case2_generate(
                 limit=limit, days_back=effective_days_back or None,
             ),
         )
+        case1_ids = _biss_case1_ids(conn)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    # Case priority: never script an account that belongs to Case 1.
     rows = [dict(zip(result.columns, r)) for r in result.rows]
+    rows = [r for r in rows if diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM")) not in case1_ids]
     updates = []
+    # RJ, 2026-09-30: a Rate service (176) with NO bill on its termination
+    # date gets the GCCOM_ANOMALOUS + GCCOM_DETECTED_ANOMALY INSERTs instead
+    # of being skipped with a warning.
+    missing_rate: dict[str, dict] = {}
     for r in rows:
         if not _da_col(r, "NEEDS_UPDATE"):
             continue
         pf = _da_col(r, "ID_PAYMENT_FORM")
         if scope is not None and str(pf) not in scope:
             continue
-        updates.append((_da_col(r, "ID_BILL"), _da_col(r, "TARGET_PERIOD")))
+        id_bill = _da_col(r, "ID_BILL")
+        cs_id = _da_col(r, "ID_CONTRACTED_SERVICE")
+        if id_bill is None and _da_col(r, "ID_OFFERED_SERVICE") == bill_issuance_validator.OFFERED_SERVICE_RATE and cs_id is not None:
+            if body.mode != "period_mismatch":
+                missing_rate[str(cs_id)] = {"reference": diff_engine.cell_display(_da_col(r, "REFERENCE"))}
+            continue
+        if body.mode == "missing_rate" or (body.mode == "period_mismatch" and id_bill is None):
+            continue
+        updates.append((id_bill, _da_col(r, "TARGET_PERIOD")))
 
-    if not updates:
-        raise HTTPException(status_code=400, detail="No bills need a billing-period update.")
+    anomaly_result = None
+    if missing_rate:
+        try:
+            ctx = mssql.run_query(conn, bill_issuance_validator.build_missing_rate_bill_context_query(missing_rate.keys()))
+        except mssql.ConnectionError_ as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        services = []
+        for cr in (dict(zip(ctx.columns, x)) for x in ctx.rows):
+            cs_id = str(_da_col(cr, "ID_CONTRACTED_SERVICE"))
+            services.append({
+                "id_contracted_service": cs_id,
+                "id_payment_form": _da_col(cr, "ID_PAYMENT_FORM"),
+                "reference": missing_rate.get(cs_id, {}).get("reference"),
+                "id_billing_service": _da_col(cr, "ID_BILLING_SERVICE"),
+                "cod_periodicity": _da_col(cr, "COD_PERIODICITY"),
+                "bill_serv_status": _da_col(cr, "BILL_SERV_STATUS"),
+                "termination_date": _da_col(cr, "TERMINATION_DATE"),
+                "last_billing_date": _da_col(cr, "LAST_BILLING_DATE"),
+            })
+        anomaly_result = bill_issuance_validator.build_missing_rate_anomaly_script(services, clean=body.clean)
+
+    if not updates and not (anomaly_result and anomaly_result.anomaly_count):
+        raise HTTPException(status_code=400, detail="No bills need a billing-period update and no missing Rate bills need an anomaly.")
 
     fix_result = bill_issuance_validator.build_terminated_period_fix_script(
         updates, program=program, clean=body.clean,
     )
+    if anomaly_result is not None:
+        # Rate-only selection: no period-update section, just the anomaly INSERTs.
+        fix_result.sql_text = (
+            anomaly_result.sql_text if not updates
+            else fix_result.sql_text.rstrip("\n") + "\n\n" + anomaly_result.sql_text
+        )
+        fix_result.statement_count += 2 * anomaly_result.anomaly_count
+        fix_result.warnings.extend(anomaly_result.warnings)
 
     try:
         script_history.record_script(
@@ -3158,6 +3258,7 @@ def bill_issuance_case2_generate(
     return {
         "sql_text": fix_result.sql_text,
         "update_count": fix_result.update_count,
+        "anomaly_count": anomaly_result.anomaly_count if anomaly_result else 0,
         "warnings": fix_result.warnings,
     }
 
@@ -3218,10 +3319,14 @@ def bill_issuance_case3_detect(
                 limit=limit,
             ),
         )
+        higher_ids = _biss_case1_ids(conn) | _biss_case2_ids(conn)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    rows = [dict(zip(result.columns, r)) for r in result.rows]
+    all_rows = [dict(zip(result.columns, r)) for r in result.rows]
+    # Case priority: accounts already in Case 1 or Case 2 don't show in Case 3.
+    rows = [r for r in all_rows if diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM")) not in higher_ids]
+    excluded_higher = len({diff_engine.cell_display(_da_col(r, "ID_PAYMENT_FORM")) for r in all_rows} & higher_ids)
     out_rows = [
         {
             "reference": diff_engine.cell_display(_da_col(r, "REFERENCE")),
@@ -3237,6 +3342,7 @@ def bill_issuance_case3_detect(
     ]
     return {
         "rows": out_rows,
+        "excluded_higher_case_accounts": excluded_higher,
         "row_count": len(out_rows),
         "account_count": len({r["id_payment_form"] for r in out_rows}),
         "with_active_contract_count": sum(1 for r in out_rows if r["with_active_contract"] == "YES"),
@@ -4118,6 +4224,104 @@ def wrong_billed_consumption_cancel(job_id: str, user: str = Depends(require_log
     job = _wbc_job_or_404(job_id, user)
     job.cancel_requested = True
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------
+# Wrong Bill CASE 1 - Unusual high Sanitary (RJ, 2026-09-30) + e-mail alert
+# settings. See app/core/unusual_sanitary.py and web/alerts.py.
+# ---------------------------------------------------------------------
+@app.post("/api/unusual-sanitary/detect")
+def unusual_sanitary_detect(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        rows = alerts.detect_unusual_sanitary(conn)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "rows": rows,
+        "count": len(rows),
+        "bill_count": len({r.get("id_bill") for r in rows}),
+        "account_count": len({r.get("reference") for r in rows}),
+    }
+
+
+@app.get("/api/alerts/unusual-sanitary/status")
+def unusual_sanitary_alert_status(user: str = Depends(require_login)):
+    config = load_config()
+    today = datetime.now().date().isoformat()
+    em = config.email
+    return {
+        "configured": em.is_configured(),
+        "enabled": em.alerts_enabled,
+        "send_hour": em.send_hour,
+        "retry_minutes": em.retry_minutes,
+        "recipients": em.recipients,
+        "sent_today": alerts.sent_today(config.internal_db_path, unusual_sanitary.ALERT_KEY, today),
+        "log": alerts.recent_log(config.internal_db_path, unusual_sanitary.ALERT_KEY),
+    }
+
+
+@app.post("/api/alerts/unusual-sanitary/send-now")
+def unusual_sanitary_alert_send_now(user: str = Depends(require_editor)):
+    """Runs the check and e-mails immediately (ignores 7 AM / already-sent)."""
+    return alerts.run_unusual_sanitary(force=True)
+
+
+class EmailSettingsRequest(BaseModel):
+    smtp_host: str = ""
+    smtp_port: int = 587
+    use_tls: bool = True
+    username: str = ""
+    password: str | None = None      # None/blank = keep the saved one
+    from_addr: str = ""
+    recipients: list[str] = []
+    alerts_enabled: bool = True
+    send_hour: int = 7
+    retry_minutes: int = 15
+
+
+@app.get("/api/settings/email")
+def email_settings_get(user: str = Depends(require_admin)):
+    em = load_config().email
+    return {
+        "smtp_host": em.smtp_host, "smtp_port": em.smtp_port, "use_tls": em.use_tls,
+        "username": em.username, "has_password": bool(em.get_password()),
+        "from_addr": em.from_addr, "recipients": em.recipients,
+        "alerts_enabled": em.alerts_enabled, "send_hour": em.send_hour, "retry_minutes": em.retry_minutes,
+    }
+
+
+@app.post("/api/settings/email")
+def email_settings_save(body: EmailSettingsRequest, user: str = Depends(require_admin)):
+    config = load_config()
+    em = config.email
+    em.smtp_host = body.smtp_host.strip()
+    em.smtp_port = int(body.smtp_port or 587)
+    em.use_tls = bool(body.use_tls)
+    em.username = body.username.strip()
+    if body.password:
+        em.set_password(body.password)
+    em.from_addr = body.from_addr.strip()
+    em.recipients = [r.strip() for r in body.recipients if r and r.strip()]
+    em.alerts_enabled = bool(body.alerts_enabled)
+    em.send_hour = max(0, min(23, int(body.send_hour)))
+    em.retry_minutes = max(1, int(body.retry_minutes))
+    save_config(config)
+    return {"ok": True}
+
+
+@app.post("/api/settings/email/test")
+def email_settings_test(user: str = Depends(require_admin)):
+    config = load_config()
+    try:
+        alerts.send_email(config.email, "[ScriptGen] Test e-mail",
+                          "This is a test e-mail from ScriptGen's alert settings. If you got this, alerts will work.")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"Test e-mail failed: {exc}") from exc
+    return {"ok": True, "sent_to": config.email.recipients}
 
 
 # ---------------------------------------------------------------------

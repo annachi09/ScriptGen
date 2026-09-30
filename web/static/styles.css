@@ -1015,6 +1015,23 @@ button { font-family: inherit; }
 .overview-card-value.is-empty { color: var(--text-muted); font-size: 19px; font-weight: 600; }
 .overview-card-label { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
 .overview-card-desc { font-size: 11.5px; color: var(--text-muted); line-height: 1.4; }
+/* Critical cards (RJ 2026-09-30: Unusual high Sanitary) - red border; pulses when > 0. */
+.overview-card-critical { border: 1.5px solid rgba(239, 68, 68, 0.55); background: linear-gradient(135deg, rgba(239, 68, 68, 0.10), transparent 60%), var(--card-bg); }
+.overview-card-critical .overview-card-value { color: #ef4444; }
+.overview-card-critical.is-alarm { animation: overviewAlarm 1.8s ease-in-out infinite; }
+@keyframes overviewAlarm {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.45); }
+  50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+}
+.usan-amount { color: #ef4444; }
+/* Wrong Bill case tabs: count badge per tab */
+.wb-tab-count { display: inline-block; min-width: 22px; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11.5px; font-weight: 700; text-align: center; background: rgba(148, 163, 184, 0.25); color: inherit; }
+.wb-tab-count.is-zero { background: rgba(16, 185, 129, 0.2); color: #10b981; }
+.wb-tab-count.is-alarm { background: #ef4444; color: #fff; }
+.usan-alert-card { margin-top: 14px; }
+.usan-alert-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.usan-alert-head h3 { margin: 0; }
+.usan-alert-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .overview-card-go { font-size: 11px; color: var(--overview-accent, var(--accent)); font-weight: 600; margin-top: auto; padding-top: 4px; }
 
 .overview-charts-row {
@@ -1591,6 +1608,12 @@ body.hx-modal-open { overflow: hidden; }
 /* Wrong Billed Consumption: a billed start/end value that differs from the
    reading's own value - usually the cause of the mismatch. */
 #wbc-table .wbc-diff { color: #b91c1c; font-weight: 700; text-decoration: underline dotted; }
+.biss2-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 4px; }
+.biss2-tab { border: 1px solid rgba(148, 163, 184, .35); background: rgba(148, 163, 184, .08); color: inherit; border-radius: 999px; padding: 7px 14px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
+.biss2-tab:hover { border-color: #6366f1; }
+.biss2-tab.is-active { background: linear-gradient(90deg, #6366f1, #06b6d4); color: #fff; border-color: transparent; }
+.biss2-tab-count { background: rgba(148, 163, 184, .25); border-radius: 999px; padding: 1px 8px; font-size: 12px; }
+.biss2-tab.is-active .biss2-tab-count { background: rgba(255, 255, 255, .25); }
 .wbc-progress { flex: 1 1 160px; max-width: 280px; height: 10px; border-radius: 999px; background: rgba(148, 163, 184, .25); overflow: hidden; align-self: center; }
 .wbc-progress-fill { height: 100%; width: 0; border-radius: 999px; background: linear-gradient(90deg, #6366f1, #06b6d4); transition: width .4s ease; }
 #wbc-table .wbc-divider { border-left: 3px solid var(--border-strong, #94a3b8); }
