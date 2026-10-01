@@ -253,6 +253,11 @@ CONTRACTED_SERVICE_END_DATE_COLUMN = "END_DATE"
 # ESTSC00004 "Baja" (Terminated) - confirmed live via GCCOM_CONTRACT_SERV_
 # STATUS and cross-checked against a real terminated account's services.
 TERMINATED_SERVICE_STATUS = "ESTSC00004"
+# ESTSC00005 "Anulado" (Cancelled) - a service that never went live. Case 2's
+# "every service Terminated" rule treats it like Terminated (RJ 2026-10-01,
+# account 1100511482: Rate + Electricity Terminated, Water + Sanitary
+# Cancelled -> was wrongly dropped as "still has an active service").
+CANCELLED_SERVICE_STATUS = "ESTSC00005"
 # ESTFAC0005 "Puesta al cobro" (issued/invoiced) - confirmed live via
 # GCCOM_BILL_STATUS, same lookup table BILL_STATUS_ISSUING (ESTFAC0012)
 # already uses above. A terminated service's final bill counts as
@@ -1205,7 +1210,8 @@ def build_terminated_period_mismatch_query(
         f"),\n"
         f"account_status AS (\n"
         f"  SELECT cs.ID_PAYMENT_FORM,\n"
-        f"    SUM(CASE WHEN cs.{CONTRACTED_SERVICE_STATUS_COLUMN} <> {format_sql_literal(TERMINATED_SERVICE_STATUS)} THEN 1 ELSE 0 END) AS ACTIVE_COUNT\n"
+        f"    SUM(CASE WHEN cs.{CONTRACTED_SERVICE_STATUS_COLUMN} NOT IN ({format_sql_literal(TERMINATED_SERVICE_STATUS)}, "
+        f"{format_sql_literal(CANCELLED_SERVICE_STATUS)}) THEN 1 ELSE 0 END) AS ACTIVE_COUNT\n"
         f"  FROM {contracted_service_tbl} cs\n"
         f"  WHERE cs.ID_PAYMENT_FORM IN (SELECT DISTINCT ID_PAYMENT_FORM FROM terminated_services)\n"
         f"  GROUP BY cs.ID_PAYMENT_FORM\n"

@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import uuid
+import time
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -45,6 +46,8 @@ from app.core import disconnection_tnb
 from app.core import double_itb
 from app.core import wrong_billed_consumption
 from app.core import unusual_sanitary
+from app.core import wrong_bill_perc_dist
+from app.core import wrong_bill_sanitary_zero
 from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -1277,54 +1280,11 @@ def overview_stats(user: str = Depends(require_login)):
         d = today - timedelta(days=i)
         trend.append({"date": d.isoformat(), "count": day_counts.get(d.isoformat(), 0)})
 
+    # Live counts moved to /api/overview/count/{key} (RJ 2026-10-01: "show
+    # also case 4 ... and all that we have created") - the browser loads
+    # each card's count in parallel instead of this route running ~15
+    # detection queries one after another.
     live: dict[str, Optional[int]] = {}
-    if conn:
-        try:
-            result = mssql.run_query(
-                conn, date_anomaly.build_detect_all_anomalies_query(limit=date_anomaly.DETECT_ALL_DEFAULT_LIMIT),
-            )
-            live["dateanomaly"] = len(result.rows)
-        except Exception:
-            live["dateanomaly"] = None
-        try:
-            result = mssql.run_query(
-                conn, hierarchy_analysis.build_pending_primaries_query(limit=hierarchy_analysis.HIERARCHY_DEFAULT_LIMIT),
-            )
-            live["hierarchy"] = len(result.rows)
-        except Exception:
-            live["hierarchy"] = None
-        try:
-            stuck = mssql.run_query(
-                conn, bill_issuance_validator.build_stuck_bills_query(limit=bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT),
-            )
-            nc = mssql.run_query(
-                conn, bill_issuance_validator.build_new_contract_match_query(limit=bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT),
-            )
-            live["billissuance_case1"] = len(stuck.rows) + len(nc.rows)
-        except Exception:
-            live["billissuance_case1"] = None
-        try:
-            result = mssql.run_query(
-                conn, bill_issuance_validator.build_terminated_period_mismatch_query(limit=bill_issuance_validator.TERMINATED_PERIOD_DEFAULT_LIMIT),
-            )
-            rows = [dict(zip(result.columns, r)) for r in result.rows]
-            accounts = _case2_group_rows_by_account(rows)
-            live["billissuance_case2"] = sum(1 for a in accounts if not a["complete"])
-        except Exception:
-            live["billissuance_case2"] = None
-        try:
-            result = mssql.run_query(
-                conn, bill_issuance_validator.build_bills_complete_query(limit=bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_LIMIT),
-            )
-            live["billissuance_case3"] = len(result.rows)
-        except Exception:
-            live["billissuance_case3"] = None
-        # Critical card (RJ 2026-09-30): Wrong Bill CASE 1 - Unusual high Sanitary.
-        try:
-            result = mssql.run_query(conn, unusual_sanitary.build_query())
-            live["unusualsanitary"] = len(result.rows)
-        except Exception:
-            live["unusualsanitary"] = None
 
     try:
         bulk_checker_search_count = len(bulk_checker_db.list_search_history(config.internal_db_path))
@@ -1339,6 +1299,70 @@ def overview_stats(user: str = Depends(require_login)):
         "live": live,
         "bulk_checker_search_count": bulk_checker_search_count,
     }
+
+
+def _ov_dateanomaly(conn, user):
+    return len(mssql.run_query(conn, date_anomaly.build_detect_all_anomalies_query(limit=date_anomaly.DETECT_ALL_DEFAULT_LIMIT)).rows)
+
+
+def _ov_hierarchy(conn, user):
+    return len(mssql.run_query(conn, hierarchy_analysis.build_pending_primaries_query(limit=hierarchy_analysis.HIERARCHY_DEFAULT_LIMIT)).rows)
+
+
+def _ov_biss1(conn, user):
+    stuck = mssql.run_query(conn, bill_issuance_validator.build_stuck_bills_query(limit=bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT))
+    nc = mssql.run_query(conn, bill_issuance_validator.build_new_contract_match_query(limit=bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT))
+    return len(stuck.rows) + len(nc.rows)
+
+
+def _ov_biss2(conn, user):
+    result = mssql.run_query(conn, bill_issuance_validator.build_terminated_period_mismatch_query(limit=bill_issuance_validator.TERMINATED_PERIOD_DEFAULT_LIMIT))
+    accounts = _case2_group_rows_by_account([dict(zip(result.columns, r)) for r in result.rows])
+    return sum(1 for a in accounts if not a["complete"])
+
+
+def _ov_biss3(conn, user):
+    return len(mssql.run_query(conn, bill_issuance_validator.build_bills_complete_query(limit=bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_LIMIT)).rows)
+
+
+# key -> callable(conn, user) returning an int. Cards whose page is driven
+# by a user input (Reading Validation NISS, Wrong Billed Consumption's
+# chunked period job, Bulk Checker) have no count here.
+_OVERVIEW_COUNTERS = {
+    "dateanomaly": _ov_dateanomaly,
+    "hierarchy": _ov_hierarchy,
+    "billissuance_case1": _ov_biss1,
+    "billissuance_case2": _ov_biss2,
+    "billissuance_case3": _ov_biss3,
+    "billissuance_case4": lambda conn, user: bill_issuance_case4_detect(user=user)["account_count"],
+    "incorrectbillingperiod": lambda conn, user: incorrect_billing_period_detect(user=user)["anomaly_count"],
+    "tnbcycledisc": lambda conn, user: tnb_cycle_disc_detect(user=user)["count"],
+    "wrongstuckhierarchy": lambda conn, user: wrong_stuck_hierarchy_detect(body=None, user=user)["count"],
+    "wrongstuckhierarchy_sanitary": lambda conn, user: wrong_stuck_hierarchy_sanitary_detect(user=user)["count"],
+    "disconnectiontnb": lambda conn, user: disconnection_tnb_detect(user=user)["count"],
+    "doubleitb": lambda conn, user: double_itb_detect(user=user)["needs_rebilling_count"],
+    "unusualsanitary": lambda conn, user: len(mssql.run_query(conn, unusual_sanitary.build_query()).rows),
+    "wrongbill_case2": lambda conn, user: wrong_bill_perc_dist_detect(user=user)["primary_count"],
+    "wrongbill_case3": lambda conn, user: wrong_bill_sanitary_zero_detect(body=None, user=user)["count"],
+}
+
+
+@app.get("/api/overview/count/{key}")
+def overview_count(key: str, user: str = Depends(require_login)):
+    fn = _OVERVIEW_COUNTERS.get(key)
+    if fn is None:
+        raise HTTPException(status_code=404, detail=f"Unknown overview card '{key}'.")
+    conn = load_config().get_active_connection()
+    if not conn:
+        return {"key": key, "count": None, "error": "No connection configured."}
+    t0 = time.time()
+    try:
+        count = fn(conn, user)
+    except HTTPException as exc:
+        return {"key": key, "count": None, "error": str(exc.detail)}
+    except Exception as exc:  # noqa: BLE001 - a failing card must not break the page
+        return {"key": key, "count": None, "error": str(exc)}
+    return {"key": key, "count": count, "elapsed_ms": int((time.time() - t0) * 1000)}
 
 
 # ---------------------------------------------------------------------
@@ -4244,6 +4268,98 @@ def unusual_sanitary_detect(user: str = Depends(require_login)):
         "rows": rows,
         "count": len(rows),
         "bill_count": len({r.get("id_bill") for r in rows}),
+        "account_count": len({r.get("reference") for r in rows}),
+    }
+
+
+@app.post("/api/wrong-bill/perc-dist/detect")
+def wrong_bill_perc_dist_detect(user: str = Depends(require_login)):
+    """Wrong Bill Case 2 (RJ 2026-10-01): % distribution primaries (calc
+    module 1150) with an active secondary that has a current device. One
+    entry per primary with its secondaries as details."""
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, wrong_bill_perc_dist.build_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    flat = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    primaries = wrong_bill_perc_dist.group_rows(flat)
+    return {
+        "primaries": primaries,
+        "primary_count": len(primaries),
+        "metered_secondary_count": sum(p["metered_count"] for p in primaries),
+        "secondary_count": len(flat),
+    }
+
+
+class WrongBillSanitaryZeroRequest(BaseModel):
+    id_billing_period: Optional[str] = None
+    billing_periods: list[str] = []      # several periods (RJ 2026-10-01)
+    date_from: Optional[str] = None      # bill CREATE_DATE range (inclusive)
+    date_to: Optional[str] = None
+
+
+def _current_billing_period_id(conn) -> Optional[int]:
+    res = mssql.run_query(conn, wrong_billed_consumption.build_billing_periods_query())
+    for r in res.rows:
+        row = dict(zip([c.upper() for c in res.columns], r))
+        if str(diff_engine.cell_display(row.get("IS_CURRENT"))) == "1":
+            return int(row["ID_BILLING_PERIOD"])
+    return None
+
+
+@app.post("/api/wrong-bill/sanitary-zero/detect")
+def wrong_bill_sanitary_zero_detect(body: WrongBillSanitaryZeroRequest | None = None, user: str = Depends(require_login)):
+    """Wrong Bill Case 3 (RJ 2026-10-01): charging-tariff Sanitary bill with
+    SANITARY = 0 while the same account's water bill (same period + billing
+    date) has CONCSMO003 > 0. Scope: one billing period (default current)
+    or a billing-date range."""
+    body = body or WrongBillSanitaryZeroRequest()
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        raw = [p.strip() for p in (body.billing_periods or []) if p and p.strip()]
+        if (body.id_billing_period or "").strip():
+            raw.append(body.id_billing_period.strip())
+        if any(not p.isdigit() for p in raw):
+            raise HTTPException(status_code=400, detail="Billing period ids must be numeric.")
+        periods = sorted({int(p) for p in raw})
+        has_dates = bool(body.date_from or body.date_to)
+        if not periods and not has_dates:
+            current = _current_billing_period_id(conn)
+            if current is None:
+                raise HTTPException(status_code=400, detail="No current billing period found - pick one.")
+            periods = [current]
+        id_from = id_to = None
+        if has_dates and body.date_from and body.date_to:
+            # Step 1: resolve the ID_BILL window for the creation dates, then
+            # pass it as literals (keeps the main query on a PK seek).
+            rng = mssql.run_query(conn, wrong_bill_sanitary_zero.build_id_range_query(body.date_from, body.date_to))
+            if rng.rows:
+                id_from, id_to = int(rng.rows[0][0]), int(rng.rows[0][1])
+        sql = wrong_bill_sanitary_zero.build_query(
+            billing_periods=periods,
+            date_from=body.date_from if has_dates else None,
+            date_to=body.date_to if has_dates else None,
+            id_from=id_from, id_to=id_to,
+        )
+        scope = {"billing_periods": periods, "date_from": body.date_from if has_dates else None,
+                 "date_to": body.date_to if has_dates else None}
+        res = mssql.run_query(conn, sql)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    return {
+        "scope": scope,
+        "rows": rows,
+        "count": len(rows),
         "account_count": len({r.get("reference") for r in rows}),
     }
 

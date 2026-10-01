@@ -1024,10 +1024,26 @@ button { font-family: inherit; }
   50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
 }
 .usan-amount { color: #ef4444; }
+.wbsz-scope { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; }
+.wbsz-scope .hx-field { min-width: 240px; }
+.wbsz-period-list { max-height: 150px; overflow-y: auto; border: 1px solid var(--card-border); border-radius: 8px; padding: 6px 8px; min-width: 240px; }
+.wbsz-period-list label { display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer; font-size: 12.5px; }
+.wbsz-period-list label.is-current { font-weight: 700; }
+.wbsz-dates { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.overview-card-loading { animation: overviewLoading 1.2s ease-in-out infinite; }
+@keyframes overviewLoading { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 /* Wrong Bill case tabs: count badge per tab */
 .wb-tab-count { display: inline-block; min-width: 22px; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11.5px; font-weight: 700; text-align: center; background: rgba(148, 163, 184, 0.25); color: inherit; }
 .wb-tab-count.is-zero { background: rgba(16, 185, 129, 0.2); color: #10b981; }
 .wb-tab-count.is-alarm { background: #ef4444; color: #fff; }
+/* Wrong Bill Case 2: expandable primary rows */
+.wbpd-main { cursor: pointer; }
+.wbpd-main.is-open > td { background: rgba(99, 102, 241, 0.10); }
+.wbpd-toggle { width: 22px; text-align: center; font-weight: 700; color: var(--text-muted); }
+.wbpd-detail-row > td { padding: 0 0 10px 28px !important; background: rgba(99, 102, 241, 0.04); }
+.wbpd-detail { border-left: 3px solid #6366f1; padding: 6px 0 0 10px; }
+.wbpd-sec-table { font-size: 12px; }
+.wbpd-sec-table tr.wbpd-sec-metered > td { background: rgba(239, 68, 68, 0.10); }
 .usan-alert-card { margin-top: 14px; }
 .usan-alert-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .usan-alert-head h3 { margin: 0; }

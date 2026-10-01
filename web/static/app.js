@@ -258,6 +258,16 @@ const OVERVIEW_CARDS = [
     page: "wrongbill", subAttr: "data-wb-sub", subValue: "case1", group: "Critical", critical: true,
   },
   {
+    key: "wrongbill_case2", icon: "🚨", label: "Wrong Bill · Case 2 - % Distribution with metered secondary", color: "#ef4444",
+    desc: "CRITICAL: % distribution primaries with a metered Secondary.",
+    page: "wrongbill", subAttr: "data-wb-sub", subValue: "case2", group: "Critical", critical: true,
+  },
+  {
+    key: "wrongbill_case3", icon: "🚨", label: "Wrong Bill · Case 3 - Sanitary 0 with water consumption", color: "#ef4444",
+    desc: "CRITICAL: charging-tariff sanitary bill = 0 while water was consumed (current period).",
+    page: "wrongbill", subAttr: "data-wb-sub", subValue: "case3", group: "Critical", critical: true,
+  },
+  {
     key: "dateanomaly", icon: "🩹", label: "DIFF DATES Anomaly", color: "#3b5bfd",
     desc: "Open billing/reading date anomalies system-wide.",
     page: "dateanomaly", subAttr: "data-da-sub", subValue: "detectall",
@@ -286,6 +296,55 @@ const OVERVIEW_CARDS = [
     desc: "Accounts flagged: all contract status, bills complete.",
     page: "billissuance", subAttr: "data-biss-sub", subValue: "case3",
     group: "Bill Issuance Validator",
+  },
+  {
+    key: "billissuance_case4", icon: "🧾", label: "Case 4 - Unclassified", color: "#f59e0b",
+    desc: "Accounts not in Case 1, 2 or 3.",
+    page: "billissuance", subAttr: "data-biss-sub", subValue: "case4",
+    group: "Bill Issuance Validator",
+  },
+  // ---- Billing anomalies (RJ 2026-10-01: "and all that we have created")
+  {
+    key: "incorrectbillingperiod", icon: "📅", label: "Incorrect Billing Period", color: "#ec4899",
+    desc: "Anomalies with a wrong billing period.",
+    page: "incorrectbillingperiod", group: "Billing anomalies",
+  },
+  {
+    key: "doubleitb", icon: "👯", label: "DOUBLE ITB", color: "#ec4899",
+    desc: "Anomalous items to bill with a billed twin that need rebilling.",
+    page: "doubleitb", group: "Billing anomalies",
+  },
+  {
+    key: "wrongbilledconsumption", icon: "⚖️", label: "Wrong Billed Consumption", color: "#ec4899",
+    desc: "Calc base vs ready usage, current period (heavy scan — run it on the page).",
+    page: "wrongbilledconsumption", group: "Billing anomalies", nocount: true,
+  },
+  // ---- Hierarchy & readings
+  {
+    key: "wrongstuckhierarchy", icon: "🪜", label: "Wrong Stuck in Hierarchy ITB", color: "#8b5cf6",
+    desc: "Billed primary with secondary items stuck.",
+    page: "wrongstuckhierarchy", subAttr: "data-wsh-sub", subValue: "primary", group: "Hierarchy & readings",
+  },
+  {
+    key: "wrongstuckhierarchy_sanitary", icon: "🪜", label: "Sanitary Stuck, Water Billed/Pending", color: "#8b5cf6",
+    desc: "Sanitary item stuck while the Water item is billed or pending.",
+    page: "wrongstuckhierarchy", subAttr: "data-wsh-sub", subValue: "sanitary", group: "Hierarchy & readings",
+  },
+  {
+    key: "readingvalidation", icon: "📏", label: "Reading Validation/Modif", color: "#8b5cf6",
+    desc: "Look up and correct readings by NISS / account.",
+    page: "readingvalidation", group: "Hierarchy & readings", nocount: true,
+  },
+  // ---- TNB / disconnection
+  {
+    key: "tnbcycledisc", icon: "📍", label: "TNB CYCLE/DISC Analysis", color: "#14b8a6",
+    desc: "TNB cycle / disconnection readings to review.",
+    page: "tnbcycledisc", group: "TNB / Disconnection",
+  },
+  {
+    key: "disconnectiontnb", icon: "⛔", label: "Disconnection TNB", color: "#14b8a6",
+    desc: "Disconnection TNB cases.",
+    page: "disconnectiontnb", group: "TNB / Disconnection",
   },
   {
     key: "bulkchecker", icon: "📋", label: "Bulk Checker", color: "#10b981",
@@ -317,20 +376,50 @@ function overviewNavigateTo(page, subAttr, subValue) {
   }
 }
 
+// Live counts, filled card by card from /api/overview/count/{key}
+// (RJ 2026-10-01: every menu on Overview - loaded in parallel, max 4 at a
+// time, so one slow query never holds the others back).
+// overviewLive[key]: undefined = loading, null = failed, number = count.
+let overviewLive = {};
+let overviewLiveErr = {};
+let overviewGen = 0;
+
+function overviewCardVisible(c) {
+  const nav = document.querySelector(`.nav-item[data-page="${c.page}"]`);
+  return !nav || !nav.hidden;
+}
+
+function overviewValueHtml(c, stats) {
+  if (c.nocount) return `<span class="overview-card-value is-empty" title="Count runs on the page">Open</span>`;
+  const value = c.localValue ? c.localValue(stats) : overviewLive[c.key];
+  if (value === undefined && !c.localValue) return `<span class="overview-card-value is-empty overview-card-loading">…</span>`;
+  if (value === null || value === undefined) {
+    const err = overviewLiveErr[c.key];
+    return `<span class="overview-card-value is-empty"${err ? ` title="${escapeHtml(err)}"` : ""}>—</span>`;
+  }
+  return `<span class="overview-card-value">${Number(value).toLocaleString()}</span>`;
+}
+
+function overviewUpdateCard(c, stats) {
+  const el = document.querySelector(`[data-overview-card="${c.key}"]`);
+  if (!el) return;
+  const top = el.querySelector(".overview-card-top");
+  top.innerHTML = `<span class="overview-card-icon">${c.icon}</span>${overviewValueHtml(c, stats)}`;
+  el.classList.toggle("is-alarm", !!c.critical && Number(overviewLive[c.key]) > 0);
+}
+
 function overviewRenderCards(stats) {
   const grid = $("#overview-cards");
   const groups = []; // preserves first-appearance order from OVERVIEW_CARDS
-  OVERVIEW_CARDS.forEach((c) => {
+  OVERVIEW_CARDS.filter(overviewCardVisible).forEach((c) => {
     let g = groups.find((x) => x.name === c.group);
     if (!g) { g = { name: c.group, cards: [] }; groups.push(g); }
     g.cards.push(c);
   });
   grid.innerHTML = groups.map((g) => {
     const cardsHtml = g.cards.map((c) => {
-      const value = c.localValue ? c.localValue(stats) : (stats.live || {})[c.key];
-      const valueHtml = (value === null || value === undefined)
-        ? `<span class="overview-card-value is-empty">—</span>`
-        : `<span class="overview-card-value">${value}</span>`;
+      const valueHtml = overviewValueHtml(c, stats);
+      const value = overviewLive[c.key];
       return (
         `<button type="button" class="overview-card${c.critical ? " overview-card-critical" : ""}${c.critical && Number(value) > 0 ? " is-alarm" : ""}" style="--overview-accent:${c.color}" data-overview-card="${c.key}">` +
         `<div class="overview-card-top"><span class="overview-card-icon">${c.icon}</span>${valueHtml}</div>` +
@@ -362,15 +451,15 @@ function overviewRenderCards(stats) {
 // own page - just no longer charted here.
 function overviewRenderPie(stats) {
   const canvas = $("#overview-pie-canvas");
-  const live = stats.live || {};
-  const billTotal = [live.billissuance_case1, live.billissuance_case2, live.billissuance_case3]
-    .filter((v) => v !== null && v !== undefined)
-    .reduce((a, b) => a + b, 0);
-  const areas = [
-    { label: "DIFF DATES Anomaly", value: live.dateanomaly, page: "dateanomaly", subAttr: "data-da-sub", subValue: "detectall" },
-    { label: "Hierarchy Analysis", value: live.hierarchy, page: "hierarchy" },
-    { label: "Bill Issuance Validator", value: billTotal, page: "billissuance", subAttr: "data-biss-sub", subValue: "case1" },
-  ].filter((a) => a.value !== null && a.value !== undefined);
+  // One slice per Overview group (sum of its cards' live counts).
+  const areas = [];
+  OVERVIEW_CARDS.filter((c) => !c.localValue && !c.nocount && overviewCardVisible(c)).forEach((c) => {
+    const v = overviewLive[c.key];
+    if (v === null || v === undefined) return;
+    let a = areas.find((x) => x.label === c.group);
+    if (!a) { a = { label: c.group, value: 0, page: c.page, subAttr: c.subAttr, subValue: c.subValue }; areas.push(a); }
+    a.value += Number(v) || 0;
+  });
 
   const labels = areas.map((a) => a.label);
   const values = areas.map((a) => a.value);
@@ -385,7 +474,7 @@ function overviewRenderPie(stats) {
 
   const legendEl = $("#overview-pie-canvas-legend");
   if (!labels.length) {
-    legendEl.innerHTML = `<span class="hint-text">No database connection yet.</span>`;
+    legendEl.innerHTML = `<span class="hint-text">${stats.has_connection ? "Loading counts…" : "No database connection yet."}</span>`;
     return;
   }
   legendEl.innerHTML = labels.map((lab, i) => `
@@ -400,11 +489,12 @@ function overviewRenderPie(stats) {
 
 function overviewRenderTrend(stats) {
   const canvas = $("#overview-trend-canvas");
-  const live = stats.live || {};
+  const live = overviewLive;
   const cases = [
     { label: "Case 1", value: live.billissuance_case1, subValue: "case1" },
     { label: "Case 2", value: live.billissuance_case2, subValue: "case2" },
     { label: "Case 3", value: live.billissuance_case3, subValue: "case3" },
+    { label: "Case 4", value: live.billissuance_case4, subValue: "case4" },
   ].filter((c) => c.value !== null && c.value !== undefined);
   drawBarChart(canvas, cases.map((c) => c.label), cases.map((c) => c.value), {
     colors: cases.map((c) => _categoricalColor(c.label)),
@@ -421,22 +511,46 @@ async function loadOverview() {
   const wasEmpty = !grid.children.length;
   if (wasEmpty) grid.innerHTML = `<div class="overview-empty-state">Loading…</div>`;
   if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = "🔄 Refreshing…"; }
+  const gen = ++overviewGen;
   try {
     const stats = await api("/api/overview/stats");
     $("#overview-connection-note").hidden = !!stats.has_connection;
     if (!stats.has_connection) {
       $("#overview-connection-note").textContent =
-        "No database connection configured yet — connect one in Settings to see live counts for DIFF DATES, Hierarchy Analysis, and Bill Issuance.";
+        "No database connection configured yet — connect one in Settings to see live counts.";
     }
+    // Keep previous counts visible while refreshing; mark them loading only on first load.
+    if (wasEmpty) { overviewLive = {}; overviewLiveErr = {}; }
     overviewRenderCards(stats);
     overviewRenderPie(stats);
     overviewRenderTrend(stats);
+    if (stats.has_connection) {
+      const queue = OVERVIEW_CARDS.filter((c) => !c.localValue && !c.nocount && overviewCardVisible(c));
+      const worker = async () => {
+        while (queue.length && gen === overviewGen) {
+          const c = queue.shift();
+          try {
+            const r = await api(`/api/overview/count/${encodeURIComponent(c.key)}`);
+            overviewLive[c.key] = r.count ?? null;
+            if (r.error) overviewLiveErr[c.key] = r.error; else delete overviewLiveErr[c.key];
+          } catch (err) {
+            overviewLive[c.key] = null;
+            overviewLiveErr[c.key] = err.message;
+          }
+          if (gen === overviewGen) overviewUpdateCard(c, stats);
+        }
+      };
+      await Promise.all([worker(), worker(), worker(), worker()]);
+      if (gen !== overviewGen) return;
+      overviewRenderPie(stats);
+      overviewRenderTrend(stats);
+    }
     const lastUpdated = $("#overview-last-updated");
     if (lastUpdated) lastUpdated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
   } catch (err) {
     grid.innerHTML = `<div class="overview-empty-state">Couldn't load overview: ${escapeHtml(err.message || "unknown error")}</div>`;
   } finally {
-    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = "🔄 Refresh"; }
+    if (refreshBtn && gen === overviewGen) { refreshBtn.disabled = false; refreshBtn.textContent = "🔄 Refresh"; }
   }
 }
 $("#overview-refresh-btn")?.addEventListener("click", () => loadOverview());
@@ -6374,6 +6488,8 @@ async function usanLoadAlertStatus() {
 // .da-subpage[data-wb-sub=caseN], an entry in WB_TABS, and HX_REFRESH.wrongbill.
 const WB_TABS = {
   case1: { scan: () => usanScan(), loaded: () => usanScanned, onShow: () => usanLoadAlertStatus() },
+  case2: { scan: () => wbpdScan(), loaded: () => wbpdScanned },
+  case3: { scan: () => wbszScan(), loaded: () => wbszScanned, onShow: () => wbszLoadPeriods() },
 };
 function wbSetTabCount(sub, n) {
   const el = document.querySelector(`[data-wb-count="${sub}"]`);
@@ -6397,6 +6513,441 @@ $$(".da-subnav-btn[data-wb-sub]").forEach((btn) => {
     const t = WB_TABS[sub];
     if (t && t.onShow) t.onShow();
   });
+});
+
+// ---- Wrong Bill Case 2: % distribution primary with a metered secondary (RJ 2026-10-01)
+// See app/core/wrong_bill_perc_dist.py. One row per primary; secondaries
+// render only when expanded (984 primaries / ~6k secondaries live).
+let wbpdPrimaries = [];
+let wbpdScanned = false;
+let wbpdSortKey = null;
+let wbpdSortDir = 1;
+let wbpdPerc = "";
+let wbpdPdev = "";
+const wbpdOpen = new Set();
+const WBPD_COLUMNS = [
+  { key: "_toggle", label: "", nosort: true },
+  { key: "p_id_mp", label: "Primary MP", mono: true },
+  { key: "p_niss", label: "NISS", render: (p) => `<span class="hx-niss">${escapeHtml(p.p_niss ?? "")}</span>` + wbpdCopyBtn(p.p_niss, "Copy main sector supply (NISS)") },
+  { key: "p_account", label: "Account", mono: true, render: (p) => escapeHtml(p.p_account ?? "") + wbpdCopyBtn(p.p_account, "Copy account number") },
+  { key: "metered_count", label: "★ Metered secondaries", num: true, render: (p) => `<span class="hx-pill hx-pill-billed">${p.metered_count}</span>` },
+  { key: "secondary_count", label: "Active secondaries", num: true },
+  { key: "metered_types", label: "Metered type", render: (p) => (p.metered_types || []).map((t) => `<span class="hx-pill hx-pill-amber">${escapeHtml(t)}</span>`).join(" ") },
+  { key: "perc_dist_sum", label: "Σ % (primary + secondaries)", num: true, render: (p) => {
+      const ok = Math.abs(Number(p.perc_dist_sum) - 100) < 0.05;
+      return `<span class="${ok ? "" : "usan-amount"}">${escapeHtml(String(p.perc_dist_sum))}</span>`; } },
+  { key: "p_perc_dist", label: "Primary %", num: true },
+  { key: "p_id_device", label: "Primary device", mono: true },
+  { key: "p_mp_type_desc", label: "Primary type" },
+  { key: "p_status_desc", label: "Primary status" },
+];
+const WBPD_SEC_COLUMNS = [
+  ["id_mp", "Secondary MP"], ["niss", "NISS"], ["mp_type_desc", "Type"], ["status_desc", "Status"],
+  ["perc_dist", "%"], ["ind_dist_ppal", "IND_DIST_PPAL"], ["id_device", "ID Device"], ["serial_num", "Serial"],
+  ["installation_date", "Installed"], ["calc_module", "Calc module"],
+];
+
+// RJ 2026-10-01: "add a way to copy the main sector supply or account".
+function wbpdCopyBtn(value, title) {
+  if (!value) return "";
+  return ` <button type="button" class="biss2-copy-btn" data-wbpd-copy="${escapeHtml(value)}" title="${escapeHtml(title)}">📋</button>`;
+}
+
+function wbpdIsPerc100(p) { return Math.abs(Number(p.perc_dist_sum) - 100) < 0.05; }
+
+function wbpdVisible() {
+  const q = $("#wbpd-filter-search").value.trim().toLowerCase();
+  const ps = $("#wbpd-filter-pstatus").value;
+  const st = $("#wbpd-filter-stype").value;
+  let rows = wbpdPrimaries.filter((p) => {
+    if (ps && p.p_status_desc !== ps) return false;
+    if (st && !(p.metered_types || []).includes(st)) return false;
+    if (wbpdPerc === "100" && !wbpdIsPerc100(p)) return false;
+    if (wbpdPerc === "not100" && wbpdIsPerc100(p)) return false;
+    if (wbpdPdev === "1" && !p.p_id_device) return false;
+    if (wbpdPdev === "0" && p.p_id_device) return false;
+    if (q) {
+      const hay = [p.p_id_mp, p.p_niss, p.p_account, p.p_id_device]
+        .concat(...(p.secondaries || []).map((s) => [s.id_mp, s.niss, s.id_device, s.serial_num]));
+      if (!hay.some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    }
+    return true;
+  });
+  if (wbpdSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(
+    Array.isArray(a[wbpdSortKey]) ? a[wbpdSortKey].join(",") : a[wbpdSortKey],
+    Array.isArray(b[wbpdSortKey]) ? b[wbpdSortKey].join(",") : b[wbpdSortKey], wbpdSortDir));
+  return rows;
+}
+
+function wbpdDetailHtml(p) {
+  const head = WBPD_SEC_COLUMNS.map(([, l]) => `<th>${escapeHtml(l)}</th>`).join("");
+  const body = (p.secondaries || []).map((s) => {
+    const metered = String(s.has_device) === "1";
+    return `<tr class="${metered ? "wbpd-sec-metered" : ""}">` + WBPD_SEC_COLUMNS.map(([k]) => {
+      let v = s[k] ?? "";
+      if (k === "installation_date") return `<td>${hxDate(v)}</td>`;
+      if (k === "id_device" && metered) return `<td class="hx-mono"><strong>${escapeHtml(v)}</strong> <span class="hx-pill hx-pill-billed">device</span></td>`;
+      return `<td class="${["id_mp", "id_device", "serial_num"].includes(k) ? "hx-mono" : ""}">${escapeHtml(v)}</td>`;
+    }).join("") + "</tr>";
+  }).join("");
+  return `<tr class="wbpd-detail-row"><td colspan="${WBPD_COLUMNS.length}"><div class="wbpd-detail"><table class="data-grid wbpd-sec-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div></td></tr>`;
+}
+
+function wbpdRender() {
+  const head = document.querySelector("#wbpd-table thead tr");
+  head.innerHTML = WBPD_COLUMNS.map((c) => {
+    if (c.nosort) return `<th></th>`;
+    const arrow = wbpdSortKey === c.key ? `<span class="stats-table-sort-arrow">${wbpdSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    wbpdSortDir = wbpdSortKey === k ? -wbpdSortDir : 1;
+    wbpdSortKey = k;
+    wbpdRender();
+  }));
+  const rows = wbpdVisible();
+  document.querySelector("#wbpd-table tbody").innerHTML = rows.length
+    ? rows.map((p) => {
+        const open = wbpdOpen.has(String(p.p_id_mp));
+        const main = `<tr class="hx-row wbpd-main${open ? " is-open" : ""}" data-wbpd-mp="${escapeHtml(p.p_id_mp)}">` + WBPD_COLUMNS.map((c) => {
+          if (c.key === "_toggle") return `<td class="wbpd-toggle">${open ? "▾" : "▸"}</td>`;
+          const v = c.render ? c.render(p) : escapeHtml(p[c.key] ?? "");
+          return `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${v}</td>`;
+        }).join("") + "</tr>";
+        return open ? main + wbpdDetailHtml(p) : main;
+      }).join("")
+    : `<tr><td colspan="${WBPD_COLUMNS.length}" class="hint-text">${wbpdPrimaries.length ? "No primaries match the current filters." : "✅ No % distribution primary with a metered secondary."}</td></tr>`;
+  renderFilteredCount("#wbpd-filtered-count", rows.length, wbpdPrimaries.length);
+  if (wbpdPrimaries.length) {
+    const n = rows.length;
+    const metered = rows.reduce((a, p) => a + p.metered_count, 0);
+    const meteredSecs = rows.flatMap((p) => (p.secondaries || []).filter((s) => String(s.has_device) === "1"));
+    const discon = rows.filter((p) => (p.secondaries || []).some((s) => String(s.has_device) === "1" && s.status === "2000STAMPO")).length;
+    hxRenderDashboard("wbpd-dash", {
+      gauges: [
+        { label: "Σ % ≠ 100", count: rows.filter((p) => !wbpdIsPerc100(p)).length, total: n, c1: "#ef4444", c2: "#f97316",
+          hint: "Primary + secondaries' PERC_DIST does not add up to 100" },
+        { label: "Primary has a device", count: rows.filter((p) => p.p_id_device).length, total: n, c1: "#6366f1", c2: "#06b6d4" },
+        { label: "Metered secondary disconnected", count: discon, total: n, c1: "#f59e0b", c2: "#eab308",
+          hint: "At least one metered secondary has status Disconnected" },
+      ],
+      tiles: [
+        { icon: "🏢", label: "Primaries", value: n.toLocaleString(), accent: true },
+        { icon: "🔌", label: "Metered secondaries", value: metered.toLocaleString() },
+        { icon: "🔗", label: "Non-inactive secondaries", value: rows.reduce((a, p) => a + p.secondary_count, 0).toLocaleString() },
+        { icon: "👤", label: "Accounts", value: new Set(rows.map((p) => p.p_account).filter(Boolean)).size.toLocaleString() },
+      ],
+      split: { title: "Metered secondary status", entries: hxCountBy(meteredSecs, (s) => s.status_desc) },
+    });
+  }
+}
+
+async function wbpdScan() {
+  const btn = $("#wbpd-detect-btn");
+  wbpdScanned = true;
+  btn.disabled = true;
+  $("#wbpd-summary").textContent = "Scanning… (about 10–15 s)";
+  try {
+    const data = await api("/api/wrong-bill/perc-dist/detect", { method: "POST" });
+    wbpdPrimaries = data.primaries || [];
+    const keepPs = $("#wbpd-filter-pstatus").value, keepSt = $("#wbpd-filter-stype").value;
+    $("#wbpd-filter-pstatus").innerHTML = `<option value="">All</option>` +
+      [...new Set(wbpdPrimaries.map((p) => p.p_status_desc).filter(Boolean))].sort().map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+    $("#wbpd-filter-stype").innerHTML = `<option value="">All</option>` +
+      [...new Set(wbpdPrimaries.flatMap((p) => p.metered_types || []).filter(Boolean))].sort().map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+    $("#wbpd-filter-pstatus").value = keepPs; $("#wbpd-filter-stype").value = keepSt;
+    $("#wbpd-filters").hidden = wbpdPrimaries.length === 0;
+    $("#wbpd-dash").hidden = wbpdPrimaries.length === 0;
+    $("#wbpd-export-btn").disabled = wbpdPrimaries.length === 0;
+    $("#wbpd-expand-btn").disabled = wbpdPrimaries.length === 0;
+    $("#wbpd-copy-niss-btn").disabled = wbpdPrimaries.length === 0;
+    $("#wbpd-copy-acct-btn").disabled = wbpdPrimaries.length === 0;
+    $("#wbpd-summary").textContent = wbpdPrimaries.length
+      ? `${data.primary_count} primary(ies) with ${data.metered_secondary_count} metered secondary(ies).`
+      : "✅ None found.";
+    wbSetTabCount("case2", data.primary_count);
+    wbpdRender();
+  } catch (err) {
+    wbSetTabCount("case2", null);
+    $("#wbpd-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("#wbpd-detect-btn").addEventListener("click", wbpdScan);
+document.querySelector("#wbpd-table tbody").addEventListener("click", (ev) => {
+  const copyBtn = ev.target.closest("[data-wbpd-copy]");
+  if (copyBtn) { ev.stopPropagation(); biss2CopyAccount(copyBtn.dataset.wbpdCopy, copyBtn); return; }
+  const tr = ev.target.closest("tr.wbpd-main");
+  if (!tr || ev.target.closest("a, button")) return;
+  const id = tr.dataset.wbpdMp;
+  if (wbpdOpen.has(id)) wbpdOpen.delete(id); else wbpdOpen.add(id);
+  wbpdRender();
+});
+$("#wbpd-expand-btn").addEventListener("click", () => {
+  const vis = wbpdVisible();
+  const allOpen = vis.length && vis.every((p) => wbpdOpen.has(String(p.p_id_mp)));
+  if (allOpen) vis.forEach((p) => wbpdOpen.delete(String(p.p_id_mp)));
+  else vis.forEach((p) => wbpdOpen.add(String(p.p_id_mp)));
+  $("#wbpd-expand-btn").textContent = allOpen ? "⊞ Expand all" : "⊟ Collapse all";
+  wbpdRender();
+});
+[["#wbpd-copy-niss-btn", "p_niss", "NISS"], ["#wbpd-copy-acct-btn", "p_account", "account(s)"]].forEach(([id, key, what]) => {
+  $(id).addEventListener("click", () => {
+    const vals = [...new Set(wbpdVisible().map((p) => p[key]).filter(Boolean))];
+    if (!vals.length) return;
+    biss2CopyAccount(vals.join("\n"), null);
+    showToast(`Copied ${vals.length} ${what} (one per line).`);
+  });
+});
+["#wbpd-filter-pstatus", "#wbpd-filter-stype"].forEach((id) => $(id).addEventListener("change", wbpdRender));
+$("#wbpd-filter-search").addEventListener("input", wbpdRender);
+[["#wbpd-filter-perc", (v) => { wbpdPerc = v; }], ["#wbpd-filter-pdev", (v) => { wbpdPdev = v; }]].forEach(([id, set]) => {
+  $(id).addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-value]");
+    if (!b) return;
+    set(b.dataset.value);
+    $$(`${id} button`).forEach((x) => x.classList.toggle("is-active", x === b));
+    wbpdRender();
+  });
+});
+$("#wbpd-filter-clear-btn").addEventListener("click", (ev) => {
+  ev.preventDefault();
+  ev.stopPropagation();
+  ["#wbpd-filter-pstatus", "#wbpd-filter-stype", "#wbpd-filter-search"].forEach((id) => { $(id).value = ""; });
+  wbpdPerc = ""; wbpdPdev = "";
+  ["#wbpd-filter-perc", "#wbpd-filter-pdev"].forEach((id) => $$(`${id} button`).forEach((x) => x.classList.toggle("is-active", x.dataset.value === "")));
+  wbpdRender();
+});
+$("#wbpd-export-btn").addEventListener("click", () => {
+  const rows = wbpdVisible();
+  if (!rows.length) return;
+  const pCols = ["p_id_mp", "p_niss", "p_account", "p_mp_type_desc", "p_status_desc", "p_perc_dist", "p_id_device", "metered_count", "secondary_count", "perc_dist_sum"];
+  const sCols = WBPD_SEC_COLUMNS.map(([k]) => k).concat("has_device");
+  const lines = [pCols.concat(sCols.map((k) => "s_" + k)).map((c) => `"${c.toUpperCase()}"`).join(",")];
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  rows.forEach((p) => (p.secondaries || []).forEach((s) =>
+    lines.push(pCols.map((k) => esc(p[k])).concat(sCols.map((k) => esc(s[k]))).join(","))));
+  const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `wrong_bill_case2_perc_dist_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---- Wrong Bill Case 3: Sanitary 0 while water consumed (RJ 2026-10-01)
+// See app/core/wrong_bill_sanitary_zero.py.
+let wbszRows = [];
+let wbszScanned = false;
+let wbszPeriodsLoaded = false;
+let wbszSortKey = null;
+let wbszSortDir = 1;
+let wbszConcept = "";
+const WBSZ_COLUMNS = [
+  { key: "reference", label: "Account", render: (r) => `<span class="hx-niss">${escapeHtml(r.reference ?? "")}</span>` + wbpdCopyBtn(r.reference, "Copy account number") },
+  { key: "niss", label: "NISS", mono: true, render: (r) => escapeHtml(r.niss ?? "") + wbpdCopyBtn(r.niss, "Copy NISS") },
+  { key: "water_consumption", label: "★ Water consumption", num: true, render: (r) => `<strong>${escapeHtml(hxFmtNum(r.water_consumption))}</strong>` },
+  { key: "sanitary_amount", label: "Sanitary amount", num: true, render: (r) => `<span class="usan-amount">${escapeHtml(hxFmtNum(r.sanitary_amount))}</span>` },
+  { key: "sanitary_concept_count", label: "Sanitary concept", render: (r) => Number(r.sanitary_concept_count) > 0
+      ? `<span class="hx-pill hx-pill-amber">Present, 0</span>` : `<span class="hx-pill hx-pill-billed">Missing</span>` },
+  { key: "billing_period_desc", label: "Billing period" },
+  { key: "billing_date", label: "Billing date", date: true },
+  { key: "create_date", label: "Created", date: true },
+  { key: "sanitary_id_bill", label: "Sanitary ID Bill", mono: true },
+  { key: "sanitary_bill_number", label: "Bill number", mono: true },
+  { key: "billing_status_desc", label: "Status" },
+  { key: "billing_type_desc", label: "Billing type", render: (r) => `${escapeHtml(r.billing_type_desc ?? "")} <span class="hint-text">${escapeHtml(r.billing_type ?? "")}</span>` },
+  { key: "fare_name", label: "Tariff (billed)", render: (r) => `${escapeHtml(r.fare_name ?? "")} <span class="hint-text" title="${escapeHtml(r.fare_source ?? "")}">${escapeHtml(r.id_fare ?? "")}</span>` +
+      (r.billing_service_fare && String(r.billing_service_fare) !== String(r.id_fare) ? ` <span class="hx-pill hx-pill-amber" title="Billing service fare today">BS ${escapeHtml(r.billing_service_fare)}</span>` : "") },
+  { key: "id_billing_service", label: "Billing service", mono: true },
+  { key: "sanitary_total_amount", label: "Sanitary bill total", num: true, render: (r) => escapeHtml(hxFmtNum(r.sanitary_total_amount)) },
+  { key: "water_id_bill", label: "Water ID Bill", mono: true, render: (r) => escapeHtml(r.water_id_bill ?? "") + (Number(r.water_bill_count) > 1 ? ` <span class="hx-pill hx-pill-ghost">×${escapeHtml(r.water_bill_count)}</span>` : "") },
+];
+
+async function wbszLoadPeriods() {
+  if (wbszPeriodsLoaded) return;
+  try {
+    const d = await api("/api/wrong-billed-consumption/billing-periods");
+    // RJ 2026-10-01: "the selection of id billing period to be by checkbox"
+    $("#wbsz-period").innerHTML = (d.periods || []).map((p) =>
+      `<label class="${p.is_current ? "is-current" : ""}"><input type="checkbox" value="${escapeHtml(p.id)}" data-desc="${escapeHtml(p.description)}"${p.is_current ? " checked" : ""} />` +
+      `${escapeHtml(p.description)}${p.is_current ? " (current)" : ""}</label>`).join("") || `<span class="hint-text">No periods.</span>`;
+    wbszPeriodsLoaded = true;
+    wbszScopeHint();
+  } catch { /* nothing selected = server uses the current period */ }
+}
+
+function wbszSelectedPeriods() {
+  return [...document.querySelectorAll("#wbsz-period input[type=checkbox]:checked")].map((o) => o.value).filter(Boolean);
+}
+
+function wbszScopeHint() {
+  const n = wbszSelectedPeriods().length;
+  const f = $("#wbsz-date-from").value, t = $("#wbsz-date-to").value;
+  const parts = [];
+  if (n) parts.push(`${n} billing period(s)`);
+  if (f && t) parts.push(`created ${f} → ${t}`);
+  $("#wbsz-scope-hint").textContent = parts.length ? `Scope: ${parts.join(" AND ")}` : "Scope: current billing period";
+}
+
+function wbszVisible() {
+  const q = $("#wbsz-filter-search").value.trim().toLowerCase();
+  const st = $("#wbsz-filter-status").value;
+  const bd = $("#wbsz-filter-bdate").value;
+  let rows = wbszRows.filter((r) => {
+    if (st && r.billing_status_desc !== st) return false;
+    if (bd && String(r.billing_date).slice(0, 10) !== bd) return false;
+    if (wbszConcept === "zero" && !(Number(r.sanitary_concept_count) > 0)) return false;
+    if (wbszConcept === "missing" && Number(r.sanitary_concept_count) > 0) return false;
+    if (q && ![r.reference, r.niss, r.sanitary_id_bill, r.sanitary_bill_number, r.water_id_bill, r.id_billing_service]
+      .some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    return true;
+  });
+  if (wbszSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[wbszSortKey], b[wbszSortKey], wbszSortDir));
+  return rows;
+}
+
+function wbszRender() {
+  const head = document.querySelector("#wbsz-table thead tr");
+  head.innerHTML = WBSZ_COLUMNS.map((c) => {
+    const arrow = wbszSortKey === c.key ? `<span class="stats-table-sort-arrow">${wbszSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    wbszSortDir = wbszSortKey === k ? -wbszSortDir : 1;
+    wbszSortKey = k;
+    wbszRender();
+  }));
+  const rows = wbszVisible();
+  document.querySelector("#wbsz-table tbody").innerHTML = rows.length
+    ? rows.map((r) => `<tr class="hx-row hx-row-anomalous">` + WBSZ_COLUMNS.map((c) =>
+        `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${c.render ? c.render(r) : c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? "")}</td>`).join("") + "</tr>").join("")
+    : `<tr><td colspan="${WBSZ_COLUMNS.length}" class="hint-text">${wbszRows.length ? "No rows match the current filters." : "✅ No sanitary bill at 0 with water consumption."}</td></tr>`;
+  renderFilteredCount("#wbsz-filtered-count", rows.length, wbszRows.length);
+  if (wbszRows.length) {
+    const n = rows.length;
+    hxRenderDashboard("wbsz-dash", {
+      gauges: [
+        { label: "Sanitary concept missing", count: rows.filter((r) => !(Number(r.sanitary_concept_count) > 0)).length, total: n, c1: "#ef4444", c2: "#f97316",
+          hint: "No SANITARY concept on the bill at all" },
+        { label: "Sanitary concept present, 0", count: rows.filter((r) => Number(r.sanitary_concept_count) > 0).length, total: n, c1: "#f59e0b", c2: "#eab308" },
+        { label: "Already invoiced", count: rows.filter((r) => r.billing_status === "ESTFAC0005").length, total: n, c1: "#6366f1", c2: "#06b6d4",
+          hint: "Sanitary bill status Invoiced (ESTFAC0005) - needs rebilling" },
+      ],
+      tiles: [
+        { icon: "🚨", label: "Sanitary bills", value: n.toLocaleString(), accent: true },
+        { icon: "💧", label: "Water consumption (sum)", value: hxFmtNum(hxSum(rows, "water_consumption")) },
+        { icon: "👤", label: "Accounts", value: new Set(rows.map((r) => r.reference).filter(Boolean)).size.toLocaleString() },
+        { icon: "📅", label: "Billing dates", value: new Set(rows.map((r) => String(r.billing_date).slice(0, 10))).size.toLocaleString() },
+      ],
+      split: { title: "Bill status", entries: hxCountBy(rows, (r) => r.billing_status_desc) },
+    });
+  }
+}
+
+async function wbszScan() {
+  const btn = $("#wbsz-detect-btn");
+  wbszScanned = true;
+  btn.disabled = true;
+  $("#wbsz-summary").textContent = "Scanning…";
+  try {
+    await wbszLoadPeriods();
+    const f = $("#wbsz-date-from").value, t = $("#wbsz-date-to").value;
+    if ((f && !t) || (!f && t)) throw new Error("Give both creation dates (from and to), or clear them.");
+    const body = { billing_periods: wbszSelectedPeriods(), date_from: f || null, date_to: t || null };
+    const data = await api("/api/wrong-bill/sanitary-zero/detect", { method: "POST", body });
+    wbszRows = data.rows || [];
+    const keepSt = $("#wbsz-filter-status").value, keepBd = $("#wbsz-filter-bdate").value;
+    $("#wbsz-filter-status").innerHTML = `<option value="">All</option>` +
+      [...new Set(wbszRows.map((r) => r.billing_status_desc).filter(Boolean))].sort().map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+    $("#wbsz-filter-bdate").innerHTML = `<option value="">All</option>` +
+      [...new Set(wbszRows.map((r) => String(r.billing_date).slice(0, 10)))].sort().reverse().map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+    $("#wbsz-filter-status").value = keepSt; $("#wbsz-filter-bdate").value = keepBd;
+    $("#wbsz-filters").hidden = wbszRows.length === 0;
+    $("#wbsz-dash").hidden = wbszRows.length === 0;
+    $("#wbsz-export-btn").disabled = wbszRows.length === 0;
+    $("#wbsz-copy-acct-btn").disabled = wbszRows.length === 0;
+    const pNames = (data.scope.billing_periods || []).map((id) =>
+      document.querySelector(`#wbsz-period input[value="${id}"]`)?.dataset.desc || id);
+    const scopeTxt = [pNames.length ? pNames.join(", ") : "",
+      data.scope.date_from ? `created ${data.scope.date_from} → ${data.scope.date_to}` : ""].filter(Boolean).join(" · ");
+    $("#wbsz-summary").textContent = wbszRows.length
+      ? `🚨 ${data.count} sanitary bill(s) on ${data.account_count} account(s) — ${scopeTxt}.`
+      : `✅ None found — ${scopeTxt}.`;
+    wbSetTabCount("case3", data.count);
+    wbszRender();
+  } catch (err) {
+    wbSetTabCount("case3", null);
+    $("#wbsz-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("#wbsz-detect-btn").addEventListener("click", wbszScan);
+["#wbsz-period", "#wbsz-date-from", "#wbsz-date-to"].forEach((id) => $(id).addEventListener("change", wbszScopeHint));
+$("#wbsz-period").addEventListener("change", (ev) => {
+  if (ev.target.matches("input[type=checkbox]") && ev.target.checked && wbszSelectedPeriods().length > 12) {
+    ev.target.checked = false;
+    showToast("Pick at most 12 billing periods.", true);
+    wbszScopeHint();
+  }
+});
+$("#wbsz-period-none-btn").addEventListener("click", () => {
+  document.querySelectorAll("#wbsz-period input[type=checkbox]").forEach((c) => { c.checked = false; });
+  wbszScopeHint();
+});
+$("#wbsz-dates-clear-btn").addEventListener("click", () => {
+  $("#wbsz-date-from").value = ""; $("#wbsz-date-to").value = "";
+  wbszScopeHint();
+});
+$("#wbsz-filter-concept").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-value]");
+  if (!b) return;
+  wbszConcept = b.dataset.value;
+  $$("#wbsz-filter-concept button").forEach((x) => x.classList.toggle("is-active", x === b));
+  wbszRender();
+});
+["#wbsz-filter-status", "#wbsz-filter-bdate"].forEach((id) => $(id).addEventListener("change", wbszRender));
+$("#wbsz-filter-search").addEventListener("input", wbszRender);
+$("#wbsz-filter-clear-btn").addEventListener("click", (ev) => {
+  ev.preventDefault();
+  ev.stopPropagation();
+  ["#wbsz-filter-status", "#wbsz-filter-bdate", "#wbsz-filter-search"].forEach((id) => { $(id).value = ""; });
+  wbszConcept = "";
+  $$("#wbsz-filter-concept button").forEach((x) => x.classList.toggle("is-active", x.dataset.value === ""));
+  wbszRender();
+});
+document.querySelector("#wbsz-table tbody").addEventListener("click", (ev) => {
+  const copyBtn = ev.target.closest("[data-wbpd-copy]");
+  if (copyBtn) { ev.stopPropagation(); biss2CopyAccount(copyBtn.dataset.wbpdCopy, copyBtn); }
+});
+$("#wbsz-copy-acct-btn").addEventListener("click", () => {
+  const vals = [...new Set(wbszVisible().map((r) => r.reference).filter(Boolean))];
+  if (!vals.length) return;
+  biss2CopyAccount(vals.join("\n"), null);
+  showToast(`Copied ${vals.length} account(s) (one per line).`);
+});
+$("#wbsz-export-btn").addEventListener("click", () => {
+  const rows = wbszVisible();
+  if (!rows.length) return;
+  const cols = ["reference", "niss", "id_billing_period", "billing_period_desc", "billing_date", "create_date", "sanitary_id_bill", "sanitary_bill_number",
+    "billing_status", "billing_status_desc", "billing_type", "billing_type_desc", "id_billing_service", "id_fare", "fare_name", "fare_source", "billing_service_fare", "sanitary_amount", "sanitary_concept_count",
+    "sanitary_total_amount", "water_id_bill", "water_bill_count", "water_consumption"];
+  const lines = [cols.map((c) => `"${c.toUpperCase()}"`).join(",")];
+  rows.forEach((r) => lines.push(cols.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `wrong_bill_case3_sanitary_zero_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
 });
 
 $("#usan-detect-btn").addEventListener("click", usanScan);
@@ -8327,7 +8878,7 @@ const HX_REFRESH = {
   wrongstuckhierarchy: () => ({ btn: hxActiveSub("data-wsh-sub") === "sanitary" ? "#wshs-detect-btn" : "#wsh-detect-btn" }),
   doubleitb: () => ({ btn: "#ditb-detect-btn" }),
   // Wrong Bill: one entry per case tab (add more as cases are added).
-  wrongbill: () => ({ btn: ({ case1: "#usan-detect-btn" })[hxActiveSub("data-wb-sub") || "case1"] || "#usan-detect-btn" }),
+  wrongbill: () => ({ btn: ({ case1: "#usan-detect-btn", case2: "#wbpd-detect-btn", case3: "#wbsz-detect-btn" })[hxActiveSub("data-wb-sub") || "case1"] || "#usan-detect-btn" }),
   wrongbilledconsumption: () => ({ btn: "#wbc-detect-btn" }),
   disconnectiontnb: () => ({ btn: "#dtnb-detect-btn" }),
   billissuance: () => {

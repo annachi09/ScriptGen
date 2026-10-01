@@ -2926,6 +2926,80 @@ classes prefixed `hx-`); no server or query changes.
   reading-history pop-out is shared with Bulk Checker, which gets the
   same maximize button.
 
+## Wrong Bill - Case 3: Sanitary 0 while water consumed (2026-10-01)
+
+Tab **Case 3** in Wrong Bill (`app/core/wrong_bill_sanitary_zero.py`, route
+`POST /api/wrong-bill/sanitary-zero/detect` with `id_billing_period` OR `date_from`/`date_to`;
+empty body = current billing period). Also a Critical card on Overview (current period).
+
+- Sanitary (190) bill whose billing service `ID_FARE NOT IN (10000000021 Sanitary Zero tariff,
+  10000000022 Sanitary Charges Subsidy)` (live this leaves 10000000020 W-SAN01 Sanitary Charges),
+  not a credit note, not Cancelled/Rebilled, with its `SANITARY` concept amount **0 or missing**
+  (RJ confirmed: the 0 charge is what makes it wrong).
+- Same account's Water (19) bill(s) with the same ID_BILLING_PERIOD + BILLING_DATE, same exclusions,
+  with `CONCSMO003` Water consumption CONCEPT_AMOUNT sum **> 0** (CALCULATION_BASE is empty live).
+- Filters: search, bill status, billing date, Sanitary concept (present 0 / missing). KPIs: concept
+  missing vs present 0, already invoiced; tiles; status split. Copy account / NISS per row, Copy
+  accounts (all shown), CSV. Date range max 92 days.
+- Live 2026-10-01: period 10000000238 (10-October 2026) = 189 bills, ~8s.
+- **Concept-level tariff (RJ round 3, bill 10683144082608010032):** that bill's billing service is
+  fare 20 today but its SANITARY concept was billed on fare 22 (Subsidy). The SANITARY concept's
+  `ID_FARE` must now also be outside 21/22. The billing-service fare stays as a pre-filter (a
+  concept-only version read every sanitary bill and timed out at 120s). Period 236: 228 bills,
+  ~18s, that bill gone. New columns FARE_SOURCE / BILLING_SERVICE_FARE; period selection is now
+  checkboxes (✕ None to untick all).
+- **Scope (RJ round 2):** several billing periods (multi-select, max 12) AND/OR a bill **creation
+  date** range (GCCOM_BILL.CREATE_DATE, max 92 days); nothing picked = current period. CREATE_DATE
+  has no index (plain filter >45s), so the query first finds the ID_BILL window with ~2,000
+  primary-key probes (ID_BILL grows with creation time), then filters CREATE_DATE exactly inside it.
+  The route runs `build_id_range_query()` first and passes ID_FROM/ID_TO into the main query as
+  literals - with the window as an inline CTE the full query (with lookup joins) lost the seek and
+  timed out at 120s live; with literals: ~5s range + ~5.5s main.
+  Live: created 2026-09-24..30 = 328 bills over 7 billing periods. Route body:
+  `{billing_periods: [...], date_from, date_to}`. New "Created" column.
+
+## Bill Issuance Case 2: Cancelled services count as closed (2026-10-01)
+
+Account 1100511482 was missing from Case 2: Rate (176) + Electricity (1) are Terminated (ESTSC00004)
+but Water (19) + Sanitary (190) are **Anulado / Cancelled (ESTSC00005)**, and the "every service
+Terminated" rule counted anything not ESTSC00004 as still active. `ACTIVE_COUNT` now ignores both
+ESTSC00004 and ESTSC00005 (`CANCELLED_SERVICE_STATUS`). Impact (60-day window): 296 → 297 accounts,
+only this one added; it lands in **Complete** (Rate bill 1075336569 Invoiced + Electricity bill
+1075342996 Invoicing, both period 10000000237).
+
+## Overview: every menu, counts loaded per card (2026-10-01)
+
+RJ: "show also case 4 in the overview for bill validation, and all that we have created".
+`/api/overview/stats` no longer runs detection queries; each card calls
+`GET /api/overview/count/{key}` (see `_OVERVIEW_COUNTERS` in web/server.py), 4 at a time, and its
+number appears as soon as it's ready (pulsing "…" while loading, "—" with the error as tooltip on
+failure). Groups: Critical (Wrong Bill Case 1 + 2), DIFF DATES, Hierarchy Analysis, Bill Issuance
+Validator (Case 1–4), Billing anomalies (Incorrect Billing Period, DOUBLE ITB needing rebilling,
+Wrong Billed Consumption = "Open", no count), Hierarchy & readings (Wrong Stuck Primary + Sanitary
+tab, Reading Validation = "Open"), TNB / Disconnection, Bulk Checker, History. Cards for menus a role
+can't see are hidden. The gauge sums counts per group; the bar chart shows Bill Issuance Case 1–4.
+
+## Wrong Bill - Case 2: % distribution primary with a metered secondary (2026-10-01)
+
+Tab **Case 2** in the Wrong Bill menu (`app/core/wrong_bill_perc_dist.py`, route
+`POST /api/wrong-bill/perc-dist/detect`).
+
+- Primary: GCGT_RE_MEASUREMENT_POINT with ID_CALCULATION_MODULE = **1150** (Percentage of association
+  between Primary and Secondary), STATUS not Inactive (3000STAMPO).
+- Flagged when a secondary (ID_MAIN_MP = primary, STATUS not Inactive) has a **current device** in
+  GCGT_RE_MEASURING_POINT_DEVICE (REMOVAL_DATE IS NULL). Serial from OUCW_ADMIN.GCGT_ME_DEVICE.
+- One row per primary; ▸ expands every non-inactive secondary (metered ones highlighted).
+  Σ % = primary PERC_DIST + secondaries' PERC_DIST.
+- Filters: search (MP ids, NISS, account, device, serial), primary status, metered secondary type,
+  Σ % = / ≠ 100, primary has device. KPIs: Σ % ≠ 100, primary has device, metered plain Secondary
+  (TIPEQM0002); tiles for primaries / metered / active secondaries / Principal acoplado / accounts.
+  CSV = one line per secondary with its primary's columns. Expand all / Collapse all.
+- **Main coupled (TIPEQM0005) secondaries don't flag** (RJ: expected to have a meter); they still
+  appear in the details, not highlighted. Types/statuses/calc module in English via GCTS_DICTIONARY
+  (LOCALE 'EN'; stray ’ stripped from "Maincoupled").
+- Live 2026-10-01: 2 primaries (1935, 181478), 10 metered Secondary points, all Connected.
+  (Before the Main coupled exclusion it was 984 primaries / 1,202.)
+
 ## Wrong Bill menu - Case 1: Unusual high Sanitary + daily e-mail alert (2026-09-30)
 
 Menu 🚨 **Wrong Bill** (menu id `wrongbill`) with one tab per case; each tab shows its count badge

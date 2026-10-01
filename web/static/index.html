@@ -1115,6 +1115,8 @@
 
         <nav class="da-subnav wb-subnav">
           <button type="button" class="da-subnav-btn is-active" data-wb-sub="case1">Case 1 - Unusual high Sanitary <span class="wb-tab-count" data-wb-count="case1">…</span></button>
+          <button type="button" class="da-subnav-btn" data-wb-sub="case2">Case 2 - % Distribution with metered secondary <span class="wb-tab-count" data-wb-count="case2">…</span></button>
+          <button type="button" class="da-subnav-btn" data-wb-sub="case3">Case 3 - Sanitary 0 with water consumption <span class="wb-tab-count" data-wb-count="case3">…</span></button>
         </nav>
 
         <div class="da-subpage is-active" data-wb-sub="case1">
@@ -1185,6 +1187,156 @@
           </div>
         </div>
         </div><!-- /case1 -->
+
+        <div class="da-subpage" data-wb-sub="case2">
+          <details class="hx-info">
+            <summary>ℹ️ About this case</summary>
+            <div class="hx-info-body">
+              <p><strong>What it finds.</strong> Primary measuring points with calculation module <strong>1150 – Percentage of association between Primary and Secondary</strong> (status not Inactive) that have at least one secondary (ID_MAIN_MP = primary, status not Inactive) with a <strong>current device</strong> in GCGT_RE_MEASURING_POINT_DEVICE (REMOVAL_DATE is empty).</p>
+              <p><strong>Main coupled excluded.</strong> A metered <em>Main coupled</em> (TIPEQM0005) secondary is expected to have a meter, so it does not flag the primary. It is still listed in the details (not highlighted) so the % split is complete.</p>
+              <p><strong>Rows.</strong> One row per primary. Click ▸ to expand its secondaries: every non-inactive secondary is listed so you see the whole % split; the flagged ones (with a device) are highlighted. Types and statuses are shown in English.</p>
+            </div>
+          </details>
+
+          <div class="hx-commandbar">
+            <button type="button" class="btn btn-primary" id="wbpd-detect-btn">🔍 Scan</button>
+            <div class="hx-summary">
+              <span id="wbpd-summary">Click Scan to find % distribution primaries with a metered secondary.</span>
+              <span id="wbpd-filtered-count" class="hx-filtered"></span>
+            </div>
+            <button type="button" class="btn btn-pill" id="wbpd-copy-niss-btn" disabled title="Copy the main NISS of every row shown (one per line)">📋 Copy NISS</button>
+            <button type="button" class="btn btn-pill" id="wbpd-copy-acct-btn" disabled title="Copy the account of every row shown (one per line)">📋 Copy accounts</button>
+            <button type="button" class="btn btn-pill" id="wbpd-expand-btn" disabled>⊞ Expand all</button>
+            <button type="button" class="btn btn-pill" id="wbpd-export-btn" disabled>⬇ Export CSV</button>
+          </div>
+
+          <div class="hx-dashboard" id="wbpd-dash" hidden></div>
+
+          <div class="card hx-card">
+            <details class="hx-filters" id="wbpd-filters" open hidden>
+              <summary>
+                <span>⚙️ Filters</span>
+                <button type="button" class="btn btn-pill-sm" id="wbpd-filter-clear-btn">✕ Clear</button>
+              </summary>
+              <div class="hx-filter-grid">
+                <label class="hx-field hx-field-wide">
+                  <span>Search</span>
+                  <input id="wbpd-filter-search" class="text-input text-input-sm" placeholder="Primary/secondary MP id, NISS, account, device, serial…" />
+                </label>
+                <label class="hx-field">
+                  <span>Primary status</span>
+                  <select id="wbpd-filter-pstatus" class="text-input text-input-sm"><option value="">All</option></select>
+                </label>
+                <label class="hx-field">
+                  <span>Metered secondary type</span>
+                  <select id="wbpd-filter-stype" class="text-input text-input-sm"><option value="">All</option></select>
+                </label>
+                <div class="hx-field">
+                  <span>Σ % (primary + secondaries)</span>
+                  <div class="hx-seg" id="wbpd-filter-perc">
+                    <button type="button" data-value="" class="is-active">All</button>
+                    <button type="button" data-value="100">= 100%</button>
+                    <button type="button" data-value="not100">≠ 100%</button>
+                  </div>
+                </div>
+                <div class="hx-field">
+                  <span>Primary device</span>
+                  <div class="hx-seg" id="wbpd-filter-pdev">
+                    <button type="button" data-value="" class="is-active">All</button>
+                    <button type="button" data-value="1">Has device</button>
+                    <button type="button" data-value="0">No device</button>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <div class="grid-wrap hx-grid">
+              <table class="data-grid" id="wbpd-table">
+                <thead><tr></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div><!-- /case2 -->
+
+        <div class="da-subpage" data-wb-sub="case3">
+          <details class="hx-info">
+            <summary>ℹ️ About this case</summary>
+            <div class="hx-info-body">
+              <p><strong>What it finds.</strong> Sanitary (190) bills whose tariff is <strong>not</strong> 10000000021 (Sanitary Zero tariff) or 10000000022 (Sanitary Charges Subsidy) — checked on the billing service <strong>and</strong> on the SANITARY billing concept (the tariff actually billed) — but whose <code>SANITARY</code> concept amount is <strong>0 or missing</strong>, while the same account's Water (19) bill for the same billing period and billing date has <code>CONCSMO003</code> Water consumption <strong>&gt; 0</strong>.</p>
+              <p>Credit notes and Cancelled / Rebilled bills are ignored on both sides. <strong>Scope:</strong> pick one or more billing periods and/or a bill <strong>creation date</strong> range (GCCOM_BILL.CREATE_DATE). Both together = bills matching both. Nothing picked = the current billing period.</p>
+            </div>
+          </details>
+
+          <div class="wbsz-scope">
+            <div class="hx-field">
+              <span>Billing periods <span class="hint-text">(tick one or more, max 12)</span>
+                <button type="button" class="btn btn-pill-sm" id="wbsz-period-none-btn" title="Untick all periods">✕ None</button>
+              </span>
+              <div id="wbsz-period" class="wbsz-period-list"><span class="hint-text">Loading periods…</span></div>
+            </div>
+            <div class="hx-field">
+              <span>Bill creation date <span class="hint-text">(optional, max 92 days)</span></span>
+              <div class="wbsz-dates">
+                <input type="date" id="wbsz-date-from" class="text-input text-input-sm" />
+                <span class="hint-text">to</span>
+                <input type="date" id="wbsz-date-to" class="text-input text-input-sm" />
+                <button type="button" class="btn btn-pill-sm" id="wbsz-dates-clear-btn" title="Clear the creation dates">✕</button>
+              </div>
+              <span class="hint-text" id="wbsz-scope-hint"></span>
+            </div>
+          </div>
+
+          <div class="hx-commandbar">
+            <button type="button" class="btn btn-primary" id="wbsz-detect-btn">🔍 Scan</button>
+            <div class="hx-summary">
+              <span id="wbsz-summary">Click Scan to find sanitary bills not charged while water was consumed.</span>
+              <span id="wbsz-filtered-count" class="hx-filtered"></span>
+            </div>
+            <button type="button" class="btn btn-pill" id="wbsz-copy-acct-btn" disabled title="Copy the account of every row shown (one per line)">📋 Copy accounts</button>
+            <button type="button" class="btn btn-pill" id="wbsz-export-btn" disabled>⬇ Export CSV</button>
+          </div>
+
+          <div class="hx-dashboard" id="wbsz-dash" hidden></div>
+
+          <div class="card hx-card">
+            <details class="hx-filters" id="wbsz-filters" open hidden>
+              <summary>
+                <span>⚙️ Filters</span>
+                <button type="button" class="btn btn-pill-sm" id="wbsz-filter-clear-btn">✕ Clear</button>
+              </summary>
+              <div class="hx-filter-grid">
+                <label class="hx-field hx-field-wide">
+                  <span>Search</span>
+                  <input id="wbsz-filter-search" class="text-input text-input-sm" placeholder="Account, NISS, bill id, bill number, billing service…" />
+                </label>
+                <label class="hx-field">
+                  <span>Bill status</span>
+                  <select id="wbsz-filter-status" class="text-input text-input-sm"><option value="">All</option></select>
+                </label>
+                <label class="hx-field">
+                  <span>Billing date</span>
+                  <select id="wbsz-filter-bdate" class="text-input text-input-sm"><option value="">All</option></select>
+                </label>
+                <div class="hx-field">
+                  <span>Sanitary concept</span>
+                  <div class="hx-seg" id="wbsz-filter-concept">
+                    <button type="button" data-value="" class="is-active">All</button>
+                    <button type="button" data-value="zero">Present, 0</button>
+                    <button type="button" data-value="missing">Missing</button>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <div class="grid-wrap hx-grid">
+              <table class="data-grid" id="wbsz-table">
+                <thead><tr></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div><!-- /case3 -->
       </section>
 
       <!-- ===== DOUBLE ITB page (RJ 2026-09-27) ===== -->
