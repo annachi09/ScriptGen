@@ -99,12 +99,12 @@ def _side_select(alias: str, prefix: str) -> str:
 
 def _side_joins(alias: str, prefix: str) -> str:
     p = prefix
-    return f"""LEFT JOIN gcgt_re_reading_type {p}rt ON {p}rt.cod_develop = {alias}.reading_type
-LEFT JOIN GCTS_DICTIONARY dict_{p}rt ON dict_{p}rt.id = {p}rt.description_xi18n AND dict_{p}rt.locale = 'EN'
-LEFT JOIN gcgt_re_read_status {p}st ON {p}st.cod_develop = {alias}.read_status
-LEFT JOIN GCTS_DICTIONARY dict_{p}st ON dict_{p}st.id = {p}st.description_xi18n AND dict_{p}st.locale = 'EN'
-LEFT JOIN gccom_billing_period {p}bp ON {p}bp.id_billing_period = {alias}.id_billing_period
-LEFT JOIN GCTS_DICTIONARY dict_{p}bp ON dict_{p}bp.id = {p}bp.period_name_xi18n AND dict_{p}bp.locale = 'EN'"""
+    return f"""LEFT JOIN gcgt_re_reading_type {p}rt WITH (NOLOCK) ON {p}rt.cod_develop = {alias}.reading_type
+LEFT JOIN GCTS_DICTIONARY dict_{p}rt WITH (NOLOCK) ON dict_{p}rt.id = {p}rt.description_xi18n AND dict_{p}rt.locale = 'EN'
+LEFT JOIN gcgt_re_read_status {p}st WITH (NOLOCK) ON {p}st.cod_develop = {alias}.read_status
+LEFT JOIN GCTS_DICTIONARY dict_{p}st WITH (NOLOCK) ON dict_{p}st.id = {p}st.description_xi18n AND dict_{p}st.locale = 'EN'
+LEFT JOIN gccom_billing_period {p}bp WITH (NOLOCK) ON {p}bp.id_billing_period = {alias}.id_billing_period
+LEFT JOIN GCTS_DICTIONARY dict_{p}bp WITH (NOLOCK) ON dict_{p}bp.id = {p}bp.period_name_xi18n AND dict_{p}bp.locale = 'EN'"""
 
 
 def build_tnb_cycle_disc_query() -> str:
@@ -114,10 +114,15 @@ def build_tnb_cycle_disc_query() -> str:
     disc = format_sql_literal(READING_TYPE_DISCONNECTION)
     tnb = format_sql_literal(READ_STATUS_TERMINATED_NOT_BILLED)
     cancelled = format_sql_literal(CONTRACT_STATUS_CANCELLED)
+    # Optimization review (RJ 2026-10-02 "optimize all the queries"): WITH
+    # (NOLOCK) on every table = ~7.1s -> ~6.1s live, identical 2,300 rows
+    # (order-independent fingerprint). Driving from the disconnection side
+    # instead of the `tnb` CTE was tried: same rows but 52s - kept as is.
+    # (TNB is no longer rare: 3.9M readings live, not the "small set" above.)
     return f"""
 WITH tnb AS (
     SELECT id_sector_supply, reading_date, usage_type
-    FROM {READING_TABLE}
+    FROM {READING_TABLE} WITH (NOLOCK)
     WHERE read_status = {tnb}
       AND reading_type IN ({cyc}, {disc})
     GROUP BY id_sector_supply, reading_date, usage_type
@@ -130,7 +135,7 @@ SELECT
     COALESCE(dict_cbp.text, cbp.description, dict_dbp.text, dbp.description) AS billing_period,
     COALESCE(c.id_billing_period, d.id_billing_period) AS id_billing_period,
     CASE WHEN EXISTS (
-        SELECT 1 FROM {CONTRACTED_SERVICE_TABLE} cs
+        SELECT 1 FROM {CONTRACTED_SERVICE_TABLE} cs WITH (NOLOCK)
         WHERE cs.ID_SECTOR_SUPPLY = c.id_sector_supply
           AND cs.STATUS <> {cancelled}
           AND cs.FROM_DATE <= c.reading_date
@@ -139,17 +144,17 @@ SELECT
     {_side_select("c", "c")},
     {_side_select("d", "d")}
 FROM tnb
-JOIN {READING_TABLE} c ON c.id_sector_supply = tnb.id_sector_supply
+JOIN {READING_TABLE} c WITH (NOLOCK) ON c.id_sector_supply = tnb.id_sector_supply
     AND c.reading_date = tnb.reading_date
     AND c.usage_type = tnb.usage_type
     AND c.reading_type = {cyc}
-JOIN {READING_TABLE} d ON d.id_sector_supply = tnb.id_sector_supply
+JOIN {READING_TABLE} d WITH (NOLOCK) ON d.id_sector_supply = tnb.id_sector_supply
     AND d.reading_date = tnb.reading_date
     AND d.usage_type = tnb.usage_type
     AND d.reading_type = {disc}
-LEFT JOIN gccom_sector_supply ss ON ss.id_sector_supply = c.id_sector_supply
-LEFT JOIN gccom_consum_type consum ON consum.cod_develop = c.usage_type
-LEFT JOIN GCTS_DICTIONARY dict_consum ON dict_consum.id = consum.name_type_xi18n AND dict_consum.locale = 'EN'
+LEFT JOIN gccom_sector_supply ss WITH (NOLOCK) ON ss.id_sector_supply = c.id_sector_supply
+LEFT JOIN gccom_consum_type consum WITH (NOLOCK) ON consum.cod_develop = c.usage_type
+LEFT JOIN GCTS_DICTIONARY dict_consum WITH (NOLOCK) ON dict_consum.id = consum.name_type_xi18n AND dict_consum.locale = 'EN'
 {_side_joins("c", "c")}
 {_side_joins("d", "d")}
 WHERE (c.read_status = {tnb} OR d.read_status = {tnb})

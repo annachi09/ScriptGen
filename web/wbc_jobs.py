@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -24,6 +25,7 @@ from app.db import mssql
 
 CHUNK_SIZE = 50_000   # bills of the period per query (chunk bounds = every Nth ID_BILL)
 MAX_ROWS = 50_000     # safety cap on mismatches kept in memory
+PARALLEL_CHUNKS = 3   # chunks scanned at the same time (RJ 2026-10-02 optimization)
 
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
@@ -113,16 +115,31 @@ def _run(job: WbcJob, conn: ConnectionConfig, chunk_size: int) -> None:
                 bnd = mssql.run_query(conn, wbc.build_bill_boundaries_query(job.id_billing_period, chunk_size))
                 chunks = wbc.chunks_from_boundaries([r[0] for r in bnd.rows], int(hi))
             job.chunks_total = len(chunks)
-            for c_lo, c_hi in chunks:
+            # Query optimization (RJ 2026-10-02): the chunks are independent
+            # ID_BILL ranges, so PARALLEL_CHUNKS of them run at once (each
+            # worker thread opens its own connection). Same SQL per chunk;
+            # rows are merged and sorted at the end exactly as before.
+            lock = threading.Lock()
+
+            def _chunk(bounds):
                 if job.cancel_requested:
-                    job.status = STATUS_CANCELLED
-                    break
+                    return
+                c_lo, c_hi = bounds
                 res = mssql.run_query(conn, wbc.build_wrong_billed_consumption_query(job.id_billing_period, c_lo, c_hi))
-                job.rows.extend(_rows(res))
-                if len(job.rows) > MAX_ROWS:
-                    job.rows = job.rows[:MAX_ROWS]
-                    job.truncated = True
-                job.chunks_done += 1
+                rows = _rows(res)
+                with lock:
+                    job.rows.extend(rows)
+                    if len(job.rows) > MAX_ROWS:
+                        job.rows.sort(key=lambda r: -abs(_num(r.get("diff_calc_vs_rit"))))
+                        job.rows = job.rows[:MAX_ROWS]
+                        job.truncated = True
+                    job.chunks_done += 1
+
+            with ThreadPoolExecutor(max_workers=PARALLEL_CHUNKS) as pool:
+                for fut in [pool.submit(_chunk, b) for b in chunks]:
+                    fut.result()  # re-raises the first failure
+            if job.cancel_requested:
+                job.status = STATUS_CANCELLED
             if job.status == STATUS_RUNNING:
                 job.status = STATUS_DONE
     except Exception as exc:  # noqa: BLE001 - surfaced to the page

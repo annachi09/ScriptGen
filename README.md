@@ -2926,6 +2926,67 @@ classes prefixed `hx-`); no server or query changes.
   reading-history pop-out is shared with Bulk Checker, which gets the
   same maximize button.
 
+## Query optimization round (2026-10-02)
+
+RJ: "optimize all the queries in this project without losing the function /
+breaking the result". Baseline measured live per menu (Overview counters, one
+at a time): Bill Issuance Case 4 14.2s, TNB Cycle/Disc 7.2s, Wrong Bill Case 2
+6.6s, Bill Issuance Case 1 6.1s, Disconnection TNB 4.1s, Hierarchy 3.8s, the
+rest 1-3.4s. Changes (no query logic changed):
+
+- **READ UNCOMMITTED on every connection** (`app/db/mssql._connect`) = WITH
+  (NOLOCK) on every table of every query, including Workspace queries. The
+  login is read-only, so the app never needs shared locks; it no longer
+  waits behind (or blocks) the billing system's writes. Live A/B on TNB
+  Cycle/Disc: same 2,300 rows (order-independent fingerprint), ~1s faster.
+- **Independent queries run in parallel** (`web/server._run_queries_parallel`,
+  one connection per worker thread):
+  - Bill Issuance Case 1 detect / release script / Overview card: Stuck Bills
+    and New Contract Match together.
+  - Bill Issuance Case 2 detect + generate, Case 3 detect: the main query and
+    the higher cases' exclusion queries in one batch.
+  - Bill Issuance Case 4: all five queries at once (wait = slowest one).
+  - DIFF DATES single NISS: detect + correct-date together.
+  - Wrong Bill Case 4: one scan per ticked period, max 3 at once.
+  - Wrong Billed Consumption job: 3 ID-range chunks at once
+    (`wbc_jobs.PARALLEL_CHUNKS`); rows merged and sorted as before.
+- **Tried and rejected**: driving TNB Cycle/Disc from the disconnection side
+  (same rows, 52s vs 7s) - the existing `tnb` CTE plan is kept.
+
+## Wrong Bill - Case 4: First bill regularized (2026-10-02)
+
+Tab **Case 4** in Wrong Bill (`app/core/wrong_bill_first_regularized.py`,
+route `POST /api/wrong-bill/first-regularized/detect`, body
+`{billing_periods: [...]}` - empty = current period).
+
+- **Flags** the first bill of a contracted service - `LAST_BILLING_DATE`
+  is the same day as `GCCOM_CONTRACTED_SERVICE.FROM_DATE` - on Electricity
+  (1) / Water (19) / Sanitary (190), carrying a regularization concept
+  `REGAGUA`, `REGCC210`, `REGCC220` or `REGSANT` with `CONCEPT_AMOUNT <> 0`.
+- **Regularized bills** = `GCCOM_BILL` rows with `ID_REG_BILL` = the first
+  bill. Credit notes (TIPFAC0011) and Cancelled / Rebilled (ESTFAC0007 /
+  ESTFAC0042) are excluded on both sides. "Other CS" = the regularized bill
+  is on another contracted service (live: all of them - the previous
+  contract).
+- **UI**: period checkboxes (max 12); a "By billing period" summary (count,
+  accounts, per service, regularized bills, reg. amount) - click a period to
+  drill down; one row per first bill with ▸ to expand its regularized bills;
+  filters (search, period, service, status, Other CS / none found), KPIs,
+  copy accounts / NISS / ID_BILL, CSV export (one line per regularized bill).
+- **Performance**: 3 steps - (1) per-period ID_BILL window holding ~98.5% of
+  the period's bills (index-only, ~5s for 4 periods); (2) per period, the
+  flagged ID_BILLs: PK range scan + the ~1.5% outside the window via the
+  period index (~6s Oct 2026, ~17s Aug 2026); (3) detail for those ids in
+  chunks of 1,000 (~1s). One combined statement timed out (>120s).
+- Live 2026-10-02: 10-October 2026 = 14 bills, 8-August 2026 = 204.
+- **Creation-date scope** (RJ: "I want to also see the cases for the latest
+  7 days"): `date_from` / `date_to` on GCCOM_BILL.CREATE_DATE (max 92 days,
+  any billing period; ticked periods = AND). The "📅 Last 7 days" button
+  fills today-6 → today and scans. Uses the Case 3 ID_BILL probe window
+  (CREATE_DATE is not indexed): ~1.5s. Live 2026-09-25 → 10-02 = 0 cases;
+  the latest ones were created 20-23 Sep (14 days back = 19 cases).
+- Overview: critical card `wrongbill_case4` (current period).
+
 ## Wrong Bill - Case 3: Sanitary 0 while water consumed (2026-10-01)
 
 Tab **Case 3** in Wrong Bill (`app/core/wrong_bill_sanitary_zero.py`, route

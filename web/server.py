@@ -48,6 +48,7 @@ from app.core import wrong_billed_consumption
 from app.core import unusual_sanitary
 from app.core import wrong_bill_perc_dist
 from app.core import wrong_bill_sanitary_zero
+from app.core import wrong_bill_first_regularized
 from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -1310,8 +1311,10 @@ def _ov_hierarchy(conn, user):
 
 
 def _ov_biss1(conn, user):
-    stuck = mssql.run_query(conn, bill_issuance_validator.build_stuck_bills_query(limit=bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT))
-    nc = mssql.run_query(conn, bill_issuance_validator.build_new_contract_match_query(limit=bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT))
+    stuck, nc = _run_queries_parallel(conn, [
+        bill_issuance_validator.build_stuck_bills_query(limit=bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT),
+        bill_issuance_validator.build_new_contract_match_query(limit=bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT),
+    ])
     return len(stuck.rows) + len(nc.rows)
 
 
@@ -1323,6 +1326,20 @@ def _ov_biss2(conn, user):
 
 def _ov_biss3(conn, user):
     return len(mssql.run_query(conn, bill_issuance_validator.build_bills_complete_query(limit=bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_LIMIT)).rows)
+
+
+def _run_queries_parallel(conn, sqls: list[str], max_workers: int = 5) -> list:
+    """Run independent SELECTs at the same time, one connection per worker
+    thread (mssql.run_query only reuses a connection published on its own
+    thread). Results come back in the same order as `sqls`; the first
+    error is re-raised. Same SQL as running them one by one - only the wait
+    changes (slowest query instead of the sum)."""
+    from concurrent.futures import ThreadPoolExecutor
+    if len(sqls) <= 1:
+        return [mssql.run_query(conn, s) for s in sqls]
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(sqls))) as pool:
+        futures = [pool.submit(mssql.run_query, conn, s) for s in sqls]
+        return [f.result() for f in futures]
 
 
 # key -> callable(conn, user) returning an int. Cards whose page is driven
@@ -1344,6 +1361,7 @@ _OVERVIEW_COUNTERS = {
     "unusualsanitary": lambda conn, user: len(mssql.run_query(conn, unusual_sanitary.build_query()).rows),
     "wrongbill_case2": lambda conn, user: wrong_bill_perc_dist_detect(user=user)["primary_count"],
     "wrongbill_case3": lambda conn, user: wrong_bill_sanitary_zero_detect(body=None, user=user)["count"],
+    "wrongbill_case4": lambda conn, user: wrong_bill_first_regularized_detect(body=None, user=user)["count"],
 }
 
 
@@ -1400,8 +1418,10 @@ def date_anomaly_detect(
         raise HTTPException(status_code=400, detail="NISS is required.")
 
     try:
-        detect_result = mssql.run_query(conn, date_anomaly.build_detect_query(niss, body.threshold))
-        correct_result = mssql.run_query(conn, date_anomaly.build_correct_date_query(niss, body.threshold))
+        detect_result, correct_result = _run_queries_parallel(conn, [
+            date_anomaly.build_detect_query(niss, body.threshold),
+            date_anomaly.build_correct_date_query(niss, body.threshold),
+        ])
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -2656,13 +2676,11 @@ def bill_issuance_detect(
     stuck_limit = bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT
     new_contract_limit = bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT
     try:
-        stuck_result = mssql.run_query(
-            conn,
+        # Independent SELECTs - run in parallel (RJ 2026-10-02 query optimization).
+        stuck_result, new_contract_result = _run_queries_parallel(conn, [
             bill_issuance_validator.build_stuck_bills_query(limit=stuck_limit, max_periods_ahead=max_periods_ahead),
-        )
-        new_contract_result = mssql.run_query(
-            conn, bill_issuance_validator.build_new_contract_match_query(limit=new_contract_limit),
-        )
+            bill_issuance_validator.build_new_contract_match_query(limit=new_contract_limit),
+        ])
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -2858,15 +2876,12 @@ def bill_issuance_generate_release(
     stuck_limit = bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT
     new_contract_limit = bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT
     try:
-        stuck_result = mssql.run_query(
-            conn,
+        stuck_result, new_contract_result = _run_queries_parallel(conn, [
             bill_issuance_validator.build_stuck_bills_query(
                 limit=stuck_limit, max_periods_ahead=body.max_periods_ahead,
             ),
-        )
-        new_contract_result = mssql.run_query(
-            conn, bill_issuance_validator.build_new_contract_match_query(limit=new_contract_limit),
-        )
+            bill_issuance_validator.build_new_contract_match_query(limit=new_contract_limit),
+        ])
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -3068,17 +3083,32 @@ def _biss_ids(result) -> set[str]:
     return {diff_engine.cell_display(row[idx]) for row in result.rows}
 
 
+def _biss_case1_sqls() -> list[str]:
+    return [
+        bill_issuance_validator.build_stuck_bills_query(limit=None),
+        bill_issuance_validator.build_new_contract_match_query(limit=None),
+    ]
+
+
+def _biss_case2_sql() -> str:
+    return bill_issuance_validator.build_terminated_period_mismatch_query(limit=None, days_back=None)
+
+
+def _biss_with_exclusions(conn, main_sql: str, exclusion_sqls: list[str]):
+    """Query optimization (RJ 2026-10-02): runs a case's main query AND the
+    higher cases' exclusion queries in one parallel batch (they are all
+    independent SELECTs) instead of one after another. Returns
+    (main_result, union of the exclusion queries' ID_PAYMENT_FORMs)."""
+    results = _run_queries_parallel(conn, [main_sql] + exclusion_sqls)
+    return results[0], set().union(*(_biss_ids(r) for r in results[1:]))
+
+
 def _biss_case1_ids(conn) -> set[str]:
-    return (
-        _biss_ids(mssql.run_query(conn, bill_issuance_validator.build_stuck_bills_query(limit=None)))
-        | _biss_ids(mssql.run_query(conn, bill_issuance_validator.build_new_contract_match_query(limit=None)))
-    )
+    return set().union(*(_biss_ids(r) for r in _run_queries_parallel(conn, _biss_case1_sqls())))
 
 
 def _biss_case2_ids(conn) -> set[str]:
-    return _biss_ids(mssql.run_query(
-        conn, bill_issuance_validator.build_terminated_period_mismatch_query(limit=None, days_back=None),
-    ))
+    return _biss_ids(mssql.run_query(conn, _biss_case2_sql()))
 
 
 @app.post("/api/bill-issuance/case2/detect")
@@ -3109,13 +3139,13 @@ def bill_issuance_case2_detect(days_back: int | None = None, user: str = Depends
     limit = bill_issuance_validator.TERMINATED_PERIOD_DEFAULT_LIMIT
     effective_days_back = days_back if days_back is not None else bill_issuance_validator.TERMINATED_PERIOD_LOOKBACK_DAYS_DEFAULT
     try:
-        result = mssql.run_query(
+        result, case1_ids = _biss_with_exclusions(
             conn,
             bill_issuance_validator.build_terminated_period_mismatch_query(
                 limit=limit, days_back=effective_days_back or None,
             ),
+            _biss_case1_sqls(),
         )
-        case1_ids = _biss_case1_ids(conn)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -3193,13 +3223,13 @@ def bill_issuance_case2_generate(
     limit = bill_issuance_validator.TERMINATED_PERIOD_DEFAULT_LIMIT
     effective_days_back = body.days_back if body.days_back is not None else bill_issuance_validator.TERMINATED_PERIOD_LOOKBACK_DAYS_DEFAULT
     try:
-        result = mssql.run_query(
+        result, case1_ids = _biss_with_exclusions(
             conn,
             bill_issuance_validator.build_terminated_period_mismatch_query(
                 limit=limit, days_back=effective_days_back or None,
             ),
+            _biss_case1_sqls(),
         )
-        case1_ids = _biss_case1_ids(conn)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -3334,7 +3364,7 @@ def bill_issuance_case3_detect(
     period_ids = [billing_period_id] if billing_period_id else None
     limit = bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_LIMIT
     try:
-        result = mssql.run_query(
+        result, higher_ids = _biss_with_exclusions(
             conn,
             bill_issuance_validator.build_bills_complete_query(
                 year=year if not period_ids else None,
@@ -3342,8 +3372,8 @@ def bill_issuance_case3_detect(
                 with_active_contract=active_filter,
                 limit=limit,
             ),
+            _biss_case1_sqls() + [_biss_case2_sql()],
         )
-        higher_ids = _biss_case1_ids(conn) | _biss_case2_ids(conn)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -3511,24 +3541,20 @@ def bill_issuance_case4_detect(user: str = Depends(require_login)):
         raise HTTPException(status_code=400, detail="No connection configured.")
 
     try:
-        case1_result = mssql.run_query(
-            conn, bill_issuance_validator.build_stuck_bills_query(limit=None),
-        )
-        new_contract_match_result = mssql.run_query(
-            conn, bill_issuance_validator.build_new_contract_match_query(limit=None),
-        )
-        case2_result = mssql.run_query(
-            conn, bill_issuance_validator.build_terminated_period_mismatch_query(limit=None, days_back=None),
-        )
-        case3_result = mssql.run_query(
-            conn,
+        # Query optimization (RJ 2026-10-02 "optimize all the queries"): the
+        # five SELECTs are independent, so they run in parallel (one
+        # connection each) - same SQL, same results, wait = slowest one
+        # instead of the sum (live: ~14s -> ~6s).
+        (case1_result, new_contract_match_result, case2_result, case3_result,
+         unclassified_result) = _run_queries_parallel(conn, [
+            bill_issuance_validator.build_stuck_bills_query(limit=None),
+            bill_issuance_validator.build_new_contract_match_query(limit=None),
+            bill_issuance_validator.build_terminated_period_mismatch_query(limit=None, days_back=None),
             bill_issuance_validator.build_bills_complete_query(
                 year=bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_YEAR, limit=None,
             ),
-        )
-        unclassified_result = mssql.run_query(
-            conn, bill_issuance_validator.build_unclassified_query(limit=None),
-        )
+            bill_issuance_validator.build_unclassified_query(limit=None),
+        ])
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -4361,6 +4387,91 @@ def wrong_bill_sanitary_zero_detect(body: WrongBillSanitaryZeroRequest | None = 
         "rows": rows,
         "count": len(rows),
         "account_count": len({r.get("reference") for r in rows}),
+    }
+
+
+class WrongBillFirstRegularizedRequest(BaseModel):
+    billing_periods: list[str] = []      # default = current period
+    date_from: Optional[str] = None      # bill CREATE_DATE range (RJ 2026-10-02: "latest 7 days")
+    date_to: Optional[str] = None
+
+
+@app.post("/api/wrong-bill/first-regularized/detect")
+def wrong_bill_first_regularized_detect(body: WrongBillFirstRegularizedRequest | None = None, user: str = Depends(require_login)):
+    """Wrong Bill Case 4 (RJ 2026-10-02): first bill of a contracted service
+    (LAST_BILLING_DATE = cs FROM_DATE, services 1/19/190) carrying a
+    regularization concept <> 0, with the bills it regularized
+    (ID_REG_BILL). Summary per billing period + drill-down bills."""
+    body = body or WrongBillFirstRegularizedRequest()
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    mod = wrong_bill_first_regularized
+    t0 = time.time()
+    try:
+        raw = [p.strip() for p in (body.billing_periods or []) if p and p.strip()]
+        if any(not p.isdigit() for p in raw):
+            raise HTTPException(status_code=400, detail="Billing period ids must be numeric.")
+        periods = sorted({int(p) for p in raw})
+        has_dates = bool(body.date_from or body.date_to)
+        if has_dates and not (body.date_from and body.date_to):
+            raise HTTPException(status_code=400, detail="Give both creation dates (from and to).")
+        ids: list[int] = []
+        if has_dates:
+            # Creation-date scope: ID_BILL window for the dates (CREATE_DATE
+            # is not indexed), then the flagged ids inside it (periods = AND).
+            rng = mssql.run_query(conn, wrong_bill_sanitary_zero.build_id_range_query(body.date_from, body.date_to))
+            if rng.rows:
+                fres = mssql.run_query(conn, mod.build_first_bills_by_date_query(
+                    rng.rows[0][0], rng.rows[0][1], body.date_from, body.date_to, periods or None))
+                ids.extend(int(x[0]) for x in fres.rows)
+        else:
+            if not periods:
+                current = _current_billing_period_id(conn)
+                if current is None:
+                    raise HTTPException(status_code=400, detail="No current billing period found - pick one.")
+                periods = [current]
+            # Step 1: ID_BILL window per period; step 2: flagged ids per period
+            # (one query each keeps every statement well under the timeout);
+            # step 3: detail for the flagged ids in chunks.
+            bres = mssql.run_query(conn, mod.build_bounds_query(periods))
+            step2 = []
+            for r in bres.rows:
+                row = dict(zip([c.upper() for c in bres.columns], r))
+                if row.get("LO") is None or row.get("HI") is None:
+                    continue
+                step2.append(mod.build_first_bills_query(row["P"], row["LO"], row["HI"]))
+            # Periods are independent - scanned in parallel (max 3 at once
+            # to keep the load on the DB reasonable).
+            for fres in _run_queries_parallel(conn, step2, max_workers=3):
+                ids.extend(int(x[0]) for x in fres.rows)
+        flat: list[dict] = []
+        chunks = [mod.build_detail_query(ids[i:i + mod.DETAIL_CHUNK]) for i in range(0, len(ids), mod.DETAIL_CHUNK)]
+        for dres in _run_queries_parallel(conn, chunks, max_workers=3):
+            flat.extend({c.lower(): diff_engine.cell_display(v) for c, v in zip(dres.columns, r)} for r in dres.rows)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    bills, period_summary = mod.group_rows(flat)
+    # Periods picked but with no case still appear in the summary (count 0).
+    seen = {p["id_billing_period"] for p in period_summary}
+    for p in (periods if not has_dates else []):
+        if str(p) not in seen:
+            period_summary.append({"id_billing_period": str(p), "billing_period_desc": None, "count": 0,
+                                   "account_count": 0, "electricity": 0, "water": 0, "sanitary": 0,
+                                   "reg_amount": 0, "regularized_bills": 0, "no_regularized": 0})
+    period_summary.sort(key=lambda x: x["id_billing_period"], reverse=True)
+    return {
+        "scope": {"billing_periods": periods, "date_from": body.date_from if has_dates else None,
+                  "date_to": body.date_to if has_dates else None},
+        "periods": period_summary,
+        "bills": bills,
+        "count": len(bills),
+        "account_count": len({b.get("reference") for b in bills}),
+        "regularized_count": sum(b["regularized_count"] for b in bills),
+        "seconds": round(time.time() - t0, 1),
     }
 
 

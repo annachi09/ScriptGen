@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ScriptGen</title>
   <link rel="stylesheet" href="/styles.css" />
+  <!-- RJ 2026-10-02 visual polish layer (same layout) - remove this line to go back to the previous look -->
+  <link rel="stylesheet" href="/polish.css" />
 </head>
 <body>
 
@@ -116,6 +118,9 @@
         </button>
         <button class="nav-item" data-page="bulkchecker" title="Bulk Checker">
           <span class="nav-icon">📋</span><span class="nav-label">Bulk Checker</span>
+        </button>
+        <button class="nav-item" data-page="documentation" title="Documentation">
+          <span class="nav-icon">📚</span><span class="nav-label">Documentation</span>
         </button>
         <button class="nav-item" data-page="tools" title="Tools">
           <span class="nav-icon">🧰</span><span class="nav-label">Tools</span>
@@ -1117,6 +1122,7 @@
           <button type="button" class="da-subnav-btn is-active" data-wb-sub="case1">Case 1 - Unusual high Sanitary <span class="wb-tab-count" data-wb-count="case1">…</span></button>
           <button type="button" class="da-subnav-btn" data-wb-sub="case2">Case 2 - % Distribution with metered secondary <span class="wb-tab-count" data-wb-count="case2">…</span></button>
           <button type="button" class="da-subnav-btn" data-wb-sub="case3">Case 3 - Sanitary 0 with water consumption <span class="wb-tab-count" data-wb-count="case3">…</span></button>
+          <button type="button" class="da-subnav-btn" data-wb-sub="case4">Case 4 - First bill regularized <span class="wb-tab-count" data-wb-count="case4">…</span></button>
         </nav>
 
         <div class="da-subpage is-active" data-wb-sub="case1">
@@ -1337,6 +1343,102 @@
             </div>
           </div>
         </div><!-- /case3 -->
+
+        <div class="da-subpage" data-wb-sub="case4">
+          <details class="hx-info">
+            <summary>ℹ️ About this case</summary>
+            <div class="hx-info-body">
+              <p><strong>What it finds.</strong> The <strong>first bill</strong> of a contracted service — its <code>LAST_BILLING_DATE</code> is the same day as the contracted service <code>FROM_DATE</code> — on Electricity (1), Water (19) or Sanitary (190), that carries a regularization concept <code>REGAGUA</code>, <code>REGCC210</code>, <code>REGCC220</code> or <code>REGSANT</code> with an amount ≠ 0. A first bill has nothing of its own to regularize.</p>
+              <p><strong>Regularized bills.</strong> Click ▸ to see the bills it regularized (GCCOM_BILL.ID_REG_BILL = this bill). <span class="hx-pill hx-pill-warn">Other CS</span> = the regularized bill belongs to another contracted service (usually the previous contract).</p>
+              <p>Credit notes and Cancelled / Rebilled bills are ignored, for the first bill and for the regularized bills. <strong>Scope:</strong> tick one or more billing periods (nothing ticked = the current one; ~6–20 s each), or give a bill <strong>creation date</strong> range — <em>📅 Last 7 days</em> fills it (any billing period, ~2 s). Dates + ticked periods = bills matching both.</p>
+            </div>
+          </details>
+
+          <div class="wbsz-scope">
+            <div class="hx-field">
+              <span>Billing periods <span class="hint-text">(tick one or more, max 12)</span>
+                <button type="button" class="btn btn-pill-sm" id="wbfr-period-none-btn" title="Untick all periods">✕ None</button>
+              </span>
+              <div id="wbfr-period" class="wbsz-period-list"><span class="hint-text">Loading periods…</span></div>
+            </div>
+            <div class="hx-field">
+              <span>Bill creation date <span class="hint-text">(optional, max 92 days)</span></span>
+              <div class="wbsz-dates">
+                <button type="button" class="btn btn-pill-sm" id="wbfr-last7-btn" title="Bills created in the last 7 days (any billing period)">📅 Last 7 days</button>
+                <input type="date" id="wbfr-date-from" class="text-input text-input-sm" />
+                <span class="hint-text">to</span>
+                <input type="date" id="wbfr-date-to" class="text-input text-input-sm" />
+                <button type="button" class="btn btn-pill-sm" id="wbfr-dates-clear-btn" title="Clear the creation dates">✕</button>
+              </div>
+              <span class="hint-text" id="wbfr-scope-hint">Scope: ticked billing period(s)</span>
+            </div>
+          </div>
+
+          <div class="hx-commandbar">
+            <button type="button" class="btn btn-primary" id="wbfr-detect-btn">🔍 Scan</button>
+            <div class="hx-summary">
+              <span id="wbfr-summary">Click Scan to find first bills carrying a regularization.</span>
+              <span id="wbfr-filtered-count" class="hx-filtered"></span>
+            </div>
+            <button type="button" class="btn btn-pill" id="wbfr-copy-acct-btn" disabled title="Copy the account of every bill shown (one per line)">📋 Copy accounts</button>
+            <button type="button" class="btn btn-pill" id="wbfr-expand-btn" disabled>⊞ Expand all</button>
+            <button type="button" class="btn btn-pill" id="wbfr-export-btn" disabled>⬇ Export CSV</button>
+          </div>
+
+          <div class="hx-dashboard" id="wbfr-dash" hidden></div>
+
+          <div class="card hx-card" id="wbfr-period-card" hidden>
+            <div class="wbfr-card-title">By billing period <span class="hint-text">— click a row to drill down</span></div>
+            <div class="grid-wrap hx-grid">
+              <table class="data-grid" id="wbfr-period-table">
+                <thead><tr></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card hx-card">
+            <details class="hx-filters" id="wbfr-filters" open hidden>
+              <summary>
+                <span>⚙️ Filters</span>
+                <button type="button" class="btn btn-pill-sm" id="wbfr-filter-clear-btn">✕ Clear</button>
+              </summary>
+              <div class="hx-filter-grid">
+                <label class="hx-field hx-field-wide">
+                  <span>Search</span>
+                  <input id="wbfr-filter-search" class="text-input text-input-sm" placeholder="Account, NISS, bill id, regularized bill id…" />
+                </label>
+                <label class="hx-field">
+                  <span>Billing period</span>
+                  <select id="wbfr-filter-period" class="text-input text-input-sm"><option value="">All</option></select>
+                </label>
+                <label class="hx-field">
+                  <span>Service</span>
+                  <select id="wbfr-filter-service" class="text-input text-input-sm"><option value="">All</option></select>
+                </label>
+                <label class="hx-field">
+                  <span>Bill status</span>
+                  <select id="wbfr-filter-status" class="text-input text-input-sm"><option value="">All</option></select>
+                </label>
+                <div class="hx-field">
+                  <span>Regularized bills</span>
+                  <div class="hx-seg" id="wbfr-filter-reg">
+                    <button type="button" data-value="" class="is-active">All</button>
+                    <button type="button" data-value="other">Other CS</button>
+                    <button type="button" data-value="none">None found</button>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <div class="grid-wrap hx-grid">
+              <table class="data-grid" id="wbfr-table">
+                <thead><tr></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div><!-- /case4 -->
       </section>
 
       <!-- ===== DOUBLE ITB page (RJ 2026-09-27) ===== -->
@@ -2070,6 +2172,31 @@
         </div>
       </section>
 
+      <!-- ===== Documentation page (RJ 2026-10-02) - content in docs-content.js / docs-queries.js, rendered by docs.js ===== -->
+      <section class="page" id="page-documentation">
+        <header class="page-header docs-header">
+          <div>
+            <h1>Documentation</h1>
+            <p class="page-subtitle">How to use each menu, how ScriptGen is built, and every main query with examples.</p>
+          </div>
+          <label class="docs-search">
+            <span class="visually-hidden">Search the documentation</span>
+            <input type="search" id="docs-search" class="text-input" placeholder="Search guide, specs and queries…" autocomplete="off" />
+          </label>
+        </header>
+
+        <div class="da-subnav docs-subnav" role="tablist" aria-label="Documentation sections">
+          <button type="button" class="da-subnav-btn is-active" data-docs-sub="guide" role="tab">User guide</button>
+          <button type="button" class="da-subnav-btn" data-docs-sub="tech" role="tab">Technical specifications</button>
+          <button type="button" class="da-subnav-btn" data-docs-sub="queries" role="tab">Query library <span class="wb-tab-count is-zero" id="docs-query-count">0</span></button>
+        </div>
+
+        <div class="docs-layout">
+          <nav class="docs-toc card" id="docs-toc" aria-label="On this page"></nav>
+          <div class="docs-body" id="docs-body"></div>
+        </div>
+      </section>
+
       <!-- ===== Tools page ===== -->
       <section class="page" id="page-tools">
         <header class="page-header">
@@ -2378,5 +2505,8 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="/app.js"></script>
+  <script src="/docs-content.js"></script>
+  <script src="/docs-queries.js"></script>
+  <script src="/docs.js"></script>
 </body>
 </html>

@@ -268,6 +268,11 @@ const OVERVIEW_CARDS = [
     page: "wrongbill", subAttr: "data-wb-sub", subValue: "case3", group: "Critical", critical: true,
   },
   {
+    key: "wrongbill_case4", icon: "🚨", label: "Wrong Bill · Case 4 - First bill regularized", color: "#ef4444",
+    desc: "CRITICAL: first bill of a contracted service carrying a regularization concept (current period).",
+    page: "wrongbill", subAttr: "data-wb-sub", subValue: "case4", group: "Critical", critical: true,
+  },
+  {
     key: "dateanomaly", icon: "🩹", label: "DIFF DATES Anomaly", color: "#3b5bfd",
     desc: "Open billing/reading date anomalies system-wide.",
     page: "dateanomaly", subAttr: "data-da-sub", subValue: "detectall",
@@ -6490,6 +6495,7 @@ const WB_TABS = {
   case1: { scan: () => usanScan(), loaded: () => usanScanned, onShow: () => usanLoadAlertStatus() },
   case2: { scan: () => wbpdScan(), loaded: () => wbpdScanned },
   case3: { scan: () => wbszScan(), loaded: () => wbszScanned, onShow: () => wbszLoadPeriods() },
+  case4: { scan: () => wbfrScan(), loaded: () => wbfrScanned, onShow: () => wbfrLoadPeriods() },
 };
 function wbSetTabCount(sub, n) {
   const el = document.querySelector(`[data-wb-count="${sub}"]`);
@@ -6946,6 +6952,304 @@ $("#wbsz-export-btn").addEventListener("click", () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = `wrong_bill_case3_sanitary_zero_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---- Wrong Bill Case 4: First bill regularized (RJ 2026-10-02)
+// See app/core/wrong_bill_first_regularized.py. Summary per billing period
+// (click a period = drill down) + one row per first bill with its
+// regularized bills (ID_REG_BILL) in a collapsed detail.
+let wbfrBills = [];
+let wbfrPeriods = [];
+let wbfrScanned = false;
+let wbfrPeriodsLoaded = false;
+let wbfrSortKey = null;
+let wbfrSortDir = 1;
+let wbfrReg = "";
+const wbfrOpen = new Set();
+const WBFR_COLUMNS = [
+  { key: "_toggle", label: "", nosort: true },
+  { key: "reference", label: "Account", render: (b) => `<span class="hx-niss">${escapeHtml(b.reference ?? "")}</span>` + wbpdCopyBtn(b.reference, "Copy account number") },
+  { key: "niss", label: "NISS", mono: true, render: (b) => escapeHtml(b.niss ?? "") + wbpdCopyBtn(b.niss, "Copy NISS") },
+  { key: "offered_service", label: "Service" },
+  { key: "id_bill", label: "ID Bill", mono: true, render: (b) => escapeHtml(b.id_bill ?? "") + wbpdCopyBtn(b.id_bill, "Copy ID_BILL") },
+  { key: "billing_status_desc", label: "Bill status", render: (b) => `${escapeHtml(b.billing_status_desc ?? "")} <span class="hint-text">${escapeHtml(b.billing_status ?? "")}</span>` },
+  { key: "billing_type_desc", label: "Billing type" },
+  { key: "billing_period_desc", label: "Billing period" },
+  { key: "last_billing_date", label: "Last billing date = CS from", date: true },
+  { key: "reg_concepts", label: "★ Regularization concepts", render: (b) => `<span class="usan-amount">${escapeHtml(b.reg_concepts ?? "")}</span>` },
+  { key: "reg_amount", label: "Reg. amount", num: true, render: (b) => escapeHtml(hxFmtNum(b.reg_amount)) },
+  { key: "regularized_count", label: "Regularized bills", num: true, render: (b) => b.regularized_count
+      ? `<span class="hx-pill hx-pill-billed">${b.regularized_count}</span>` + (b.other_cs_count ? ` <span class="hx-pill hx-pill-warn" title="Regularized bill(s) on another contracted service">Other CS ${b.other_cs_count}</span>` : "")
+      : `<span class="hx-pill hx-pill-ghost">none</span>` },
+  { key: "billing_date", label: "Billing date", date: true },
+  { key: "total_amount", label: "Bill total", num: true, render: (b) => escapeHtml(hxFmtNum(b.total_amount)) },
+  { key: "id_contracted_service", label: "Contracted service", mono: true },
+];
+const WBFR_REG_COLUMNS = [
+  ["id_bill", "Regularized ID Bill"], ["bill_number", "Bill number"], ["billing_period_desc", "Billing period"], ["billing_date", "Billing date"],
+  ["billing_status_desc", "Status"], ["billing_type_desc", "Billing type"], ["total_amount", "Total"], ["id_contracted_service", "Contracted service"], ["same_cs", "Same CS?"],
+];
+
+async function wbfrLoadPeriods() {
+  if (wbfrPeriodsLoaded) return;
+  try {
+    const d = await api("/api/wrong-billed-consumption/billing-periods");
+    $("#wbfr-period").innerHTML = (d.periods || []).map((p) =>
+      `<label class="${p.is_current ? "is-current" : ""}"><input type="checkbox" value="${escapeHtml(p.id)}" data-desc="${escapeHtml(p.description)}"${p.is_current ? " checked" : ""} />` +
+      `${escapeHtml(p.description)}${p.is_current ? " (current)" : ""}</label>`).join("") || `<span class="hint-text">No periods.</span>`;
+    wbfrPeriodsLoaded = true;
+  } catch { /* nothing selected = server uses the current period */ }
+}
+function wbfrSelectedPeriods() {
+  return [...document.querySelectorAll("#wbfr-period input[type=checkbox]:checked")].map((o) => o.value).filter(Boolean);
+}
+function wbfrPeriodName(id, fallback) {
+  return fallback || document.querySelector(`#wbfr-period input[value="${id}"]`)?.dataset.desc || String(id);
+}
+
+function wbfrVisible() {
+  const q = $("#wbfr-filter-search").value.trim().toLowerCase();
+  const per = $("#wbfr-filter-period").value, svc = $("#wbfr-filter-service").value, st = $("#wbfr-filter-status").value;
+  let rows = wbfrBills.filter((b) => {
+    if (per && String(b.id_billing_period) !== per) return false;
+    if (svc && b.offered_service !== svc) return false;
+    if (st && b.billing_status_desc !== st) return false;
+    if (wbfrReg === "other" && !b.other_cs_count) return false;
+    if (wbfrReg === "none" && b.regularized_count) return false;
+    if (q) {
+      const hay = [b.reference, b.niss, b.id_bill, b.bill_number, b.id_contracted_service].concat(...(b.regularized || []).map((r) => [r.id_bill, r.bill_number]));
+      if (!hay.some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    }
+    return true;
+  });
+  if (wbfrSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[wbfrSortKey], b[wbfrSortKey], wbfrSortDir));
+  return rows;
+}
+
+function wbfrDetailHtml(b) {
+  const head = WBFR_REG_COLUMNS.map(([, l]) => `<th>${escapeHtml(l)}</th>`).join("");
+  const body = (b.regularized || []).length
+    ? b.regularized.map((r) => "<tr>" + WBFR_REG_COLUMNS.map(([k]) => {
+        const v = r[k] ?? "";
+        if (k === "billing_date") return `<td>${hxDate(v)}</td>`;
+        if (k === "total_amount") return `<td class="hx-num">${escapeHtml(hxFmtNum(v))}</td>`;
+        if (k === "same_cs") return `<td>${String(v) === "1" ? "Same" : `<span class="hx-pill hx-pill-warn">Other CS</span>`}</td>`;
+        if (k === "billing_status_desc") return `<td>${escapeHtml(v)} <span class="hint-text">${escapeHtml(r.billing_status ?? "")}</span></td>`;
+        return `<td class="${["id_bill", "bill_number", "id_contracted_service"].includes(k) ? "hx-mono" : ""}">${escapeHtml(v)}${k === "id_bill" ? wbpdCopyBtn(v, "Copy ID_BILL") : ""}</td>`;
+      }).join("") + "</tr>").join("")
+    : `<tr><td colspan="${WBFR_REG_COLUMNS.length}" class="hint-text">No regularized bill points to this bill (ID_REG_BILL) — or only Cancelled / Rebilled / credit-note ones.</td></tr>`;
+  const info = `<div class="hint-text wbfr-detail-info">CS ${escapeHtml(b.id_contracted_service ?? "")} from ${hxDate(b.cs_from_date)} · last billing date ${hxDate(b.last_billing_date)} · concepts: ${escapeHtml(b.reg_concepts ?? "")}</div>`;
+  return `<tr class="wbpd-detail-row"><td colspan="${WBFR_COLUMNS.length}"><div class="wbpd-detail">${info}<table class="data-grid wbpd-sec-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div></td></tr>`;
+}
+
+function wbfrRenderPeriods() {
+  $("#wbfr-period-card").hidden = !wbfrPeriods.length;
+  const sel = $("#wbfr-filter-period").value;
+  const cols = [["billing_period_desc", "Billing period"], ["count", "★ First bills regularized"], ["account_count", "Accounts"], ["electricity", "Electricity"],
+    ["water", "Water"], ["sanitary", "Sanitary"], ["regularized_bills", "Regularized bills"], ["no_regularized", "No regularized bill found"], ["reg_amount", "Reg. amount"]];
+  document.querySelector("#wbfr-period-table thead tr").innerHTML = cols.map(([, l]) => `<th>${escapeHtml(l)}</th>`).join("");
+  document.querySelector("#wbfr-period-table tbody").innerHTML = wbfrPeriods.map((p) =>
+    `<tr class="hx-row wbfr-period-row${sel === String(p.id_billing_period) ? " is-selected" : ""}" data-wbfr-period="${escapeHtml(p.id_billing_period)}" title="Click to drill down (click again to show all)">` +
+    cols.map(([k]) => {
+      if (k === "billing_period_desc") return `<td><strong>${escapeHtml(wbfrPeriodName(p.id_billing_period, p.billing_period_desc))}</strong> <span class="hint-text">${escapeHtml(p.id_billing_period)}</span></td>`;
+      if (k === "count") return `<td class="hx-num">${p.count ? `<span class="hx-pill hx-pill-billed">${p.count}</span>` : "0"}</td>`;
+      if (k === "reg_amount") return `<td class="hx-num">${escapeHtml(hxFmtNum(p.reg_amount))}</td>`;
+      return `<td class="hx-num">${escapeHtml(p[k] ?? 0)}</td>`;
+    }).join("") + "</tr>").join("");
+}
+
+function wbfrRender() {
+  wbfrRenderPeriods();
+  const head = document.querySelector("#wbfr-table thead tr");
+  head.innerHTML = WBFR_COLUMNS.map((c) => {
+    if (c.nosort) return `<th></th>`;
+    const arrow = wbfrSortKey === c.key ? `<span class="stats-table-sort-arrow">${wbfrSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    wbfrSortDir = wbfrSortKey === k ? -wbfrSortDir : 1;
+    wbfrSortKey = k;
+    wbfrRender();
+  }));
+  const rows = wbfrVisible();
+  document.querySelector("#wbfr-table tbody").innerHTML = rows.length
+    ? rows.map((b) => {
+        const open = wbfrOpen.has(String(b.id_bill));
+        const main = `<tr class="hx-row hx-row-anomalous wbpd-main${open ? " is-open" : ""}" data-wbfr-bill="${escapeHtml(b.id_bill)}">` + WBFR_COLUMNS.map((c) => {
+          if (c.key === "_toggle") return `<td class="wbpd-toggle">${open ? "▾" : "▸"}</td>`;
+          const v = c.render ? c.render(b) : c.date ? hxDate(b[c.key]) : escapeHtml(b[c.key] ?? "");
+          return `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${v}</td>`;
+        }).join("") + "</tr>";
+        return open ? main + wbfrDetailHtml(b) : main;
+      }).join("")
+    : `<tr><td colspan="${WBFR_COLUMNS.length}" class="hint-text">${wbfrBills.length ? "No bills match the current filters." : "✅ No first bill carrying a regularization."}</td></tr>`;
+  renderFilteredCount("#wbfr-filtered-count", rows.length, wbfrBills.length);
+  if (wbfrBills.length) {
+    const n = rows.length;
+    hxRenderDashboard("wbfr-dash", {
+      gauges: [
+        { label: "Regularizes another CS", count: rows.filter((b) => b.other_cs_count).length, total: n, c1: "#ef4444", c2: "#f97316",
+          hint: "At least one regularized bill is on another contracted service (previous contract)" },
+        { label: "No regularized bill found", count: rows.filter((b) => !b.regularized_count).length, total: n, c1: "#f59e0b", c2: "#eab308",
+          hint: "No (non-cancelled/rebilled/credit-note) bill has ID_REG_BILL = this bill" },
+        { label: "Already invoiced", count: rows.filter((b) => b.billing_status === "ESTFAC0005").length, total: n, c1: "#6366f1", c2: "#06b6d4" },
+      ],
+      tiles: [
+        { icon: "🚨", label: "First bills regularized", value: n.toLocaleString(), accent: true },
+        { icon: "👤", label: "Accounts", value: new Set(rows.map((b) => b.reference).filter(Boolean)).size.toLocaleString() },
+        { icon: "🧾", label: "Regularized bills", value: rows.reduce((a, b) => a + b.regularized_count, 0).toLocaleString() },
+        { icon: "Σ", label: "Reg. amount", value: hxFmtNum(hxSum(rows, "reg_amount")) },
+      ],
+      split: { title: "Service", entries: hxCountBy(rows, (b) => b.offered_service) },
+    });
+  }
+}
+
+async function wbfrScan() {
+  const btn = $("#wbfr-detect-btn");
+  wbfrScanned = true;
+  btn.disabled = true;
+  await wbfrLoadPeriods();
+  const periods = wbfrSelectedPeriods();
+  const df = $("#wbfr-date-from").value, dt = $("#wbfr-date-to").value;
+  $("#wbfr-summary").textContent = df || dt ? "Scanning the creation dates…" : `Scanning ${periods.length || 1} billing period(s)… (~6–20 s each)`;
+  try {
+    if ((df && !dt) || (!df && dt)) throw new Error("Give both creation dates (from and to), or clear them.");
+    const data = await api("/api/wrong-bill/first-regularized/detect", { method: "POST",
+      body: { billing_periods: periods, date_from: df || null, date_to: dt || null } });
+    wbfrBills = data.bills || [];
+    wbfrPeriods = data.periods || [];
+    const opts = (id, vals) => {
+      const keep = $(id).value;
+      $(id).innerHTML = `<option value="">All</option>` + vals.map(([v, l]) => `<option value="${escapeHtml(v)}">${escapeHtml(l)}</option>`).join("");
+      $(id).value = vals.some(([v]) => v === keep) ? keep : "";
+    };
+    opts("#wbfr-filter-period", wbfrPeriods.map((p) => [String(p.id_billing_period), wbfrPeriodName(p.id_billing_period, p.billing_period_desc)]));
+    opts("#wbfr-filter-service", [...new Set(wbfrBills.map((b) => b.offered_service).filter(Boolean))].sort().map((s) => [s, s]));
+    opts("#wbfr-filter-status", [...new Set(wbfrBills.map((b) => b.billing_status_desc).filter(Boolean))].sort().map((s) => [s, s]));
+    const has = wbfrBills.length > 0;
+    $("#wbfr-filters").hidden = !has;
+    $("#wbfr-dash").hidden = !has;
+    ["#wbfr-export-btn", "#wbfr-expand-btn", "#wbfr-copy-acct-btn"].forEach((id) => { $(id).disabled = !has; });
+    const names = [(data.scope.billing_periods || []).map((id) => wbfrPeriodName(id)).join(", "),
+      data.scope.date_from ? `created ${data.scope.date_from} → ${data.scope.date_to}` : ""].filter(Boolean).join(" · ");
+    $("#wbfr-summary").textContent = has
+      ? `🚨 ${data.count} first bill(s) on ${data.account_count} account(s), ${data.regularized_count} regularized bill(s) — ${names} (${data.seconds}s).`
+      : `✅ None found — ${names} (${data.seconds}s).`;
+    wbSetTabCount("case4", data.count);
+    wbfrRender();
+  } catch (err) {
+    wbSetTabCount("case4", null);
+    $("#wbfr-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("#wbfr-detect-btn").addEventListener("click", wbfrScan);
+$("#wbfr-period").addEventListener("change", (ev) => {
+  if (ev.target.matches("input[type=checkbox]") && ev.target.checked && wbfrSelectedPeriods().length > 12) {
+    ev.target.checked = false;
+    showToast("Pick at most 12 billing periods.", true);
+  }
+});
+$("#wbfr-period-none-btn").addEventListener("click", () => {
+  document.querySelectorAll("#wbfr-period input[type=checkbox]").forEach((c) => { c.checked = false; });
+  wbfrScopeHint();
+});
+// RJ 2026-10-02: "I want to also see the cases for the latest 7 days" -
+// bill CREATE_DATE range; dates + ticked periods = AND.
+function wbfrScopeHint() {
+  const n = wbfrSelectedPeriods().length, f = $("#wbfr-date-from").value, t = $("#wbfr-date-to").value;
+  const parts = [];
+  if (f && t) parts.push(`created ${f} → ${t}`);
+  if (n) parts.push(`${n} billing period(s)`);
+  $("#wbfr-scope-hint").textContent = parts.length ? `Scope: ${parts.join(" AND ")}` : "Scope: current billing period";
+}
+const wbfrIso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+$("#wbfr-last7-btn").addEventListener("click", () => {
+  const today = new Date();
+  $("#wbfr-date-to").value = wbfrIso(today);
+  $("#wbfr-date-from").value = wbfrIso(new Date(today.getTime() - 6 * 86400000));
+  // Any billing period: untick the periods so only the dates apply.
+  document.querySelectorAll("#wbfr-period input[type=checkbox]").forEach((c) => { c.checked = false; });
+  wbfrScopeHint();
+  wbfrScan();
+});
+$("#wbfr-dates-clear-btn").addEventListener("click", () => {
+  $("#wbfr-date-from").value = ""; $("#wbfr-date-to").value = "";
+  wbfrScopeHint();
+});
+["#wbfr-period", "#wbfr-date-from", "#wbfr-date-to"].forEach((id) => $(id).addEventListener("change", wbfrScopeHint));
+document.querySelector("#wbfr-period-table tbody").addEventListener("click", (ev) => {
+  const tr = ev.target.closest("tr[data-wbfr-period]");
+  if (!tr) return;
+  const sel = $("#wbfr-filter-period");
+  sel.value = sel.value === tr.dataset.wbfrPeriod ? "" : tr.dataset.wbfrPeriod;
+  wbfrRender();
+  if (sel.value) document.querySelector("#wbfr-table").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+document.querySelector("#wbfr-table tbody").addEventListener("click", (ev) => {
+  const copyBtn = ev.target.closest("[data-wbpd-copy]");
+  if (copyBtn) { ev.stopPropagation(); biss2CopyAccount(copyBtn.dataset.wbpdCopy, copyBtn); return; }
+  const tr = ev.target.closest("tr[data-wbfr-bill]");
+  if (!tr || ev.target.closest("a, button")) return;
+  const id = tr.dataset.wbfrBill;
+  if (wbfrOpen.has(id)) wbfrOpen.delete(id); else wbfrOpen.add(id);
+  wbfrRender();
+});
+$("#wbfr-expand-btn").addEventListener("click", () => {
+  const vis = wbfrVisible();
+  const allOpen = vis.length && vis.every((b) => wbfrOpen.has(String(b.id_bill)));
+  if (allOpen) vis.forEach((b) => wbfrOpen.delete(String(b.id_bill)));
+  else vis.forEach((b) => wbfrOpen.add(String(b.id_bill)));
+  $("#wbfr-expand-btn").textContent = allOpen ? "⊞ Expand all" : "⊟ Collapse all";
+  wbfrRender();
+});
+["#wbfr-filter-period", "#wbfr-filter-service", "#wbfr-filter-status"].forEach((id) => $(id).addEventListener("change", wbfrRender));
+$("#wbfr-filter-search").addEventListener("input", wbfrRender);
+$("#wbfr-filter-reg").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-value]");
+  if (!b) return;
+  wbfrReg = b.dataset.value;
+  $$("#wbfr-filter-reg button").forEach((x) => x.classList.toggle("is-active", x === b));
+  wbfrRender();
+});
+$("#wbfr-filter-clear-btn").addEventListener("click", (ev) => {
+  ev.preventDefault();
+  ev.stopPropagation();
+  ["#wbfr-filter-period", "#wbfr-filter-service", "#wbfr-filter-status", "#wbfr-filter-search"].forEach((id) => { $(id).value = ""; });
+  wbfrReg = "";
+  $$("#wbfr-filter-reg button").forEach((x) => x.classList.toggle("is-active", x.dataset.value === ""));
+  wbfrRender();
+});
+$("#wbfr-copy-acct-btn").addEventListener("click", () => {
+  const vals = [...new Set(wbfrVisible().map((b) => b.reference).filter(Boolean))];
+  if (!vals.length) return;
+  biss2CopyAccount(vals.join("\n"), null);
+  showToast(`Copied ${vals.length} account(s) (one per line).`);
+});
+$("#wbfr-export-btn").addEventListener("click", () => {
+  const rows = wbfrVisible();
+  if (!rows.length) return;
+  const bCols = ["id_billing_period", "billing_period_desc", "reference", "niss", "offered_service", "id_contracted_service", "id_bill", "bill_number",
+    "billing_status", "billing_status_desc", "billing_type_desc", "billing_date", "last_billing_date", "cs_from_date", "total_amount", "reg_concepts", "reg_amount", "regularized_count"];
+  const rCols = ["id_bill", "bill_number", "id_billing_period", "billing_period_desc", "billing_date", "billing_status", "billing_status_desc", "billing_type_desc", "total_amount", "id_contracted_service", "same_cs"];
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = [bCols.concat(rCols.map((k) => "reg_" + k)).map((c) => `"${c.toUpperCase()}"`).join(",")];
+  rows.forEach((b) => {
+    const base = bCols.map((k) => esc(b[k]));
+    if (!(b.regularized || []).length) lines.push(base.concat(rCols.map(() => '""')).join(","));
+    else b.regularized.forEach((r) => lines.push(base.concat(rCols.map((k) => esc(r[k]))).join(",")));
+  });
+  const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `wrong_bill_case4_first_bill_regularized_${new Date().toISOString().slice(0, 10)}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 });
@@ -8878,7 +9182,7 @@ const HX_REFRESH = {
   wrongstuckhierarchy: () => ({ btn: hxActiveSub("data-wsh-sub") === "sanitary" ? "#wshs-detect-btn" : "#wsh-detect-btn" }),
   doubleitb: () => ({ btn: "#ditb-detect-btn" }),
   // Wrong Bill: one entry per case tab (add more as cases are added).
-  wrongbill: () => ({ btn: ({ case1: "#usan-detect-btn", case2: "#wbpd-detect-btn", case3: "#wbsz-detect-btn" })[hxActiveSub("data-wb-sub") || "case1"] || "#usan-detect-btn" }),
+  wrongbill: () => ({ btn: ({ case1: "#usan-detect-btn", case2: "#wbpd-detect-btn", case3: "#wbsz-detect-btn", case4: "#wbfr-detect-btn" })[hxActiveSub("data-wb-sub") || "case1"] || "#usan-detect-btn" }),
   wrongbilledconsumption: () => ({ btn: "#wbc-detect-btn" }),
   disconnectiontnb: () => ({ btn: "#dtnb-detect-btn" }),
   billissuance: () => {
