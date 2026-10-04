@@ -273,6 +273,16 @@ const OVERVIEW_CARDS = [
     page: "wrongbill", subAttr: "data-wb-sub", subValue: "case4", group: "Critical", critical: true,
   },
   {
+    key: "anomstats_billing", icon: "📈", label: "Open billing anomalies", color: "#f59e0b",
+    desc: "GCCOM_ANOMALOUS pending + pending after batch (ESTAN00001 / ESTAN00009).",
+    page: "anomalystats", subAttr: "data-as-kind", subValue: "billing", group: "Anomalies Statistics",
+  },
+  {
+    key: "anomstats_reading", icon: "📈", label: "Open reading anomalies", color: "#ef4444",
+    desc: "GCGT_RE_ANOMALOUS pending to resolve (1000ANMSTA).",
+    page: "anomalystats", subAttr: "data-as-kind", subValue: "reading", group: "Anomalies Statistics",
+  },
+  {
     key: "dateanomaly", icon: "🩹", label: "DIFF DATES Anomaly", color: "#3b5bfd",
     desc: "Open billing/reading date anomalies system-wide.",
     page: "dateanomaly", subAttr: "data-da-sub", subValue: "detectall",
@@ -7108,8 +7118,10 @@ function wbfrRender() {
   }
 }
 
+let wbfrSeq = 0;  // latest scan wins - an older, slower response is ignored
 async function wbfrScan() {
   const btn = $("#wbfr-detect-btn");
+  const seq = ++wbfrSeq;
   wbfrScanned = true;
   btn.disabled = true;
   await wbfrLoadPeriods();
@@ -7120,6 +7132,7 @@ async function wbfrScan() {
     if ((df && !dt) || (!df && dt)) throw new Error("Give both creation dates (from and to), or clear them.");
     const data = await api("/api/wrong-bill/first-regularized/detect", { method: "POST",
       body: { billing_periods: periods, date_from: df || null, date_to: dt || null } });
+    if (seq !== wbfrSeq) return;
     wbfrBills = data.bills || [];
     wbfrPeriods = data.periods || [];
     const opts = (id, vals) => {
@@ -7142,11 +7155,12 @@ async function wbfrScan() {
     wbSetTabCount("case4", data.count);
     wbfrRender();
   } catch (err) {
+    if (seq !== wbfrSeq) return;
     wbSetTabCount("case4", null);
     $("#wbfr-summary").textContent = "";
     showToast(err.message, true);
   } finally {
-    btn.disabled = false;
+    if (seq === wbfrSeq) btn.disabled = false;
   }
 }
 

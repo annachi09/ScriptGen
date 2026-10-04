@@ -49,6 +49,7 @@ from app.core import unusual_sanitary
 from app.core import wrong_bill_perc_dist
 from app.core import wrong_bill_sanitary_zero
 from app.core import wrong_bill_first_regularized
+from app.core import anomaly_stats
 from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -1362,6 +1363,8 @@ _OVERVIEW_COUNTERS = {
     "wrongbill_case2": lambda conn, user: wrong_bill_perc_dist_detect(user=user)["primary_count"],
     "wrongbill_case3": lambda conn, user: wrong_bill_sanitary_zero_detect(body=None, user=user)["count"],
     "wrongbill_case4": lambda conn, user: wrong_bill_first_regularized_detect(body=None, user=user)["count"],
+    "anomstats_billing": lambda conn, user: int(mssql.run_query(conn, anomaly_stats.build_billing_count_query()).rows[0][0]),
+    "anomstats_reading": lambda conn, user: int(mssql.run_query(conn, anomaly_stats.build_reading_count_query()).rows[0][0]),
 }
 
 
@@ -4473,6 +4476,51 @@ def wrong_bill_first_regularized_detect(body: WrongBillFirstRegularizedRequest |
         "regularized_count": sum(b["regularized_count"] for b in bills),
         "seconds": round(time.time() - t0, 1),
     }
+
+
+# ---------------------------------------------------------------------
+# Anomalies Statistics (RJ 2026-10-03) - see app/core/anomaly_stats.py.
+# The browser aggregates the records (charts, cross-filtering), so these
+# routes only return the shaped open-anomaly records.
+# ---------------------------------------------------------------------
+def _row_dicts(res) -> list[dict]:
+    return [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+
+
+@app.get("/api/anomaly-stats/billing")
+def anomaly_stats_billing(user: str = Depends(require_login)):
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    t0 = time.time()
+    try:
+        res = mssql.run_query(conn, anomaly_stats.build_billing_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    records = anomaly_stats.shape_billing(_row_dicts(res))
+    return {"kind": "billing", "statuses": anomaly_stats.BILLING_STATUSES, "records": records,
+            "count": len(records), "generated_at": anomaly_stats.generated_at(), "seconds": round(time.time() - t0, 1)}
+
+
+@app.get("/api/anomaly-stats/reading")
+def anomaly_stats_reading(user: str = Depends(require_login)):
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    t0 = time.time()
+    try:
+        # Three independent SELECTs in parallel (one combined statement: 43s).
+        hdr, det, svc = _run_queries_parallel(conn, [
+            anomaly_stats.build_reading_headers_query(),
+            anomaly_stats.build_reading_details_query(),
+            anomaly_stats.build_reading_services_query(),
+        ])
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    records = anomaly_stats.shape_reading(_row_dicts(hdr), _row_dicts(det), _row_dicts(svc))
+    return {"kind": "reading", "statuses": anomaly_stats.READING_STATUSES, "levels": anomaly_stats.READING_LEVELS,
+            "records": records, "count": len(records), "detail_count": len(det.rows),
+            "generated_at": anomaly_stats.generated_at(), "seconds": round(time.time() - t0, 1)}
 
 
 @app.get("/api/alerts/unusual-sanitary/status")

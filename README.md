@@ -2926,6 +2926,67 @@ classes prefixed `hx-`); no server or query changes.
   reading-history pop-out is shared with Bulk Checker, which gets the
   same maximize button.
 
+## Anomalies Statistics menu (2026-10-03)
+
+RJ: "create new menu anomalies statistics, 2 parts billing anomaly and
+reading anomaly ... only status 000001 and 00009, pending and pending after
+batch" + "show it nicely with graphs and everything, suggest and implement"
++ "show the types as well".
+
+- **Scope**: Billing = `OUC_ADMIN.GCCOM_ANOMALOUS` with ESTAN00001 (Pending
+  without billing) / ESTAN00009 (Pending after batch). Reading =
+  `GCGT_RE_ANOMALOUS` with 1000ANMSTA (Pending to resolve) - its status
+  table has no ESTAN codes and no "after batch" state (statuses live:
+  1000 Pending, 2000 Resolved, 3000 Calculated pending review, 4000 Solved
+  after review, 5000 Auto-resolved, 6000 Sent to batch).
+- **Backend** `app/core/anomaly_stats.py`; routes `GET /api/anomaly-stats/billing`
+  (one query, ~7s, ~21k rows) and `GET /api/anomaly-stats/reading` (headers
+  / details / services in parallel, ~3s; one combined query took 43s).
+  Types: billing = GCCOM_BILL_ANOMALY_COMPANY grouped by ANOMALY_COD,
+  category = GCCOM_ANOMALY.COD_GROUP; reading = GCGT_RE_ANOMALY_MASTER via
+  GCGT_RE_ANOMALY_PARAM, severity = ANOMALY_LEVEL (Warning / Stop Billing /
+  Blocking), main type = most severe detail.
+- **Front-end** `web/static/anomstats.js` (no library): KPI tiles; detected
+  per day (30 d) / per week (26 w) stacked by status/severity; anomaly
+  types ranking (with share %); status/severity and service donuts; age
+  buckets; billing period; category (billing) or reading type + group
+  (reading); types x age heatmap; types summary table (CSV); records list
+  (sort, copy accounts, CSV). Every bar / slice / cell / KPI / row is a
+  cross-filter (chips to remove). Reading: Main type vs Every type toggle.
+- Billing period = the item-to-bill period; ~13k billing anomalies have no
+  item to bill ("No item to bill"). Deriving it from BILLING_DATE was
+  checked and does not match the item-to-bill period, so it is not guessed.
+- Overview: cards `anomstats_billing` / `anomstats_reading` (COUNT queries).
+- Live 2026-10-03: billing 21,333 open (HOLDPREVBI 17,859); reading 7,753
+  open (3,540 Blocking, 4,212 Stop billing; 11,081 details, 29 types).
+
+## Visual polish + Documentation menu (2026-10-02)
+
+RJ: "do more aesthetic modifications, make it industry standard and good
+design and practice, add documentation menu, and technical specifications,
+make the main queries readily available in the documentation and do
+examples". RJ chose: polish with the SAME layout (no regrouping), docs with
+user guide + technical specs + query library, and a hand-written query copy.
+
+- **`web/static/polish.css`** (loaded after `styles.css`; delete its `<link>`
+  in `index.html` to go back): one flat accent colour, no glows/gradients,
+  4px spacing grid, 34px controls (28px small), 8/10px radius, calm tables
+  (light header, horizontal rules, hover row, tabular numbers), visible
+  keyboard focus ring, thin scrollbars, `prefers-reduced-motion`, print
+  styles, light + dark tokens. Font stack Segoe UI Variable / Segoe UI
+  (no external font - works offline/LAN).
+- **Documentation menu** (`documentation` menu id, nav item above Tools):
+  - `docs-content.js` - user guide (one entry per menu) + technical
+    specifications (architecture, stack, security, performance, database
+    reference with status/type codes, conventions, operations).
+  - `docs-queries.js` - query library: 21 main queries grouped by menu, each
+    with purpose, source builder, parameters, highlighted SQL (Copy, Open in
+    Workspace, Download .sql) and a real example (2026-10-02 rows, accounts /
+    NISS masked). **Hand-written copy - update the entry when a builder in
+    `app/core` changes** (each entry names its builder).
+  - `docs.js` - renderer: tabs, search across guide/specs/queries, table of
+    contents, "Open menu" links.
+
 ## Query optimization round (2026-10-02)
 
 RJ: "optimize all the queries in this project without losing the function /
@@ -2952,6 +3013,17 @@ rest 1-3.4s. Changes (no query logic changed):
     (`wbc_jobs.PARALLEL_CHUNKS`); rows merged and sorted as before.
 - **Tried and rejected**: driving TNB Cycle/Disc from the disconnection side
   (same rows, 52s vs 7s) - the existing `tnb` CTE plan is kept.
+- **Verified after restart (2026-10-02, PID 13224)** - every Overview count
+  identical to the morning baseline; app connections report isolation
+  level 1 (READ UNCOMMITTED). Before → after: Bill Issuance Case 4 14.2s →
+  4.1s, Case 1 6.1s → 4.0s, TNB Cycle/Disc 7.2s → 6.3-6.6s (first run
+  after restart 34.6s = plan compile / cold cache), DIFF DATES 1.3s → 1.0s,
+  Hierarchy 3.8s → 3.5s; others within noise. The hand-written Query library
+  SQL was also run live: all 16 runnable entries execute and reproduce the
+  app's counts (e.g. Bill Issuance Case 1: Stuck 424 + New Contract Match
+  2000 = 2424).
+- Wrong Bill Case 4 period scan: ~9s alone; it ran 89s once while the
+  Overview was loading every counter at the same time (DB contention).
 
 ## Wrong Bill - Case 4: First bill regularized (2026-10-02)
 

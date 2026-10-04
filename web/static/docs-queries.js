@@ -250,6 +250,85 @@ WHERE b.ID_BILL IN (/* ids from step 2 */);`,
 },
 /* ---------------------------------------------------------------- */
 {
+  id: "as-billing", menu: "Anomalies Statistics", title: "Open billing anomalies (dataset)",
+  purpose: "Every billing anomaly still Pending (ESTAN00001) or Pending after batch (ESTAN00009), with its type (ANOMALY_COD), category, service, account, NISS and the billing period of its item to bill. The page aggregates these rows into KPIs and charts.",
+  source: "app/core/anomaly_stats.py · build_billing_query()",
+  params: [["Statuses", "Pending, Pending after batch", "ESTAN00001, ESTAN00009"]],
+  sql: `SELECT a.ID_ANOMALOUS, a.ANOMALOUS_STATUS, a.DETECTION_DATE, a.BILLING_DATE, a.ID_BILL, a.EXPECTED_AMOUNT,
+       c.ANOMALY_COD AS TYPE_CODE, COALESCE(dc.TEXT, c.DESCRIPTION) AS TYPE_DESC,
+       an.COD_GROUP AS CATEGORY_CODE, COALESCE(dg.TEXT, g.NAME_TYPE) AS CATEGORY,
+       cs.ID_OFFERED_SERVICE, os.NAME_TYPE AS OFFERED_SERVICE, pf.REFERENCE AS ACCOUNT, ss.NISS,
+       itb.ID_BILLING_PERIOD, COALESCE(dbp.TEXT, bp.DESCRIPTION) AS BILLING_PERIOD
+FROM OUC_ADMIN.GCCOM_ANOMALOUS a WITH (NOLOCK)
+LEFT JOIN OUC_ADMIN.GCCOM_BILL_ANOMALY_COMPANY c ON c.ID_BILL_ANOM_COMP = a.ID_PRINCIPAL_ANOMALY
+LEFT JOIN GCTS_DICTIONARY dc ON dc.ID = c.NAME_TYPE_XI18N AND dc.LOCALE = 'EN'
+LEFT JOIN OUC_ADMIN.GCCOM_ANOMALY an ON an.ANOMALY_COD = c.ANOMALY_COD
+LEFT JOIN OUC_COMMON_ADMIN.GCCOM_ANOMALY_GROUP g ON g.COD_DEVELOP = an.COD_GROUP
+LEFT JOIN GCTS_DICTIONARY dg ON dg.ID = g.NAME_TYPE_XI18N AND dg.LOCALE = 'EN'
+LEFT JOIN OUC_COMMON_ADMIN.GCCOM_BILLING_SERVICE bs WITH (NOLOCK) ON bs.ID_BILLING_SERVICE = a.ID_BILLING_SERVICE
+LEFT JOIN OUC_COMMON_ADMIN.GCCOM_CONTRACTED_SERVICE cs WITH (NOLOCK) ON cs.ID_CONTRACTED_SERVICE = bs.ID_CONTRACTED_SERVICE
+LEFT JOIN OUC_COMMON_ADMIN.GCCOM_COMPANY_OFFERED_SERVICE os ON os.ID_OFFERED_SERVICE = cs.ID_OFFERED_SERVICE
+LEFT JOIN OUC_COMMON_ADMIN.GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = cs.ID_PAYMENT_FORM
+LEFT JOIN GCCOM_SECTOR_SUPPLY ss WITH (NOLOCK) ON ss.ID_SECTOR_SUPPLY = cs.ID_SECTOR_SUPPLY
+LEFT JOIN OUC_ADMIN.GCCOM_ITEMS_TO_BILL itb WITH (NOLOCK) ON itb.ID_ITEM_TO_BILL = a.ID_ITEM_TO_BILL
+LEFT JOIN OUC_COMMON_ADMIN.GCCOM_BILLING_PERIOD bp ON bp.ID_BILLING_PERIOD = itb.ID_BILLING_PERIOD
+LEFT JOIN GCTS_DICTIONARY dbp ON dbp.ID = bp.PERIOD_NAME_XI18N AND dbp.LOCALE = 'EN'
+WHERE a.ANOMALOUS_STATUS IN ('ESTAN00001', 'ESTAN00009');`,
+  example: {
+    input: "No input.",
+    columns: ["Type", "Description", "Pending", "After batch", "Total"],
+    rows: [
+      ["HOLDPREVBI", "Pending invoice for previous Cycle", "9,191", "8,668", "17,859"],
+      ["PRBIEXCEPT", "Pending Anomaly for Previous Cycle", "2,096", "0", "2,096"],
+      ["OUTRAMOUNT", "Amount Out of Range", "73", "371", "444"],
+      ["ERRTARIFF", "Tariff does not match with RSC+Exceptional tariff", "5", "412", "417"],
+    ],
+    note: "Live 2026-10-03 (one load): 21,333 open billing anomalies, 9 types (~7 s). Numbers move during the day as anomalies are created and resolved.",
+  },
+},
+/* ---------------------------------------------------------------- */
+{
+  id: "as-reading", menu: "Anomalies Statistics", title: "Open reading anomalies (3 parallel queries)",
+  purpose: "Reading anomalies Pending to resolve (1000ANMSTA): (1) headers with group, measuring point and NISS, (2) every detail anomaly with its type, level and reading, (3) service + account of each affected supply. Merged in Python: main type = most severe detail.",
+  source: "app/core/anomaly_stats.py · build_reading_headers_query / build_reading_details_query / build_reading_services_query",
+  params: [["Status", "Pending to resolve", "1000ANMSTA"], ["Levels", "Warning / Stop Billing / Blocking", "1000/2000/3000ANMLEV"]],
+  sql: `-- (1) headers
+SELECT a.ID_ANOMALOUS, a.STATUS, a.ANOMALY_DATE, a.COD_GROUP, a.ID_MEASURING_POINT, mp.ID_SECTOR_SUPPLY, mp.MP_TYPE, ss.NISS
+FROM OUC_COMMON_ADMIN.GCGT_RE_ANOMALOUS a WITH (NOLOCK)
+LEFT JOIN OUC_COMMON_ADMIN.GCGT_RE_MEASUREMENT_POINT mp WITH (NOLOCK) ON mp.ID_MEASURING_POINT = a.ID_MEASURING_POINT
+LEFT JOIN GCCOM_SECTOR_SUPPLY ss WITH (NOLOCK) ON ss.ID_SECTOR_SUPPLY = mp.ID_SECTOR_SUPPLY
+WHERE a.STATUS IN ('1000ANMSTA');
+
+-- (2) detail anomalies (type + level + reading)
+SELECT x.ID_ANOMALOUS, x.ID_ANOMALY, m.ANOMALY_CODE AS TYPE_CODE, m.ANOMALY_NAME, p.ANOMALY_LEVEL,
+       x.ID_READING, r.READING_TYPE, r.ID_BILLING_PERIOD
+FROM OUC_COMMON_ADMIN.GCGT_RE_ANOMALOUS a WITH (NOLOCK)
+JOIN OUC_COMMON_ADMIN.GCGT_RE_ANOMALY x WITH (NOLOCK) ON x.ID_ANOMALOUS = a.ID_ANOMALOUS
+LEFT JOIN OUC_COMMON_ADMIN.GCGT_RE_ANOMALY_PARAM p ON p.ID_ANOMALY_PARAM = x.ID_ANOMALY_PARAM
+LEFT JOIN OUC_COMMON_ADMIN.GCGT_RE_ANOMALY_MASTER m ON m.ID_ANOMALY_MASTER = p.ID_ANOMALY_MASTER
+LEFT JOIN OUC_COMMON_ADMIN.GCGT_RE_READING r WITH (NOLOCK) ON r.ID_READING = x.ID_READING
+WHERE a.STATUS IN ('1000ANMSTA');
+
+-- (3) service + account per affected supply (latest non-cancelled contract first)
+WITH s AS (SELECT DISTINCT mp.ID_SECTOR_SUPPLY FROM OUC_COMMON_ADMIN.GCGT_RE_ANOMALOUS a WITH (NOLOCK)
+           JOIN OUC_COMMON_ADMIN.GCGT_RE_MEASUREMENT_POINT mp WITH (NOLOCK) ON mp.ID_MEASURING_POINT = a.ID_MEASURING_POINT
+           WHERE a.STATUS IN ('1000ANMSTA')),
+c AS (SELECT cs.ID_SECTOR_SUPPLY, cs.ID_OFFERED_SERVICE, cs.ID_PAYMENT_FORM,
+             ROW_NUMBER() OVER (PARTITION BY cs.ID_SECTOR_SUPPLY
+                                ORDER BY CASE WHEN cs.STATUS = 'ESTSC00005' THEN 1 ELSE 0 END, cs.ID_CONTRACTED_SERVICE DESC) AS RN
+      FROM s JOIN OUC_COMMON_ADMIN.GCCOM_CONTRACTED_SERVICE cs WITH (NOLOCK) ON cs.ID_SECTOR_SUPPLY = s.ID_SECTOR_SUPPLY)
+SELECT c.ID_SECTOR_SUPPLY, c.ID_OFFERED_SERVICE, pf.REFERENCE AS ACCOUNT
+FROM c LEFT JOIN OUC_COMMON_ADMIN.GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = c.ID_PAYMENT_FORM
+WHERE c.RN = 1;`,
+  example: {
+    input: "No input.",
+    columns: ["Type (every type)", "Description", "Anomalies"],
+    rows: [["1300ANMCOD", "Usage over the limit", "3,317"], ["1600ANMCOD", "Previous cycle anomalous or not billed", "2,914"], ["5000ANMCOD", "Negative usage in Primary", "645"]],
+    note: "Live 2026-10-03: 7,753 open reading anomalies (3,540 Blocking, 4,212 Stop billing), 11,081 detail anomalies, 29 types. One combined query took 43 s; the 3 parallel queries ~3 s each.",
+  },
+},
+/* ---------------------------------------------------------------- */
+{
   id: "tnb-cycle-disc", menu: "TNB CYCLE/DISC Analysis", title: "Cycle + Disconnection on the same date, one TNB",
   purpose: "Pairs of a Cycle and a Disconnection reading on the same supply, reading date and usage type where at least one is Terminated Not Billed and at least one has ready usage ≠ 0. IN_CONTRACT = a non-cancelled contract covers the reading date.",
   source: "app/core/tnb_cycle_disc.py · build_tnb_cycle_disc_query()",

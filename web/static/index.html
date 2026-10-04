@@ -119,6 +119,9 @@
         <button class="nav-item" data-page="bulkchecker" title="Bulk Checker">
           <span class="nav-icon">📋</span><span class="nav-label">Bulk Checker</span>
         </button>
+        <button class="nav-item" data-page="anomalystats" title="Anomalies Statistics">
+          <span class="nav-icon">📈</span><span class="nav-label">Anomalies Statistics</span>
+        </button>
         <button class="nav-item" data-page="documentation" title="Documentation">
           <span class="nav-icon">📚</span><span class="nav-label">Documentation</span>
         </button>
@@ -2172,6 +2175,27 @@
         </div>
       </section>
 
+      <!-- ===== Anomalies Statistics page (RJ 2026-10-03) - rendered by anomstats.js ===== -->
+      <section class="page" id="page-anomalystats">
+        <header class="page-header as-header">
+          <div>
+            <h1>Anomalies Statistics</h1>
+            <p class="page-subtitle">Open billing and reading anomalies - volumes, types, ageing and trend. Click any bar, slice or row to filter the whole page.</p>
+          </div>
+          <div class="as-header-actions">
+            <span class="hint-text" id="as-updated"></span>
+            <button type="button" class="btn btn-pill" id="as-refresh-btn" title="Reload the data from the database">⟳ Refresh</button>
+          </div>
+        </header>
+
+        <div class="da-subnav as-subnav" role="tablist" aria-label="Anomaly kind">
+          <button type="button" class="da-subnav-btn is-active" data-as-kind="billing" role="tab">Billing anomalies <span class="wb-tab-count" data-as-count="billing">…</span></button>
+          <button type="button" class="da-subnav-btn" data-as-kind="reading" role="tab">Reading anomalies <span class="wb-tab-count" data-as-count="reading">…</span></button>
+        </div>
+
+        <div id="as-root" class="as-root" aria-live="polite"></div>
+      </section>
+
       <!-- ===== Documentation page (RJ 2026-10-02) - content in docs-content.js / docs-queries.js, rendered by docs.js ===== -->
       <section class="page" id="page-documentation">
         <header class="page-header docs-header">
@@ -2505,6 +2529,7 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="/app.js"></script>
+  <script src="/anomstats.js"></script>
   <script src="/docs-content.js"></script>
   <script src="/docs-queries.js"></script>
   <script src="/docs.js"></script>
