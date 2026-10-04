@@ -3043,9 +3043,13 @@ def _case2_group_rows_by_account(rows: list[dict]) -> list[dict]:
                 # the missing bill" + a filter on it - offered-service names
                 # of the services with no final bill (e.g. ["Rate"]).
                 "missing_services": [],
+                "niss": [],  # RJ 2026-10-04: NISS of the account's services (export)
                 "services": [],
             }
             accounts[pf] = acct
+        niss = diff_engine.cell_display(_da_col(r, "NISS"))
+        if niss and niss not in acct["niss"]:
+            acct["niss"].append(niss)
         offered_service_id = _da_col(r, "ID_OFFERED_SERVICE")
         raw_id_bill = _da_col(r, "ID_BILL")
         needs_update = bool(_da_col(r, "NEEDS_UPDATE"))
@@ -3065,6 +3069,7 @@ def _case2_group_rows_by_account(rows: list[dict]) -> list[dict]:
             "id_offered_service": diff_engine.cell_display(offered_service_id),
             "offered_service_desc": _OFFERED_SERVICE_NAMES.get(offered_service_id, ""),
             "end_date": diff_engine.cell_display(_da_col(r, "END_DATE")),
+            "niss": niss,
             "id_bill": diff_engine.cell_display(raw_id_bill),
             "id_billing_period": diff_engine.cell_display(_da_col(r, "ID_BILLING_PERIOD")),
             "billing_status": diff_engine.cell_display(_da_col(r, "BILLING_STATUS")),
@@ -3278,6 +3283,7 @@ def bill_issuance_case2_generate(
                 "bill_serv_status": _da_col(cr, "BILL_SERV_STATUS"),
                 "termination_date": _da_col(cr, "TERMINATION_DATE"),
                 "last_billing_date": _da_col(cr, "LAST_BILLING_DATE"),
+                "last_billing_source": _da_col(cr, "LAST_BILLING_SOURCE"),
             })
         anomaly_result = bill_issuance_validator.build_missing_rate_anomaly_script(services, clean=body.clean)
 
@@ -3407,6 +3413,52 @@ def bill_issuance_case3_detect(
         "limit": limit,
         "year": year,
     }
+
+
+class BillIssuanceReleaseCompleteRequest(BaseModel):
+    case: str                              # "case2" | "case3"
+    id_payment_forms: list[str] = []       # optional subset (visible / selected); empty = every complete account
+    days_back: int | None = None           # case2 scope, same as its detect
+    year: int = bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_YEAR  # case3 scope
+    billing_period_id: str | None = None
+    with_active_contract: str | None = None
+    program: str = bill_issuance_validator.RELEASE_SCRIPT_DEFAULT_PROGRAM
+    audit_user: str = bill_issuance_validator.RELEASE_SCRIPT_DEFAULT_USER
+    clean: bool = False
+
+
+@app.post("/api/bill-issuance/release-complete")
+def bill_issuance_release_complete(body: BillIssuanceReleaseCompleteRequest, user: str = Depends(require_editor)):
+    """RJ 2026-10-04: Case 2 / Case 3 release script, COMPLETE accounts
+    only (RJ's own UPDATE GCCOM_NOTICE_TMP template). Re-runs the case's
+    detection fresh so only accounts that are complete right now are
+    released; a requested id not complete any more is reported, not used."""
+    if body.case == "case2":
+        data = bill_issuance_case2_detect(days_back=body.days_back, user=user)
+        complete = [str(a["id_payment_form"]) for a in data["accounts"] if a.get("complete")]
+        label = "Case 2 (Terminated Account Period Mismatch)"
+    elif body.case == "case3":
+        data = bill_issuance_case3_detect(year=body.year, billing_period_id=body.billing_period_id,
+                                          with_active_contract=body.with_active_contract, user=user)
+        complete = list(dict.fromkeys(str(r["id_payment_form"]) for r in data["rows"]))
+        label = "Case 3 (All Contract Status - Bills Complete)"
+    else:
+        raise HTTPException(status_code=400, detail="case must be 'case2' or 'case3'.")
+    requested = [str(x).strip() for x in body.id_payment_forms if str(x).strip()]
+    if requested:
+        cset = set(complete)
+        skipped = [p for p in requested if p not in cset]
+        ids = [p for p in requested if p in cset]
+    else:
+        skipped, ids = [], complete
+    script = bill_issuance_validator.build_release_by_account_script(
+        ids, case_label=label, program=body.program, user=body.audit_user, clean=body.clean)
+    warnings = list(script.warnings)
+    if body.case == "case3" and data.get("possibly_truncated"):
+        warnings.append(f"Case 3 scan hit its {data.get('limit')} row limit - narrow by billing period to be sure every account is included.")
+    if skipped:
+        warnings.append(f"{len(skipped)} selected account(s) are not complete any more and were left out.")
+    return {"sql_text": script.sql_text, "account_count": script.bill_count, "skipped": skipped, "warnings": warnings}
 
 
 @app.get("/api/bill-issuance/case3/billing-periods")

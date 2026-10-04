@@ -40,14 +40,34 @@ _B_STATUS_LIST = ", ".join(f"'{s}'" for s in BILLING_STATUSES)
 _R_STATUS_LIST = ", ".join(f"'{s}'" for s in READING_STATUSES)
 
 
+BILLING_LEVELS = ("Blocking", "Non-billable", "Warning")
+
+
 def build_billing_query() -> str:
+    """Severity (RJ 2026-10-04, "you are not showing if its a blocker like
+    the reading anomaly"): each anomaly's detected details
+    (GCCOM_DETECTED_ANOMALY -> GCCOM_ANOMALY_PARAM). Blocking = any detail
+    with IND_STOP_BILLING = 1; Non-billable = ANOM_BILL_TYPE TFACA00001
+    without stop billing; Warning = TFACA00000 only."""
     return f"""
+WITH lv AS (
+  SELECT x.ID_ANOMALOUS,
+         MAX(CAST(p.IND_STOP_BILLING AS int)) AS STOP_BILLING,
+         MAX(CASE WHEN p.ANOM_BILL_TYPE = 'TFACA00001' THEN 1 ELSE 0 END) AS NON_BILLABLE
+  FROM OUC_ADMIN.GCCOM_ANOMALOUS a0 WITH (NOLOCK)
+  JOIN OUC_ADMIN.GCCOM_DETECTED_ANOMALY x WITH (NOLOCK) ON x.ID_ANOMALOUS = a0.ID_ANOMALOUS
+  JOIN OUC_ADMIN.GCCOM_ANOMALY_PARAM p ON p.ID_ANOMALY_PARAM = x.ID_ANOMALY_PARAM
+  WHERE a0.ANOMALOUS_STATUS IN ({_B_STATUS_LIST})
+  GROUP BY x.ID_ANOMALOUS
+)
 SELECT a.ID_ANOMALOUS, a.ANOMALOUS_STATUS, a.DETECTION_DATE, a.BILLING_DATE, a.ID_BILL, a.EXPECTED_AMOUNT,
+       lv.STOP_BILLING, lv.NON_BILLABLE,
        c.ANOMALY_COD AS TYPE_CODE, COALESCE(dc.TEXT, c.DESCRIPTION) AS TYPE_DESC,
        an.COD_GROUP AS CATEGORY_CODE, COALESCE(dg.TEXT, g.NAME_TYPE) AS CATEGORY,
        cs.ID_OFFERED_SERVICE, os.NAME_TYPE AS OFFERED_SERVICE, pf.REFERENCE AS ACCOUNT, ss.NISS,
        itb.ID_BILLING_PERIOD, COALESCE(dbp.TEXT, bp.DESCRIPTION) AS BILLING_PERIOD
 FROM OUC_ADMIN.GCCOM_ANOMALOUS a WITH (NOLOCK)
+LEFT JOIN lv ON lv.ID_ANOMALOUS = a.ID_ANOMALOUS
 LEFT JOIN OUC_ADMIN.GCCOM_BILL_ANOMALY_COMPANY c ON c.ID_BILL_ANOM_COMP = a.ID_PRINCIPAL_ANOMALY
 LEFT JOIN GCTS_DICTIONARY dc ON dc.ID = c.NAME_TYPE_XI18N AND dc.LOCALE = 'EN'
 LEFT JOIN OUC_ADMIN.GCCOM_ANOMALY an ON an.ANOMALY_COD = c.ANOMALY_COD
@@ -154,6 +174,17 @@ def _f(v) -> float | None:
         return None
 
 
+def _billing_level(stop, non_billable) -> str:
+    stop, nb = _s(stop), _s(non_billable)
+    if stop is None and nb is None:
+        return "(no level)"
+    if stop not in (None, "0"):
+        return "Blocking"
+    if nb not in (None, "0"):
+        return "Non-billable"
+    return "Warning"
+
+
 def shape_billing(rows: list[dict]) -> list[dict]:
     out = []
     for r in rows:
@@ -161,6 +192,7 @@ def shape_billing(rows: list[dict]) -> list[dict]:
         out.append({
             "id": _s(r.get("id_anomalous")),
             "st": _s(r.get("anomalous_status")),
+            "lv": _billing_level(r.get("stop_billing"), r.get("non_billable")),
             "dt": _d(r.get("detection_date")),
             "bd": _d(r.get("billing_date")),
             "tc": code,

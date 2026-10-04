@@ -2926,6 +2926,35 @@ classes prefixed `hx-`); no server or query changes.
   reading-history pop-out is shared with Bulk Checker, which gets the
   same maximize button.
 
+## Bill Issuance Validator - Case 2 / Case 3 release script for complete accounts (2026-10-04)
+
+New **Release Script — Complete Accounts** card in the Case 2 and Case 3 tabs, built on RJ's own template:
+`UPDATE GCCOM_NOTICE_TMP SET COD_STATUS='1000NOTEMP', UPDATE_DATE=GETDATE(), UPDATE_USER='RMA', UPDATE_PROGRAM='VALIDATION RELEASE_TERMINATED' WHERE ID_NOTICE_TMP IN (SELECT t.ID_NOTICE_TMP FROM GCCOM_NOTICE_TMP t JOIN GCCOM_BILL b ON b.ID_BILL=t.ID_BILL AND t.ID_PAYMENT_FORM IN (...) AND t.COD_STATUS='5000NOTEMP' AND b.BILLING_STATUS='ESTFAC0012') AND COD_STATUS='5000NOTEMP'`.
+
+- Route `POST /api/bill-issuance/release-complete` (editor): re-runs the case's detect with the last scan's scope and keeps only complete accounts (Case 2: `complete = true`; Case 3: every row is complete by definition). Requested ids no longer complete are left out and reported.
+- Case 2: checked complete accounts, or every complete account. Case 3: the searched/visible accounts, or all with the current period / active-contract filters.
+- Builder: `bill_issuance_validator.build_release_by_account_script` (chunks of 1000 ids, clean option, Program/User editable). The outer `COD_STATUS='5000NOTEMP'` guard makes a re-run a no-op. Script is shown only, never executed.
+
+## Auto-load on open (2026-10-04)
+
+Opening a menu or case tab (from the sidebar or an Overview card) now runs its Scan automatically the first time (`hxAutoRun` in app.js, reusing `HX_REFRESH`'s button map). Later visits keep the loaded data (use Refresh to re-run); a manual Scan also counts as loaded. Overview's "open page + pick tab" only loads the tab it lands on. Covers: Bill Issuance Cases 1-4, DIFF DATES Detect All, Hierarchy, TNB, Wrong Stuck (both tabs), DOUBLE ITB, Wrong Billed Consumption (after its periods load), Disconnection TNB, Incorrect Billing Period. Wrong Bill and Anomalies Statistics already auto-loaded. Not auto: pages that need an input first (Workspace, Reading Validation, DIFF DATES single/batch, Bulk Checker).
+
+## Case 1 row selection + query in every "How this works" (2026-10-04)
+
+- Bill Issuance Validator Case 1: checkbox per row + select-all header (selects every row the current filters show). **Generate Release Script only uses checked bills** (sent as `id_bill_rates`, re-verified server-side); Generate stays disabled until something is checked. Selection is kept across sort/filter, cleared on a new Scan.
+- `web/static/queryhints.js`: every menu / case's "ⓘ How this works" panel now has a **🧾 Query** block - explanation, parameters, source builder, Show SQL and 📋 Copy query. Content comes from the Query library (`docs-queries.js`), so there is one copy to maintain. 23 blocks across Wrong Bill 1-4, Bill Issuance 1-4 (+ New Contract Match), DIFF DATES (Single, Detect All), Wrong Stuck (both tabs), Anomalies Statistics, TNB, Disconnection TNB, DOUBLE ITB, Hierarchy, Reading Validation, Incorrect Billing Period, Wrong Billed Consumption, Bulk Checker.
+
+## Bill Issuance Validator Case 2 - missing Rate LAST_BILLING_DATE fallback + NISS export (2026-10-04)
+
+- Missing-Rate anomaly INSERT: LAST_BILLING_DATE = day after the last invoiced bill (unchanged); when no such bill exists in GCCOM_BILL it now falls back to `GCCOM_BILLING_SERVICE.FIRST_BILL_DATE` of the Rate service's billing service (same billing service used in the INSERT). The script comments which source was used.
+- Case 2 detect query now returns each service's NISS (GCCOM_CONTRACTED_SERVICE.ID_SECTOR_SUPPLY -> GCCOM_SECTOR_SUPPLY.NISS); the CSV export has `niss` (account) and `service_niss` (per service, aligned with the other per-service columns).
+
+## Anomalies Statistics - billing severity + compact dashboard (2026-10-04)
+
+- Billing anomalies now carry a **Severity** like reading anomalies, from their detected details (GCCOM_DETECTED_ANOMALY -> GCCOM_ANOMALY_PARAM): **Blocking** = any detail with `IND_STOP_BILLING = 1`; **Non-billable** = `ANOM_BILL_TYPE = TFACA00001` (GCCOM_ANOM_BILL_TYPE) without stop billing; **Warning** = `TFACA00000`. Live 2026-10-04: 20,171 Blocking, 646 Non-billable, 0 Warning (an anomaly with mixed details counts as Blocking).
+- Billing charts are now coloured by severity (same as reading); Status (Pending / after batch) is its own donut + filter. Records have a Severity column.
+- Layout: compact 4-column dashboard (fits one screen), then a **Details** section with the larger Records table, Types summary and Types × age heatmap.
+
 ## Anomalies Statistics menu (2026-10-03)
 
 RJ: "create new menu anomalies statistics, 2 parts billing anomaly and

@@ -64,6 +64,25 @@
         <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn" title="Collapse sidebar">«</button>
       </div>
 
+      <!-- RJ 2026-10-04: signed-in user + profile menu at the top -->
+      <div class="profile-wrap" id="profile-wrap">
+        <button type="button" class="profile-chip" id="profile-chip" aria-haspopup="menu" aria-expanded="false" title="Account">
+          <span class="user-avatar" id="profile-avatar">?</span>
+          <span class="profile-text">
+            <span class="profile-name" id="profile-name">&nbsp;</span>
+            <span class="profile-role" id="profile-role"></span>
+          </span>
+          <span class="profile-caret">▾</span>
+        </button>
+        <div class="profile-menu" id="profile-menu" role="menu" hidden>
+          <div class="profile-menu-head">Signed in as <b id="profile-menu-user"></b></div>
+          <button type="button" role="menuitem" id="profile-password-btn">🔑 Change password</button>
+          <button type="button" role="menuitem" id="profile-settings-btn">⚙️ Settings</button>
+          <button type="button" role="menuitem" id="profile-theme-btn">🌗 Toggle theme</button>
+          <button type="button" role="menuitem" class="is-danger" id="profile-signout-btn">🚪 Sign out</button>
+        </div>
+      </div>
+
       <nav class="nav">
         <button class="nav-item is-active" data-page="overview" title="Overview">
           <span class="nav-icon">🏠</span><span class="nav-label">Overview</span>
@@ -1705,6 +1724,7 @@
           <div class="grid-wrap" style="margin-top:12px;">
             <table class="data-grid" id="billiss-table">
               <thead><tr>
+                <th><input type="checkbox" id="billiss-select-all" title="Select / unselect every row shown (current filters)" /></th>
                 <th class="stats-table-th-sortable" data-sort="reference">Account</th>
                 <th class="stats-table-th-sortable" data-sort="pattern">Pattern</th>
                 <th class="stats-table-th-sortable" data-sort="notice_update_date">Notice Updated</th>
@@ -1727,7 +1747,8 @@
 
         <div class="card">
           <div class="card-header"><h2>Generate Release Script</h2></div>
-          <p class="hint-text">Generates one <code>UPDATE GCCOM_NOTICE_TMP SET COD_STATUS = '1000NOTEMP', ...</code> statement releasing the pending-validation notice for <strong>every currently detected</strong> Rate bill above — both patterns (re-verifies against the live database right before generating). Does not touch GCCOM_BILL itself.</p>
+          <p class="hint-text">Generates one <code>UPDATE GCCOM_NOTICE_TMP SET COD_STATUS = '1000NOTEMP', ...</code> statement releasing the pending-validation notice for the <strong>checked</strong> Rate bills above only — tick the rows (or the header box to select every row shown). Re-verifies against the live database right before generating; a checked bill no longer detected is left out. Does not touch GCCOM_BILL itself.</p>
+          <div class="hint-text" id="billiss-selection-hint">☝️ Check one or more rows in the table above to enable Generate.</div>
           <div class="key-panel-row" style="margin:10px 0;">
             <label class="field-label">Program</label>
             <input id="billiss-release-program" class="text-input text-input-sm" value="VALIDATION RELEASE_TERMINATED" style="width:220px;" />
@@ -1832,7 +1853,7 @@
           </div>
         </div>
 
-        <div class="card">
+        <div class="card" id="biss2-update-card">
           <div class="card-header"><h2>Generate Update Script</h2></div>
           <p class="hint-text">Generates one <code>UPDATE GCCOM_BILL SET ID_BILLING_PERIOD = ...</code> statement per service that needs an update, for every checked account (re-verifies against the live database right before generating). Leave nothing checked to generate for <strong>every</strong> flagged account. A service with no final bill at all is skipped (nothing to update) and listed as a warning instead.</p>
           <div class="key-panel-row" style="margin:10px 0;">
@@ -1848,6 +1869,25 @@
             <button type="button" class="btn btn-pill" id="biss2-download-btn">⬇ Download .sql</button>
           </div>
           <pre class="script-output" id="biss2-output">No update script generated yet — Scan Terminated Accounts, then Generate.</pre>
+        </div>
+
+        <div class="card biss-rel-card" data-biss-rel="case2">
+          <div class="card-header"><h2>Release Script — Complete Accounts</h2></div>
+          <p class="hint-text">Releases the pending notices (<code>5000NOTEMP</code> → <code>1000NOTEMP</code>) of the <strong>✅ Complete</strong> accounts only, on bills still invoicing (<code>ESTFAC0012</code>). The account list is re-checked live right before generating; checked complete accounts are used if any, otherwise every complete account in the scan.</p>
+          <div class="key-panel-row" style="margin:10px 0;flex-wrap:wrap;">
+            <label class="field-label">Program</label>
+            <input class="text-input text-input-sm" data-rel-program value="VALIDATION RELEASE_TERMINATED" style="width:250px;" />
+            <label class="field-label">User</label>
+            <input class="text-input text-input-sm" data-rel-user value="RMA" style="width:90px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" data-rel-clean /> Clean script (no comments)</label>
+            <button type="button" class="btn btn-primary" data-rel-generate>🔓 Generate Release Script</button>
+          </div>
+          <div class="hint-text" data-rel-summary></div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" data-rel-copy>📋 Copy</button>
+            <button type="button" class="btn btn-pill" data-rel-download>⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" data-rel-output>No release script generated yet — Scan Terminated Accounts, then Generate.</pre>
         </div>
         </div><!-- /biss-subpage: case2 -->
 
@@ -1913,6 +1953,25 @@
               <tbody></tbody>
             </table>
           </div>
+        </div>
+
+        <div class="card biss-rel-card" data-biss-rel="case3">
+          <div class="card-header"><h2>Release Script — Complete Accounts</h2></div>
+          <p class="hint-text">Releases the pending notices (<code>5000NOTEMP</code> → <code>1000NOTEMP</code>) of the complete accounts on bills still invoicing (<code>ESTFAC0012</code>). The account list is re-checked live right before generating, using the current Year / Billing period / With Active Contract filters; a search narrows it to the visible accounts.</p>
+          <div class="key-panel-row" style="margin:10px 0;flex-wrap:wrap;">
+            <label class="field-label">Program</label>
+            <input class="text-input text-input-sm" data-rel-program value="VALIDATION RELEASE_TERMINATED" style="width:250px;" />
+            <label class="field-label">User</label>
+            <input class="text-input text-input-sm" data-rel-user value="RMA" style="width:90px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" data-rel-clean /> Clean script (no comments)</label>
+            <button type="button" class="btn btn-primary" data-rel-generate>🔓 Generate Release Script</button>
+          </div>
+          <div class="hint-text" data-rel-summary></div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" data-rel-copy>📋 Copy</button>
+            <button type="button" class="btn btn-pill" data-rel-download>⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" data-rel-output>No release script generated yet — Scan Bills Complete, then Generate.</pre>
         </div>
         </div><!-- /biss-subpage: case3 -->
 
@@ -2533,5 +2592,6 @@
   <script src="/docs-content.js"></script>
   <script src="/docs-queries.js"></script>
   <script src="/docs.js"></script>
+  <script src="/queryhints.js"></script>
 </body>
 </html>

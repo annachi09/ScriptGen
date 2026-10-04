@@ -108,9 +108,14 @@ function showApp() {
   $("#app-shell").hidden = false;
   $("#user-name").textContent = state.username;
   $("#user-avatar").textContent = state.username.slice(0, 1).toUpperCase();
+  $("#profile-name").textContent = state.username;
+  $("#profile-avatar").textContent = state.username.slice(0, 1).toUpperCase();
+  $("#profile-role").textContent = state.role || "";
+  $("#profile-menu-user").textContent = state.username;
   $("#account-username-text").textContent = state.username;
   $("#account-role-badge").textContent = state.role;
   applyRolePermissionsToUI();
+  try { billissUpdateSelectionUI(); } catch (_) { /* Case 1 not rendered yet */ }
   refreshConnectionStatus();
   refreshSidebarConnectionName();
   loadRecentQueries();
@@ -225,12 +230,40 @@ $("#force-password-form").addEventListener("submit", async (e) => {
   }
 });
 
-$("#sign-out-btn").addEventListener("click", async () => {
+async function signOut() {
   await api("/api/logout", { method: "POST" });
   state.username = null;
   state.role = null;
   state.allowedMenus = null;
+  $("#profile-menu").hidden = true;
   showLogin();
+}
+$("#sign-out-btn").addEventListener("click", signOut);
+
+// Profile menu (top of the sidebar) - RJ 2026-10-04.
+function profileMenuToggle(open) {
+  const menu = $("#profile-menu");
+  const show = open ?? menu.hidden;
+  menu.hidden = !show;
+  $("#profile-chip").setAttribute("aria-expanded", String(show));
+}
+$("#profile-chip").addEventListener("click", (e) => { e.stopPropagation(); profileMenuToggle(); });
+document.addEventListener("click", (e) => { if (!e.target.closest("#profile-wrap")) profileMenuToggle(false); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") profileMenuToggle(false); });
+$("#profile-signout-btn").addEventListener("click", signOut);
+$("#profile-theme-btn").addEventListener("click", () => { profileMenuToggle(false); $("#theme-toggle-btn").click(); });
+$("#profile-settings-btn").addEventListener("click", () => {
+  profileMenuToggle(false);
+  document.querySelector('.nav-item[data-page="settings"]')?.click();
+});
+$("#profile-password-btn").addEventListener("click", () => {
+  profileMenuToggle(false);
+  document.querySelector('.nav-item[data-page="settings"]')?.click();
+  setTimeout(() => {
+    const f = $("#change-password-form");
+    f?.scrollIntoView({ behavior: "smooth", block: "center" });
+    f?.querySelector("input")?.focus();
+  }, 150);
 });
 
 // ---------------- Overview (home dashboard across every menu) ----------------
@@ -4363,6 +4396,63 @@ let billissRows = [];
 let billissSortKey = null;
 let billissSortDir = 1;
 
+// ---- Bill Issuance Validator: click a KPI card to filter (RJ 2026-10-04) ----
+// One active KPI per case. Clicking a filterable card toggles it; clicking
+// the "total" card clears it. Cards with no row-level meaning (averages,
+// excluded counts) are not clickable.
+const bissKpi = { billiss: null, biss2: null, biss3: null, biss4: null };
+const BISS_KPI_PRED = {
+  billiss: {
+    stuck: (r) => r.pattern === "stuck_bill",
+    newcontract: (r) => r.pattern === "new_contract",
+    electricity: (r) => r.pattern === "stuck_bill" && String(r.offered_service_next) === "1",
+    water: (r) => r.pattern === "stuck_bill" && String(r.offered_service_next) === "19",
+  },
+  biss2: {
+    needsaction: (a) => !a.complete,
+    missingbill: (a) => a.missing_bill_count > 0,
+    complete: (a) => a.complete,
+    services: (a) => a.needs_update_count > 0,
+  },
+  biss3: {
+    active: (r) => r.with_active_contract === "YES",
+    inactive: (r) => r.with_active_contract === "NO",
+  },
+  biss4: {},
+};
+const BISS_KPI_CLEAR = { billiss: ["rows"], biss2: ["accounts"], biss3: ["rows", "accounts"], biss4: [] };
+
+function bissKpiApply(key, rows, indices) {
+  const pred = bissKpi[key] && BISS_KPI_PRED[key][bissKpi[key]];
+  return pred ? indices.filter((i) => pred(rows[i])) : indices;
+}
+
+function bissKpiCardsHtml(key, cards) {
+  return cards.map(([kpi, icon, label, value]) => {
+    const filt = !!BISS_KPI_PRED[key][kpi];
+    const clear = BISS_KPI_CLEAR[key].includes(kpi);
+    const active = filt ? bissKpi[key] === kpi : (clear && !bissKpi[key]);
+    const tip = filt ? (active ? "Click to clear this filter" : "Click to show only these") : clear ? "Click to show all" : "";
+    return `<div class="kpi-card${filt || clear ? " kpi-card-clickable" : ""}${active ? " is-active" : ""}" data-kpi="${kpi}"${tip ? ` title="${tip}"` : ""}>
+      <div class="kpi-value">${value}</div>
+      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
+    </div>`;
+  }).join("");
+}
+
+function bissKpiWire(key, rowSel, rerender, beforeApply) {
+  $(rowSel)?.addEventListener("click", (e) => {
+    const card = e.target.closest(".kpi-card[data-kpi]");
+    if (!card) return;
+    const kpi = card.dataset.kpi;
+    if (BISS_KPI_PRED[key][kpi]) bissKpi[key] = bissKpi[key] === kpi ? null : kpi;
+    else if (BISS_KPI_CLEAR[key].includes(kpi)) bissKpi[key] = null;
+    else return;
+    if (beforeApply) beforeApply(bissKpi[key]);
+    rerender();
+  });
+}
+
 function billissVisibleIndices(ignoreFilters = false) {
   let indices = billissRows.map((_, i) => i);
   if (!ignoreFilters) {
@@ -4380,6 +4470,7 @@ function billissVisibleIndices(ignoreFilters = false) {
     if (pattern) indices = indices.filter((i) => billissRows[i].pattern === pattern);
     const term = ($("#billiss-search")?.value || "").trim().toLowerCase();
     if (term) indices = indices.filter((i) => String(billissRows[i].reference ?? "").toLowerCase().includes(term));
+    indices = bissKpiApply("billiss", billissRows, indices);
   }
   if (billissSortKey) {
     indices.sort((a, b) => _hierCompareValues(billissRows[a][billissSortKey], billissRows[b][billissSortKey], billissSortDir));
@@ -4411,15 +4502,31 @@ function billissRenderKpiRow() {
     { label: "New Contract Match", count: ncRows.length, total: billissRows.length, c1: "#6366f1", c2: "#06b6d4" },
     { label: "Electricity blocked (of stuck)", count: electricityCount, total: stuckRows.length, c1: "#f59e0b", c2: "#eab308" },
   ]);
-  $("#billiss-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
-    `<div class="kpi-card" data-kpi="${kpi}">
-      <div class="kpi-value">${value}</div>
-      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
-    </div>`
-  ).join("");
+  $("#billiss-kpi-row").innerHTML = bissKpiCardsHtml("billiss", cards);
 }
+bissKpiWire("billiss", "#billiss-kpi-row", () => billissRenderTable());
 
 const _billissPatternLabel = { stuck_bill: "Stuck Bill", new_contract: "New Contract Match" };
+
+// RJ 2026-10-04: Case 1 row selection - only checked bills go into the
+// release script. Keyed by ID_BILL_RATE so it survives sort/filter.
+let billissSelected = new Set();
+const _billissKey = (r) => String(r.id_bill_rate ?? "");
+
+function billissUpdateSelectionUI(visible) {
+  visible = visible || billissVisibleIndices();
+  const all = $("#billiss-select-all");
+  const nVis = visible.filter((i) => billissSelected.has(_billissKey(billissRows[i]))).length;
+  if (all) {
+    all.checked = visible.length > 0 && nVis === visible.length;
+    all.indeterminate = nVis > 0 && nVis < visible.length;
+  }
+  const n = billissSelected.size;
+  $("#billiss-selection-hint").textContent = n
+    ? `${n} bill(s) selected for the release script.`
+    : "☝️ Check one or more rows in the table above to enable Generate.";
+  $("#billiss-release-generate-btn").disabled = n === 0 || state.role === "viewer";
+}
 
 function billissRenderTable() {
   const visible = billissVisibleIndices();
@@ -4429,7 +4536,9 @@ function billissRenderTable() {
   visible.forEach((idx) => {
     const r = billissRows[idx];
     const tr = document.createElement("tr");
+    const key = _billissKey(r);
     tr.innerHTML = (
+      `<td><input type="checkbox" class="billiss-row-cb" data-key="${escapeHtml(key)}"${billissSelected.has(key) ? " checked" : ""} /></td>` +
       `<td>${escapeHtml(r.reference ?? "")}</td>` +
       `<td>${escapeHtml(_billissPatternLabel[r.pattern] ?? r.pattern ?? "")}</td>` +
       `<td>${escapeHtml(r.notice_update_date ?? "")}</td>` +
@@ -4445,8 +4554,10 @@ function billissRenderTable() {
       `<td>${escapeHtml(r.contract_from_date ?? "") || "-"}</td>` +
       `<td>${escapeHtml(r.contract_status ?? "") || "-"}</td>`
     );
+    if (billissSelected.has(key)) tr.classList.add("is-selected");
     tbody.appendChild(tr);
   });
+  billissUpdateSelectionUI(visible);
   billissRenderKpiRow();
   $("#billiss-export-csv-btn").hidden = billissRows.length === 0;
   $("#billiss-export-xlsx-btn").hidden = billissRows.length === 0;
@@ -4460,6 +4571,21 @@ hierWireSortableHeaders(
   billissRenderTable,
 );
 
+$("#billiss-table tbody").addEventListener("change", (e) => {
+  const cb = e.target.closest(".billiss-row-cb");
+  if (!cb) return;
+  if (cb.checked) billissSelected.add(cb.dataset.key); else billissSelected.delete(cb.dataset.key);
+  cb.closest("tr").classList.toggle("is-selected", cb.checked);
+  billissUpdateSelectionUI();
+});
+$("#billiss-select-all").addEventListener("change", (e) => {
+  const visible = billissVisibleIndices();
+  visible.forEach((i) => {
+    const k = _billissKey(billissRows[i]);
+    if (e.target.checked) billissSelected.add(k); else billissSelected.delete(k);
+  });
+  billissRenderTable();
+});
 $("#billiss-ahead-min").addEventListener("input", () => billissRenderTable());
 $("#billiss-ahead-max").addEventListener("input", () => billissRenderTable());
 $("#billiss-search").addEventListener("input", () => billissRenderTable());
@@ -4473,6 +4599,7 @@ $("#billiss-detect-btn").addEventListener("click", async () => {
   try {
     const data = await api("/api/bill-issuance/detect", { method: "POST" });
     billissRows = data.rows;
+    billissSelected = new Set();
     billissSortKey = null;
     billissSortDir = 1;
     $("#billiss-ahead-min").value = "1";
@@ -4562,21 +4689,23 @@ $("#billiss-release-generate-btn").addEventListener("click", async () => {
   const program = $("#billiss-release-program").value.trim();
   const audit_user = $("#billiss-release-user").value.trim();
   const clean = $("#billiss-release-clean-toggle").checked;
+  const ids = [...billissSelected].filter(Boolean);
+  if (!ids.length) { showToast("Check one or more rows first (or use the select-all box).", true); return; }
   const btn = $("#billiss-release-generate-btn");
   btn.disabled = true;
   try {
     const result = await api("/api/bill-issuance/generate-release", {
       method: "POST",
-      body: { program, audit_user, clean },
+      body: { program, audit_user, clean, id_bill_rates: ids, max_periods_ahead: Number($("#billiss-ahead-max")?.value) || 11 },
     });
     $("#billiss-release-output").textContent = result.sql_text;
-    let msg = `Release script generated: ${result.bill_count} bill(s).`;
+    let msg = `Release script generated: ${result.bill_count} of ${ids.length} selected bill(s).`;
     if (result.warnings.length) msg += `  ${result.warnings.length} warning(s) - see comments at the top of the script.`;
     showToast(msg);
   } catch (err) {
     showToast(err.message, true);
   } finally {
-    btn.disabled = state.role === "viewer";
+    billissUpdateSelectionUI();
   }
 });
 
@@ -4635,6 +4764,7 @@ let biss2Accounts = [];
 let biss2SortKey = null;
 let biss2SortDir = 1;
 let biss2Selected = new Set(); // selected row indices - into biss2Accounts
+const bissRelScan = {}; // last scan scope per case - reused by the complete-account release script
 let biss2Expanded = new Set(); // expanded row indices - into biss2Accounts
 
 // RJ, 2026-09-17: "add the filters and sort" - sort (column headers) was
@@ -4679,6 +4809,7 @@ function biss2VisibleIndices(ignoreFilters = false) {
     const missingSvc = $("#biss2-missing-service")?.value || "";
     if (missingSvc) indices = indices.filter((i) => (biss2Accounts[i].missing_services || []).includes(missingSvc));
     if (term) indices = indices.filter((i) => String(biss2Accounts[i].reference ?? "").toLowerCase().includes(term));
+    indices = bissKpiApply("biss2", biss2Accounts, indices);
   }
   if (biss2SortKey) {
     indices.sort((a, b) => _hierCompareValues(biss2Accounts[a][biss2SortKey], biss2Accounts[b][biss2SortKey], biss2SortDir));
@@ -4702,7 +4833,7 @@ const BISS2_TABS = {
   "complete": {
     match: (a) => a.complete,
     mode: null,
-    hint: "Every service's final bill already aligned (or already invoiced) - nothing to generate.",
+    hint: "Every service's final bill already aligned (or already invoiced). Generate = release script for the pending notices (5000NOTEMP -> 1000NOTEMP).",
   },
   "all": { match: null, mode: "", hint: "Every scanned account - use the Status dropdown to narrow." },
 };
@@ -4718,6 +4849,13 @@ function biss2UpdateTabs() {
   $("#biss2-status-wrap").hidden = biss2Tab !== "all";
   const gen = $("#biss2-generate-btn");
   if (gen) gen.disabled = state.role === "viewer" || BISS2_TABS[biss2Tab].mode === null;
+  // RJ 2026-10-04: show only the script card that fits the selected tab -
+  // Complete = release script; every other tab = update script.
+  const isComplete = biss2Tab === "complete";
+  const upd = $("#biss2-update-card");
+  const rel = document.querySelector('.biss-rel-card[data-biss-rel="case2"]');
+  if (upd) upd.hidden = isComplete;
+  if (rel) rel.hidden = !isComplete;
 }
 
 biss2UpdateTabs(); // initial state (before the first scan)
@@ -4726,6 +4864,7 @@ $("#biss2-tabs").addEventListener("click", (e) => {
   const b = e.target.closest("[data-biss2-tab]");
   if (!b) return;
   biss2Tab = b.dataset.biss2Tab;
+  bissKpi.biss2 = null; // picking a tab replaces any KPI filter
   biss2Selected = new Set();
   biss2RenderTable();
 });
@@ -4750,13 +4889,16 @@ function biss2RenderKpiRow() {
     { label: "Accounts already complete", count: complete, total, c1: "#10b981", c2: "#22c55e" },
     { label: "Accounts with a missing bill", count: missingBillAccounts, total, c1: "#ef4444", c2: "#ec4899" },
   ]);
-  $("#biss2-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
-    `<div class="kpi-card" data-kpi="${kpi}">
-      <div class="kpi-value">${value}</div>
-      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
-    </div>`
-  ).join("");
+  $("#biss2-kpi-row").innerHTML = bissKpiCardsHtml("biss2", cards);
 }
+// KPIs count across every account, so a KPI filter switches to the "All"
+// tab (Status = All) - otherwise e.g. "Complete" on the Missing Rate tab
+// would always show 0 rows.
+bissKpiWire("biss2", "#biss2-kpi-row", () => { biss2Selected = new Set(); biss2RenderTable(); }, (kpi) => {
+  biss2Tab = "all";
+  const sf = $("#biss2-status-filter");
+  if (sf) sf.value = kpi === "needsaction" ? "needs-action" : "all";
+});
 
 function biss2RenderServiceRows(idx) {
   const acct = biss2Accounts[idx];
@@ -4920,6 +5062,7 @@ $("#biss2-detect-btn").addEventListener("click", async () => {
   try {
     const daysBack = Number($("#biss2-days-back").value) || 0; // 0 = "All time" (no lookback filter)
     const data = await api(`/api/bill-issuance/case2/detect?days_back=${daysBack}`, { method: "POST" });
+    bissRelScan.case2 = { days_back: daysBack };
     biss2Accounts = data.accounts;
     biss2Selected = new Set();
     biss2Expanded = new Set();
@@ -4959,9 +5102,9 @@ $("#biss2-export-csv-btn").addEventListener("click", () => {
   const visible = biss2VisibleIndices(exportAll);
   if (!visible.length) return;
   const header = [
-    "id_payment_form", "reference", "service_count", "needs_update_count", "missing_bill_count",
+    "id_payment_form", "reference", "niss", "service_count", "needs_update_count", "missing_bill_count",
     "missing_bills", "period_mismatch_count", "target_period", "complete",
-    "offered_services", "bills", "billing_periods", "billing_statuses",
+    "offered_services", "service_niss", "bills", "billing_periods", "billing_statuses",
   ];
   const lines = [header.join(",")];
   visible.forEach((idx) => {
@@ -4975,6 +5118,8 @@ $("#biss2-export-csv-btn").addEventListener("click", () => {
     const row = {
       ...a,
       missing_bills: (a.missing_services || []).join("; "),
+      niss: (a.niss || []).join("; "),
+      service_niss: services.map((s) => s.niss || "-").join("; "),
       offered_services: services.map((s) => s.offered_service_desc || "?").join("; "),
       bills: services.map((s) => s.id_bill || "(none)").join("; "),
       billing_periods: services.map((s) => s.id_billing_period || "-").join("; "),
@@ -5079,6 +5224,7 @@ function biss3VisibleIndices(ignoreFilters = false) {
   if (!ignoreFilters) {
     const term = ($("#biss3-search")?.value || "").trim().toLowerCase();
     if (term) indices = indices.filter((i) => String(biss3Rows[i].reference ?? "").toLowerCase().includes(term));
+    indices = bissKpiApply("biss3", biss3Rows, indices);
   }
   if (biss3SortKey) {
     indices.sort((a, b) => _hierCompareValues(biss3Rows[a][biss3SortKey], biss3Rows[b][biss3SortKey], biss3SortDir));
@@ -5091,17 +5237,14 @@ function biss3RenderKpiRow(data) {
     ["rows", "🧾", "Account/period rows", biss3Rows.length],
     ["accounts", "🏠", "Distinct accounts", data?.account_count ?? new Set(biss3Rows.map((r) => r.id_payment_form)).size],
     ["active", "✅", "With active contract (YES)", data?.with_active_contract_count ?? biss3Rows.filter((r) => r.with_active_contract === "YES").length],
+    ["inactive", "⛔", "No active contract (NO)", biss3Rows.filter((r) => r.with_active_contract === "NO").length],
   ];
   hxGaugesAbove("#biss3-kpi-row", [
     { label: "Rows with an active contract", count: biss3Rows.filter((r) => r.with_active_contract === "YES").length, total: biss3Rows.length, c1: "#10b981", c2: "#22c55e" },
   ]);
-  $("#biss3-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
-    `<div class="kpi-card" data-kpi="${kpi}">
-      <div class="kpi-value">${value}</div>
-      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
-    </div>`
-  ).join("");
+  $("#biss3-kpi-row").innerHTML = bissKpiCardsHtml("biss3", cards);
 }
+bissKpiWire("biss3", "#biss3-kpi-row", () => biss3RenderTable());
 
 function biss3RenderTable() {
   const visible = biss3VisibleIndices();
@@ -5147,6 +5290,7 @@ $("#biss3-detect-btn").addEventListener("click", async () => {
     if (periodId) params.set("billing_period_id", periodId);
     if (activeFilter) params.set("with_active_contract", activeFilter);
     const data = await api(`/api/bill-issuance/case3/detect?${params.toString()}`, { method: "POST" });
+    bissRelScan.case3 = { year, billing_period_id: periodId || null, with_active_contract: activeFilter || null };
     biss3Rows = data.rows;
     biss3SortKey = null;
     biss3SortDir = 1;
@@ -5216,7 +5360,9 @@ function biss4VisibleIndices(ignoreFilters = false) {
   return indices;
 }
 
+let biss4LastData = null; // keeps the excluded-case counts across re-renders
 function biss4RenderKpiRow(data) {
+  if (data) biss4LastData = data; else data = biss4LastData;
   const totalBills = biss4Accounts.reduce((sum, a) => sum + a.bill_count, 0);
   const cards = [
     ["accounts", "🧾", "Unclassified accounts", biss4Accounts.length],
@@ -5226,12 +5372,7 @@ function biss4RenderKpiRow(data) {
     ["case2", "2️⃣", "Excluded - Case 2", data?.case2_account_count ?? "—"],
     ["case3", "3️⃣", "Excluded - Case 3", data?.case3_account_count ?? "—"],
   ];
-  $("#biss4-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) =>
-    `<div class="kpi-card" data-kpi="${kpi}">
-      <div class="kpi-value">${value}</div>
-      <div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>
-    </div>`
-  ).join("");
+  $("#biss4-kpi-row").innerHTML = bissKpiCardsHtml("biss4", cards);
 }
 
 function biss4RenderBillRows(idx) {
@@ -9207,6 +9348,59 @@ const HX_REFRESH = {
   bulkchecker: () => ({ btn: "#bc-search-btn" }),
 };
 
+// ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
+// item, it should load the data as it opens, also same with menus". The
+// first time a menu / case tab is opened, its Scan button runs by itself
+// (reusing HX_REFRESH's button map). Not repeated on later visits - use
+// Refresh for that. Pages that need an input first (Workspace query,
+// Reading Validation NISS, DIFF DATES single NISS / batch, Bulk Checker)
+// are left alone; Wrong Bill and Anomalies Statistics already auto-load.
+const HX_AUTO_PAGES = new Set(["hierarchy", "tnbcycledisc", "wrongstuckhierarchy", "doubleitb",
+  "wrongbilledconsumption", "disconnectiontnb", "billissuance", "incorrectbillingperiod", "dateanomaly"]);
+const hxAutoLoaded = new Set();
+let hxAutoTimer = null;
+
+function hxAutoKey(page) {
+  const sub = { dateanomaly: "data-da-sub", wrongstuckhierarchy: "data-wsh-sub", billissuance: "data-biss-sub" }[page];
+  return sub ? `${page}:${hxActiveSub(sub) || ""}` : page;
+}
+
+function hxAutoTarget(page) {
+  if (!HX_AUTO_PAGES.has(page) || !HX_REFRESH[page]) return null;
+  if (page === "dateanomaly" && hxActiveSub("data-da-sub") !== "detectall") return null;
+  const t = HX_REFRESH[page]();
+  return t && t.btn ? document.querySelector(t.btn) : null;
+}
+
+async function hxAutoRun() {
+  const page = document.querySelector(".page.is-active")?.id?.replace("page-", "");
+  if (!page) return;
+  const key = hxAutoKey(page);
+  if (hxAutoLoaded.has(key)) return;
+  const btn = hxAutoTarget(page);
+  if (!btn) return;
+  hxAutoLoaded.add(key);
+  // Wrong Billed Consumption needs its billing-period list first.
+  if (page === "wrongbilledconsumption") {
+    for (let i = 0; i < 50 && !$("#wbc-period")?.value; i++) await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!btn.disabled) btn.click();
+}
+
+function hxAutoSchedule() {
+  clearTimeout(hxAutoTimer);
+  // short delay so Overview's "open page + pick tab" only loads the tab it lands on
+  hxAutoTimer = setTimeout(hxAutoRun, 80);
+}
+
+document.addEventListener("click", (e) => {
+  if (e.target.closest(".nav-item[data-page], .da-subnav-btn")) { hxAutoSchedule(); return; }
+  // a manual Scan also counts as "loaded" for that menu / tab
+  const page = document.querySelector(".page.is-active")?.id?.replace("page-", "");
+  const target = page && hxAutoTarget(page);
+  if (target && e.target.closest("button") === target) hxAutoLoaded.add(hxAutoKey(page));
+});
+
 // "✕ Clear filters" (RJ 2026-09-30, Bill Issuance cases): resets every
 // input/select/checkbox in the button's own filter row to its HTML default
 // and fires input+change so the page re-renders with no filters.
@@ -9314,6 +9508,70 @@ function hxInstallRefreshButtons() {
     header.appendChild(btn);
   });
 }
+
+// ---------------- Bill Issuance Validator: Case 2 / Case 3 release script
+// for COMPLETE accounts (RJ 2026-10-04) ----------------
+// Uses RJ's own UPDATE GCCOM_NOTICE_TMP template (5000NOTEMP -> 1000NOTEMP,
+// bill ESTFAC0012). The server re-runs the case's detect with the last scan's
+// scope and only keeps accounts that are still complete.
+function bissRelPickedIds(kind) {
+  if (kind === "case2") {
+    // Checked complete accounts if any, else every complete account (server default).
+    const picked = [...biss2Selected].map((i) => biss2Accounts[i]).filter((a) => a && a.complete);
+    return [...new Set(picked.map((a) => String(a.id_payment_form)))];
+  }
+  // Case 3: a search narrows to the visible accounts; no search = all.
+  if (!($("#biss3-search")?.value || "").trim()) return [];
+  return [...new Set(biss3VisibleIndices().map((i) => String(biss3Rows[i].id_payment_form)))];
+}
+
+document.querySelectorAll(".biss-rel-card").forEach((card) => {
+  const kind = card.dataset.bissRel;
+  const q = (sel) => card.querySelector(sel);
+  const out = q("[data-rel-output]");
+  q("[data-rel-generate]").addEventListener("click", async () => {
+    if (!bissRelScan[kind]) { showToast(kind === "case2" ? "Scan Terminated Accounts first." : "Scan Bills Complete first.", true); return; }
+    const ids = bissRelPickedIds(kind);
+    if (kind === "case3" && ($("#biss3-search")?.value || "").trim() && !ids.length) { showToast("No accounts match the search.", true); return; }
+    const btn = q("[data-rel-generate]");
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = "Re-checking…";
+    try {
+      const res = await api("/api/bill-issuance/release-complete", {
+        method: "POST",
+        body: {
+          case: kind, id_payment_forms: ids, ...bissRelScan[kind],
+          program: q("[data-rel-program]").value.trim(),
+          audit_user: q("[data-rel-user]").value.trim(),
+          clean: q("[data-rel-clean]").checked,
+        },
+      });
+      out.textContent = res.sql_text || "-- No complete accounts to release.";
+      let msg = `${res.account_count} complete account(s) in the release script${ids.length ? " (selection)" : ""}.`;
+      if (res.warnings && res.warnings.length) msg += " " + res.warnings.join(" ");
+      q("[data-rel-summary]").textContent = msg;
+      showToast(`Release script generated: ${res.account_count} account(s).`);
+    } catch (err) {
+      showToast(err.message || "Generate failed.", true);
+    } finally {
+      btn.disabled = state.role === "viewer";
+      btn.textContent = original;
+    }
+  });
+  q("[data-rel-copy]").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(out.textContent); showToast("Release script copied to clipboard."); }
+    catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+  });
+  q("[data-rel-download]").addEventListener("click", () => {
+    const blob = new Blob([out.textContent], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `bill_issuance_${kind}_release_complete.sql`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  });
+});
 
 // ---------------- Boot ----------------
 (async function init() {

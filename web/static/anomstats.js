@@ -40,14 +40,17 @@
     billing: {
       url: "/api/anomaly-stats/billing",
       label: "billing anomalies",
-      scope: "GCCOM_ANOMALOUS with status <b>ESTAN00001</b> Pending without billing and <b>ESTAN00009</b> Pending (after batch).",
-      seriesKey: (r) => r.st,
+      scope: "GCCOM_ANOMALOUS with status <b>ESTAN00001</b> Pending without billing and <b>ESTAN00009</b> Pending (after batch). Severity from the detected details (GCCOM_ANOMALY_PARAM): <b>Blocking</b> = stop billing, <b>Non-billable</b> = bill not issued without stop billing, <b>Warning</b> = warning only.",
+      seriesKey: (r) => r.lv,
       series: [
-        { key: "ESTAN00001", name: "Pending", color: "#f59e0b" },
-        { key: "ESTAN00009", name: "Pending after batch", color: "#6366f1" },
+        { key: "Blocking", name: "Blocking", color: "#ef4444" },
+        { key: "Non-billable", name: "Non-billable", color: "#f97316" },
+        { key: "Warning", name: "Warning", color: "#eab308" },
+        { key: "(no level)", name: "No level", color: "#94a3b8" },
       ],
-      seriesDim: "status",
+      seriesDim: "level",
       dims: {
+        level: { label: "Severity", get: (r) => r.lv },
         status: { label: "Status", get: (r) => r.st, show: (v) => ({ ESTAN00001: "Pending", ESTAN00009: "Pending after batch" }[v] || v) },
         type: { label: "Type", get: (r) => r.tc },
         category: { label: "Category", get: (r) => r.cat },
@@ -196,7 +199,7 @@
   /** Vertical stacked columns (SVG). cols: [{key,label,by,total}] */
   function columns(cols, series, dim, opts = {}) {
     if (!cols.length) return `<p class="as-empty">No data for the current filters.</p>`;
-    const W = 640, H = opts.height || 220, padL = 40, padR = 8, padT = 10, padB = 34;
+    const W = opts.width || 640, H = opts.height || 220, padL = 40, padR = 8, padT = 10, padB = 34;
     const plotW = W - padL - padR, plotH = H - padT - padB;
     const max = Math.max(...cols.map((c) => c.total), 1);
     const nice = niceMax(max);
@@ -352,7 +355,7 @@
     const tmapT = stackBy(rowsNoTrend, (r) => (daily ? r.dt : r._wk), sKey);
     const before = rowsNoTrend.filter((r) => { const k = daily ? r.dt : r._wk; return k && k < buckets[0]; }).length;
     const trendCols = buckets.map((b) => ({ key: b, label: daily ? b : `Week of ${b}`, short: b.slice(5), ...(tmapT.get(b) || { total: 0, by: {} }) }));
-    const trend = columns(trendCols, series, trendDim, { aria: daily ? "Detected per day" : "Detected per week", maxLabels: daily ? 10 : 13 });
+    const trend = columns(trendCols, series, trendDim, { aria: daily ? "Detected per day" : "Detected per week", maxLabels: daily ? 10 : 13, height: 150 });
     const trendToggle = `<div class="hx-seg as-trend-toggle" role="group" aria-label="Trend granularity">
       <button type="button" data-as-trend="day" class="${daily ? "is-active" : ""}">Daily</button>
       <button type="button" data-as-trend="week" class="${daily ? "" : "is-active"}">Weekly</button></div>`;
@@ -371,13 +374,23 @@
       tmap = stackBy(rowsNoType, (r) => r.tc, sKey);
     }
     const typeItems = [...tmap.entries()].map(([k, v]) => ({ key: k, label: typeLabel(kind, k), sub: k, total: v.total, by: v.by })).sort((a, b) => b.total - a.total);
-    const typesChart = `<div class="as-scroll">${hbars(typeItems, series, "type", { pctOf: typeItems.reduce((a, t) => a + t.total, 0) })}</div>`;
+    const typesChart = `<div class="as-scroll">${hbars(typeItems, series, "type", { compact: true, pctOf: typeItems.reduce((a, t) => a + t.total, 0) })}</div>`;
 
-    // --- status / severity donut
+    // --- severity donut
     const sDonutRows = filtered(kind, cfg.seriesDim);
     const sCounts = countBy(sDonutRows, sKey);
     const sItems = series.map((s) => ({ key: s.key, label: s.name, value: sCounts.get(s.key) || 0, color: s.color }));
-    const sDonut = donut(sItems, cfg.seriesDim, kind === "billing" ? "open" : "open");
+    const sDonut = donut(sItems, cfg.seriesDim, "open");
+    // --- status donut (billing only: Pending / Pending after batch)
+    let stDonut = "";
+    if (kind === "billing") {
+      const stRows = filtered(kind, "status");
+      const stC = countBy(stRows, (r) => r.st);
+      stDonut = donut([
+        { key: "ESTAN00001", label: "Pending", value: stC.get("ESTAN00001") || 0, color: "#3b82f6" },
+        { key: "ESTAN00009", label: "Pending after batch", value: stC.get("ESTAN00009") || 0, color: "#6366f1" },
+      ], "status", "open");
+    }
 
     // --- service donut
     const svcRows = filtered(kind, "service");
@@ -388,7 +401,7 @@
     const ageRows = filtered(kind, "age");
     const am = stackBy(ageRows, (r) => r._ageB, sKey);
     const ageCols = [...AGE_BUCKETS.map((b) => b.key), "(no date)"].filter((k) => am.has(k) || k !== "(no date)").map((k) => ({ key: k, label: k, ...(am.get(k) || { total: 0, by: {} }) }));
-    const ageChart = columns(ageCols, series, "age", { aria: "Age buckets", height: 200 });
+    const ageChart = columns(ageCols, series, "age", { aria: "Age buckets", width: 380, height: 210, maxLabels: 8 });
 
     // --- period
     const pRows = filtered(kind, "period");
@@ -403,14 +416,15 @@
       const cRows = filtered(kind, "category");
       const cm = stackBy(cRows, (r) => r.cat, sKey);
       const cItems = [...cm.entries()].map(([k, v]) => ({ key: k, label: k, total: v.total, by: v.by })).sort((a, b) => b.total - a.total);
-      third = card("Category", hbars(cItems, series, "category", { compact: true }), { full: true });
+      third = card("Category", `<div class="as-scroll">${hbars(cItems, series, "category", { compact: true })}</div>`, { wide: true });
     } else {
       const rRows = filtered(kind, "rtype");
       const rm = stackBy(rRows, (r) => r.rt, sKey);
       const rItems = [...rm.entries()].map(([k, v]) => ({ key: k, label: k, total: v.total, by: v.by })).sort((a, b) => b.total - a.total);
       const gRows = filtered(kind, "group");
       const gItems = [...countBy(gRows, (r) => r.grp).entries()].map(([k, v], i) => ({ key: k, label: k, value: v, color: PALETTE[(i + 3) % PALETTE.length] }));
-      third = card("Reading type (main detail)", hbars(rItems, series, "rtype", { compact: true }), { wide: true }) + card("Group", donut(gItems, "group", "by group"));
+      third = card("Reading type (main detail)", `<div class="as-scroll">${hbars(rItems, series, "rtype", { compact: true })}</div>`, { wide: true });
+      stDonut = donut(gItems, "group", "by group");
     }
 
     // --- heatmap types x age
@@ -435,17 +449,21 @@
       <p class="as-scope">ℹ️ ${cfg.scope}</p>
       ${bar}
       <div class="as-kpis">${kpis}</div>
-      <div class="as-grid">
-        ${card(daily ? "Detected per day <small>(last 30 days)</small>" : "Detected per week <small>(last 26 weeks)</small>", trend, { wide: true, extra: `<div class="as-head-tools">${legend}${trendToggle}</div>`, foot: before ? `${fmt(before)} open record(s) were detected before ${buckets[0]} (not shown - switch to ${daily ? "Weekly" : "the Age chart"} to see older ones).` : "" })}
-        ${card(kind === "billing" ? "Status" : "Severity", sDonut)}
-        ${card(`Anomaly types <small>(${fmt(typeItems.length)})</small>`, typesChart, { wide: true, extra: legend })}
+      <div class="as-grid as-dash">
+        ${card(daily ? "Detected per day <small>(last 30 days)</small>" : "Detected per week <small>(last 26 weeks)</small>", trend, { wide: true, extra: `<div class="as-head-tools">${legend}${trendToggle}</div>`, foot: before ? `${fmt(before)} older open record(s) not shown - see Age.` : "" })}
+        ${card("Severity", sDonut)}
+        ${card(kind === "billing" ? "Status" : "Group", stDonut)}
+        ${card(`Anomaly types <small>(${fmt(typeItems.length)})</small>`, typesChart, { wide: true })}
         ${card("Service", svcDonut)}
-        ${card("Age since detection", ageChart, { wide: true })}
-        ${card("Billing period", periodChart)}
+        ${card("Age since detection", ageChart)}
+        ${card("Billing period", `<div class="as-scroll">${periodChart}</div>`, { wide: true })}
         ${third}
-        ${card("Types × age <small>(top 15 types)</small>", heat, { full: true })}
-        ${card(`Types summary`, typesTable, { full: true, extra: `<button type="button" class="btn btn-pill-sm" id="as-export-types">⬇ CSV</button>` })}
+      </div>
+      <h2 class="as-section-title">Details</h2>
+      <div class="as-details">
         ${card(`Records <small>(${fmt(rows.length)})</small>`, recordsHtml, { full: true, extra: `<div class="as-rec-actions"><button type="button" class="btn btn-pill-sm" id="as-copy-acct">📋 Copy accounts</button><button type="button" class="btn btn-pill-sm" id="as-export">⬇ Export CSV</button></div>` })}
+        ${card(`Types summary`, typesTable, { full: true, extra: `<button type="button" class="btn btn-pill-sm" id="as-export-types">⬇ CSV</button>` })}
+        ${card("Types × age <small>(top 15 types)</small>", heat, { full: true })}
       </div>`;
     const s = $("#as-search");
     if (s && document.activeElement?.id !== "as-search" && S._refocus) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
@@ -490,12 +508,12 @@
         <td><span class="as-share"><span style="width:${share}%"></span></span> <small>${share}%</small></td>
         <td class="hx-num">${fmt(o.new7)}</td><td class="hx-num">${avg == null ? "–" : fmt(avg) + " d"}</td><td class="hx-num">${o.ages.length ? fmt(Math.max(...o.ages)) + " d" : "–"}</td></tr>`;
     }).join("");
-    return `<div class="grid-wrap as-table-wrap"><table class="data-grid as-table">${head}${body}</table></div>`;
+    return `<div class="grid-wrap as-table-wrap"><table class="data-grid as-table as-types-table">${head}${body}</table></div>`;
   }
 
   const REC_COLS = {
     billing: [
-      ["id", "ID"], ["st", "Status"], ["tc", "Type"], ["td", "Description"], ["cat", "Category"], ["svc", "Service"],
+      ["id", "ID"], ["lv", "Severity"], ["st", "Status"], ["tc", "Type"], ["td", "Description"], ["cat", "Category"], ["svc", "Service"],
       ["acct", "Account"], ["niss", "NISS"], ["dt", "Detected"], ["_age", "Age (d)"], ["bd", "Billing date"], ["bpd", "Billing period"], ["bill", "ID bill"], ["amt", "Expected amount"],
     ],
     reading: [
@@ -516,7 +534,7 @@
     const cols = REC_COLS[kind];
     const list = sortedRows(kind, rows).slice(0, st.limit);
     const statusName = (v) => ({ ESTAN00001: "Pending", ESTAN00009: "Pending after batch" }[v] || v);
-    const sevColor = Object.fromEntries(KINDS.reading.series.map((s) => [s.key, s.color]));
+    const sevColor = Object.fromEntries(KINDS[kind].series.map((s) => [s.key, s.color]));
     const head = cols.map(([k, l]) => `<th class="stats-table-th-sortable${["_age", "amt", "nd"].includes(k) ? " hx-num" : ""}" data-as-sort="${k}">${esc(l)}${st.sort.key === k ? `<span class="stats-table-sort-arrow">${st.sort.dir === 1 ? "▲" : "▼"}</span>` : ""}</th>`).join("");
     const body = list.map((r) => "<tr>" + cols.map(([k]) => {
       let v = r[k];
@@ -550,7 +568,7 @@
   }
   function exportTypes() {
     const kind = S.kind;
-    const table = $("#as-root .as-table");
+    const table = $("#as-root .as-types-table");
     if (!table) return;
     const lines = [...table.querySelectorAll("tr")].map((tr) => [...tr.children].map((c) => csvEsc(c.textContent.trim())).join(","));
     download(`anomaly_types_${kind}_${iso(today())}.csv`, lines);

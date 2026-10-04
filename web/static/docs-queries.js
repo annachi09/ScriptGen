@@ -251,15 +251,27 @@ WHERE b.ID_BILL IN (/* ids from step 2 */);`,
 /* ---------------------------------------------------------------- */
 {
   id: "as-billing", menu: "Anomalies Statistics", title: "Open billing anomalies (dataset)",
-  purpose: "Every billing anomaly still Pending (ESTAN00001) or Pending after batch (ESTAN00009), with its type (ANOMALY_COD), category, service, account, NISS and the billing period of its item to bill. The page aggregates these rows into KPIs and charts.",
+  purpose: "Every billing anomaly still Pending (ESTAN00001) or Pending after batch (ESTAN00009), with its severity (Blocking = a detected detail with IND_STOP_BILLING = 1; Non-billable = ANOM_BILL_TYPE TFACA00001 without stop billing; Warning = TFACA00000), type (ANOMALY_COD), category, service, account, NISS and the billing period of its item to bill. The page aggregates these rows into KPIs and charts.",
   source: "app/core/anomaly_stats.py · build_billing_query()",
   params: [["Statuses", "Pending, Pending after batch", "ESTAN00001, ESTAN00009"]],
-  sql: `SELECT a.ID_ANOMALOUS, a.ANOMALOUS_STATUS, a.DETECTION_DATE, a.BILLING_DATE, a.ID_BILL, a.EXPECTED_AMOUNT,
+  sql: `WITH lv AS (
+  SELECT x.ID_ANOMALOUS,
+         MAX(CAST(p.IND_STOP_BILLING AS int)) AS STOP_BILLING,
+         MAX(CASE WHEN p.ANOM_BILL_TYPE = 'TFACA00001' THEN 1 ELSE 0 END) AS NON_BILLABLE
+  FROM OUC_ADMIN.GCCOM_ANOMALOUS a0 WITH (NOLOCK)
+  JOIN OUC_ADMIN.GCCOM_DETECTED_ANOMALY x WITH (NOLOCK) ON x.ID_ANOMALOUS = a0.ID_ANOMALOUS
+  JOIN OUC_ADMIN.GCCOM_ANOMALY_PARAM p ON p.ID_ANOMALY_PARAM = x.ID_ANOMALY_PARAM
+  WHERE a0.ANOMALOUS_STATUS IN ('ESTAN00001', 'ESTAN00009')
+  GROUP BY x.ID_ANOMALOUS
+)
+SELECT a.ID_ANOMALOUS, a.ANOMALOUS_STATUS, a.DETECTION_DATE, a.BILLING_DATE, a.ID_BILL, a.EXPECTED_AMOUNT,
+       lv.STOP_BILLING, lv.NON_BILLABLE,
        c.ANOMALY_COD AS TYPE_CODE, COALESCE(dc.TEXT, c.DESCRIPTION) AS TYPE_DESC,
        an.COD_GROUP AS CATEGORY_CODE, COALESCE(dg.TEXT, g.NAME_TYPE) AS CATEGORY,
        cs.ID_OFFERED_SERVICE, os.NAME_TYPE AS OFFERED_SERVICE, pf.REFERENCE AS ACCOUNT, ss.NISS,
        itb.ID_BILLING_PERIOD, COALESCE(dbp.TEXT, bp.DESCRIPTION) AS BILLING_PERIOD
 FROM OUC_ADMIN.GCCOM_ANOMALOUS a WITH (NOLOCK)
+LEFT JOIN lv ON lv.ID_ANOMALOUS = a.ID_ANOMALOUS
 LEFT JOIN OUC_ADMIN.GCCOM_BILL_ANOMALY_COMPANY c ON c.ID_BILL_ANOM_COMP = a.ID_PRINCIPAL_ANOMALY
 LEFT JOIN GCTS_DICTIONARY dc ON dc.ID = c.NAME_TYPE_XI18N AND dc.LOCALE = 'EN'
 LEFT JOIN OUC_ADMIN.GCCOM_ANOMALY an ON an.ANOMALY_COD = c.ANOMALY_COD
