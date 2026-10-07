@@ -114,7 +114,7 @@ ORDER BY p.ID_MEASURING_POINT, S_HAS_DEVICE DESC, c.ID_MEASURING_POINT;`,
 /* ---------------------------------------------------------------- */
 {
   id: "wb-case3", menu: "Wrong Bill", title: "Case 3 - Sanitary 0 with water consumption",
-  purpose: "Sanitary bills on a charging tariff (not 10000000021 Zero / 10000000022 Subsidy, checked on the billing service AND on the billed SANITARY concept) whose SANITARY amount is 0 or missing, while the same account's Water bill (same period + billing date) has CONCSMO003 water consumption > 0.",
+  purpose: "Sanitary bills on a charging tariff (not 10000000021 Zero / 10000000022 Subsidy, checked on the billing service AND on the billed SANITARY concept) whose SANITARY line amounts to 0 (a SANITARY line must exist), on a premise still connected to the sanitary network and with no Zero/Subsidy tariff in the billing-service history up to the billing date, while the same account's Water bill (same period + billing date) has CONCSMO003 water consumption > 0. Cancelled, Rebilled and credit notes excluded on both sides.",
   source: "app/core/wrong_bill_sanitary_zero.py · build_query()",
   params: [
     ["Billing periods", "One or more (default: current)", "10000000238"],
@@ -141,6 +141,7 @@ zero AS (                                       -- SANITARY = 0 / missing, and n
   GROUP BY s.ID_BILL
   HAVING ISNULL(SUM(bc.CONCEPT_AMOUNT), 0) = 0
      AND SUM(CASE WHEN bc.ID_FARE IN (10000000021, 10000000022) THEN 1 ELSE 0 END) = 0
+     AND COUNT(bc.ID_BILLING_CONCEPT) > 0      -- a SANITARY line must exist
 )
 SELECT pf.REFERENCE, ss.NISS, s.ID_BILLING_PERIOD, s.BILLING_DATE, s.CREATE_DATE,
        s.ID_BILL AS SANITARY_ID_BILL, s.BILL_NUMBER AS SANITARY_BILL_NUMBER, s.BILLING_STATUS, s.BILLING_TYPE,
@@ -163,6 +164,16 @@ CROSS APPLY (                                   -- the Water bill's consumption 
 JOIN OUC_COMMON_ADMIN.GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = s.ID_PAYMENT_FORM
 LEFT JOIN GCCOM_SECTOR_SUPPLY ss WITH (NOLOCK) ON ss.ID_SECTOR_SUPPLY = s.ID_SECTOR_SUPPLY
 WHERE wc.WATER_CONSUMPTION > 0
+  AND EXISTS (                                  -- premise still connected to the sanitary network
+    SELECT 1 FROM GCCOM_SUPPLY sp WITH (NOLOCK)
+    JOIN EWA_GCGT_NS_SANITARY_PREMISE nsp WITH (NOLOCK)
+         ON nsp.ID_PREMISE = sp.ID_PREMISE AND nsp.TO_DATE IS NULL AND nsp.ACTION_TYPE = 'Connected'
+    WHERE sp.ID_SUPPLY = ss.ID_SUPPLY)
+  AND NOT EXISTS (                              -- not on Zero/Subsidy tariff up to the billing date
+    SELECT 1 FROM GCCOM_BILLING_SERVICE_HIST hst WITH (NOLOCK)
+    WHERE hst.ID_BILLING_SERVICE = s.ID_BILLING_SERVICE AND hst.ID_FARE IN (10000000021, 10000000022)
+    GROUP BY hst.ID_FARE
+    HAVING s.BILLING_DATE <= MAX(hst.END_DATE))
 ORDER BY wc.WATER_CONSUMPTION DESC;`,
   example: {
     input: "Billing period 10000000238 (10-October 2026).",

@@ -52,6 +52,12 @@
   </div>
 
   <!-- ---------------- Main app shell ---------------- -->
+  <!-- Global loading indicator (RJ 2026-10-05) - driven by api() in app.js -->
+  <div id="sg-topbar" class="sg-topbar" aria-hidden="true"></div>
+  <div id="sg-loading-chip" class="sg-loading-chip" role="status" aria-live="polite" hidden>
+    <span class="sg-spinner"></span><span class="sg-chip-text">Loading data…</span>
+  </div>
+
   <div id="app-shell" class="app-shell" hidden>
 
     <aside class="sidebar" id="sidebar">
@@ -1505,10 +1511,28 @@
                 <span>Billing period</span>
                 <select id="ditb-filter-bp" class="text-input text-input-sm"><option value="">All</option></select>
               </label>
-              <label class="hx-field">
-                <span>Offered service</span>
-                <select id="ditb-filter-service" class="text-input text-input-sm"><option value="">All</option></select>
-              </label>
+              <div class="hx-field">
+                <span>Service</span>
+                <!-- RJ 2026-10-06: quick Water / Electricity filter -->
+                <div class="hx-seg" id="ditb-filter-svc-seg">
+                  <button type="button" data-value="" class="is-active">All</button>
+                  <button type="button" data-value="Water">💧 Water</button>
+                  <button type="button" data-value="Electricity">⚡ Electricity</button>
+                </div>
+                <select id="ditb-filter-service" class="text-input text-input-sm" hidden><option value="">All</option></select>
+              </div>
+              <div class="hx-field">
+                <span>Reading type sent to bill</span>
+                <!-- RJ 2026-10-06: colour-coded, red = Removal (Disconnection) -->
+                <div class="hx-seg ditb-rt-seg" id="ditb-filter-rtype">
+                  <button type="button" data-value="" class="is-active">All</button>
+                  <button type="button" data-value="Cycle" class="rt-cycle">Cycle</button>
+                  <button type="button" data-value="Removal" class="rt-removal">Removal</button>
+                  <button type="button" data-value="Disconnection" class="rt-disconnection">Disconnection</button>
+                  <button type="button" data-value="Direct Connection" class="rt-direct">Direct connection</button>
+                  <button type="button" data-value="Distribution" class="rt-distribution">Distribution</button>
+                </div>
+              </div>
               <div class="hx-field">
                 <span>Rebilling</span>
                 <div class="hx-seg" id="ditb-filter-rebill">
@@ -1526,6 +1550,30 @@
               <tbody></tbody>
             </table>
           </div>
+        </div>
+
+        <!-- RJ 2026-10-05: fix script for the duplicate (Anomalous) items to bill -->
+        <div class="card">
+          <div class="card-header"><h2>Generate Fix Script</h2></div>
+          <p class="hint-text">Only <strong>Water and Electricity</strong> duplicates are listed. For a <strong>Water</strong> duplicate, the Sanitary item to bill that shares its reading is cancelled too, and the rebilling activity gets <strong>2 bills</strong> (Water + Sanitary - the Sanitary bill is the Billed Sanitary item with the same dates); Electricity has 1 bill. For every <strong>checked</strong> row: (1) the duplicate item to bill (the Anomalous one) is cancelled - <code>STTOBILL00 → STTOBILL04</code>; (2) its readings (GCCOM_READINGS_ITEMSTOBILL) go to Billed - <code>READ_STATUS = 7000STSRED</code>; (3) if its ready usage is &gt; 0, a <code>GCCOM_REBILLING_ACTIVITY</code> + <code>GCCOM_REB_ACTIVITY_INFORMATION</code> is inserted <strong>In process</strong> (<code>ESTREF0002</code>), type <strong>Massive substitutive</strong> (<code>TIPREF0005</code>), for the bill of the Billed twin (customer = that bill's account), and that bill is set to <strong>Disputed</strong> (<code>BILLING_STATUS = ESTFAC0010</code>). With "Process by batch" the bill note goes in <code>EREALB0005</code> (Recalculado Batch) instead of <code>EREALB0001</code> (Reclamado). The state is re-read from the database right before generating.</p>
+          <div class="hint-text" id="ditb-selection-hint">☝️ Check one or more rows above (or the header box for every row shown) to enable Generate.</div>
+          <div class="key-panel-row" style="margin:10px 0;flex-wrap:wrap;">
+            <label class="field-label">User</label>
+            <input id="ditb-user" class="text-input text-input-sm" value="RMA" style="width:90px;" />
+            <label class="field-label">Program</label>
+            <input id="ditb-program" class="text-input text-input-sm" value="DOUBLE_ITB" style="width:150px;" />
+            <label class="field-label" title="GCCOM_REBILLING_ACTIVITY.CREATION_USER">Creation user</label>
+            <input id="ditb-creation-user" class="text-input text-input-sm" value="10000008456" style="width:120px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="ditb-batch" checked /> Process rebilling by batch</label>
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="ditb-clean" /> Clean script (no comments)</label>
+            <button type="button" class="btn btn-primary" id="ditb-generate-btn" disabled>📝 Generate Fix Script</button>
+          </div>
+          <div class="hint-text" id="ditb-gen-summary"></div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" id="ditb-copy-btn">📋 Copy</button>
+            <button type="button" class="btn btn-pill" id="ditb-download-btn">⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" id="ditb-output">No fix script generated yet — Scan, check the rows, then Generate.</pre>
         </div>
       </section>
 
@@ -2159,6 +2207,7 @@
               <option value="generated">Generated only</option>
               <option value="missing_bill">Missing bill</option>
               <option value="in_invoicing">In invoicing</option>
+              <option value="complete_no_file">All services billed, file not generated</option>
             </select>
             <label class="field-label">Amount</label>
             <input id="bc-amount-min" class="text-input text-input-sm" type="number" placeholder="Min" style="width:90px;" />

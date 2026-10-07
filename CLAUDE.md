@@ -16,6 +16,12 @@ real tunnel DB (see below) — never guess a status code or column name. This
 is the single most consistent thing RJ asks for across rounds, whether or not
 he says it that turn.
 
+### Join hints RJ has given (keep, reuse)
+- Reading anomalies -> reading (RJ, 2026-10-06): link `GCGT_RE_ANOMALOUS`
+  to a reading through `RE_ANOMALY_SET.ID_READING` ("in the future you can
+  link it with re_anomaly_set.id_reading"). Not needed for DOUBLE ITB today
+  (the GCGT_RE_ANOMALOUS step there was reverted).
+
 ## Investigate live before writing code
 
 RJ gives a business rule in his own words, often with a real account number

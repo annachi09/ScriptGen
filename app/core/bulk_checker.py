@@ -37,7 +37,7 @@ from typing import Optional
 
 from .sql_format import format_sql_literal
 
-STATUS_FILTERS = ("all", "pending", "generated", "missing_bill", "in_invoicing")
+STATUS_FILTERS = ("all", "pending", "generated", "missing_bill", "in_invoicing", "complete_no_file")
 BILL_FILTERS = ("all", "pending", "missing")
 
 # Same rationale as EWA's own MAX_BULK_ACCOUNTS - a guard on the bulk
@@ -50,6 +50,8 @@ _STATUS_FILTER_CLAUSES = {
     "generated": "AND BDET.file_number IS NOT NULL",
     "missing_bill": "AND ISNULL(BILLAGG.has_missing_bill, 0) = 1",
     "in_invoicing": "AND ISNULL(BILLAGG.has_bill_in_invoicing, 0) = 1",
+    # RJ 2026-10-05: every service already has its bill, but no file yet.
+    "complete_no_file": "AND BDET.file_number IS NULL AND BILLAGG.ID_PAYMENT_FORM_BUNCHER IS NOT NULL AND ISNULL(BILLAGG.has_missing_bill, 0) = 0",
 }
 
 _BILL_FILTER_CLAUSES = {
@@ -105,7 +107,10 @@ SELECT DISTINCT
     BDET.file_number,
     BDET.num_account,
     ISNULL(BILLAGG.has_missing_bill, 0) AS has_missing_bill,
-    ISNULL(BILLAGG.has_bill_in_invoicing, 0) AS has_bill_in_invoicing
+    ISNULL(BILLAGG.has_bill_in_invoicing, 0) AS has_bill_in_invoicing,
+    ISNULL(BILLAGG.total_services, 0) AS total_services,
+    ISNULL(BILLAGG.missing_services, 0) AS missing_services,
+    ISNULL(BILLAGG.total_accounts, 0) AS total_accounts
 FROM GCCOM_ACCOUNT_BUNCHER ab
 JOIN GCCOM_PAYMENT_FORM pf ON ab.ID_PAYMENT_FORM = pf.ID_PAYMENT_FORM
 JOIN GCCOM_CONTRACTED_SERVICE cs ON cs.ID_PAYMENT_FORM = ab.ID_PAYMENT_FORM
@@ -143,7 +148,12 @@ LEFT JOIN (
     SELECT
         ab2.ID_PAYMENT_FORM_BUNCHER,
         MAX(CASE WHEN b2.id_bill IS NULL THEN 1 ELSE 0 END) AS has_missing_bill,
-        MAX(CASE WHEN b2.id_bill IS NOT NULL AND bl2.FILE_NUMBER IS NULL THEN 1 ELSE 0 END) AS has_bill_in_invoicing
+        MAX(CASE WHEN b2.id_bill IS NOT NULL AND bl2.FILE_NUMBER IS NULL THEN 1 ELSE 0 END) AS has_bill_in_invoicing,
+        -- RJ 2026-10-05: totals for the page KPIs (services / sub-accounts /
+        -- services with no bill at all this period).
+        COUNT(DISTINCT cs2.ID_CONTRACTED_SERVICE) AS total_services,
+        COUNT(DISTINCT CASE WHEN b2.id_bill IS NULL THEN cs2.ID_CONTRACTED_SERVICE END) AS missing_services,
+        COUNT(DISTINCT ab2.ID_PAYMENT_FORM) AS total_accounts
     FROM GCCOM_ACCOUNT_BUNCHER ab2
     JOIN GCCOM_PAYMENT_FORM pf1b ON pf1b.ID_PAYMENT_FORM = ab2.ID_PAYMENT_FORM
     JOIN GCCOM_CONTRACTED_SERVICE cs2 ON cs2.ID_PAYMENT_FORM = ab2.ID_PAYMENT_FORM

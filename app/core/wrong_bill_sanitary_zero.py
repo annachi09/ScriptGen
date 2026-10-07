@@ -162,6 +162,9 @@ zero AS (
   GROUP BY s.ID_BILL
   HAVING ISNULL(SUM(bc.CONCEPT_AMOUNT), 0) = 0
      AND SUM(CASE WHEN bc.ID_FARE IN ({fares}) THEN 1 ELSE 0 END) = 0
+     -- RJ 2026-10-05 (compared with the analyst query): a SANITARY concept
+     -- must exist - bills with none were fee-refund bills (SCFEE only).
+     AND COUNT(bc.ID_BILLING_CONCEPT) > 0
 )
 SELECT
   pf.REFERENCE AS REFERENCE,
@@ -212,5 +215,19 @@ LEFT JOIN GCTS_DICTIONARY dbt ON dbt.ID = bt.NAME_TYPE_XI18N AND dbt.LOCALE = 'E
 LEFT JOIN {s}.GCCOM_FARE fa ON fa.ID_FARE = COALESCE(z.CONCEPT_FARE, s.BS_FARE)
 LEFT JOIN GCTS_DICTIONARY dfa ON dfa.ID = fa.NAME_TYPE_XI18N AND dfa.LOCALE = 'EN'
 WHERE wc.WATER_CONSUMPTION > 0
+  -- RJ 2026-10-05, taken from the analyst query: the premise must still be
+  -- connected to the sanitary network (a disconnected premise is a valid 0)
+  AND EXISTS (
+    SELECT 1 FROM GCCOM_SUPPLY sp WITH (NOLOCK)
+    JOIN EWA_GCGT_NS_SANITARY_PREMISE nsp WITH (NOLOCK)
+         ON nsp.ID_PREMISE = sp.ID_PREMISE AND nsp.TO_DATE IS NULL AND nsp.ACTION_TYPE = 'Connected'
+    WHERE sp.ID_SUPPLY = ss.ID_SUPPLY)
+  -- ... and the billing service must not have been on the Zero / Subsidy
+  -- tariff up to the billing date (GCCOM_BILLING_SERVICE_HIST).
+  AND NOT EXISTS (
+    SELECT 1 FROM GCCOM_BILLING_SERVICE_HIST hst WITH (NOLOCK)
+    WHERE hst.ID_BILLING_SERVICE = s.ID_BILLING_SERVICE AND hst.ID_FARE IN ({fares})
+    GROUP BY hst.ID_FARE
+    HAVING s.BILLING_DATE <= MAX(hst.END_DATE))
 ORDER BY wc.WATER_CONSUMPTION DESC
 """

@@ -3068,6 +3068,7 @@ def _case2_group_rows_by_account(rows: list[dict]) -> list[dict]:
         acct["services"].append({
             "id_offered_service": diff_engine.cell_display(offered_service_id),
             "offered_service_desc": _OFFERED_SERVICE_NAMES.get(offered_service_id, ""),
+            "id_contracted_service": diff_engine.cell_display(_da_col(r, "ID_CONTRACTED_SERVICE")),
             "end_date": diff_engine.cell_display(_da_col(r, "END_DATE")),
             "niss": niss,
             "id_bill": diff_engine.cell_display(raw_id_bill),
@@ -4655,6 +4656,45 @@ def email_settings_test(user: str = Depends(require_admin)):
 # DOUBLE ITB (RJ, 2026-09-27) - see app/core/double_itb.py. One scan, no
 # parameters; filtered client-side.
 # ---------------------------------------------------------------------
+class DoubleItbGenerateRequest(BaseModel):
+    anom_ids: list[str]
+    user: str = double_itb.FIX_USER_DEFAULT
+    program: str = double_itb.FIX_PROGRAM_DEFAULT
+    creation_user: int = double_itb.REB_CREATION_USER_DEFAULT
+    batch: bool = True
+    clean: bool = False
+
+
+@app.post("/api/double-itb/generate")
+def double_itb_generate(body: DoubleItbGenerateRequest, user: str = Depends(require_editor)):
+    """RJ 2026-10-05: fix script for the selected duplicate (Anomalous) items
+    to bill - cancel ITB, readings -> Billed, rebilling (batch) when ready
+    usage > 0. Re-reads the live state first; items no longer Anomalous with
+    a Billed twin are left out."""
+    ids = [str(x).strip() for x in body.anom_ids if str(x).strip().isdigit()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Select at least one item.")
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, double_itb.build_fix_context_query(ids))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): v for c, v in zip(res.columns, r)} for r in res.rows]
+    out = double_itb.build_fix_script(
+        rows, user=(body.user or "").strip() or double_itb.FIX_USER_DEFAULT,
+        program=(body.program or "").strip() or double_itb.FIX_PROGRAM_DEFAULT,
+        creation_user=body.creation_user, batch=body.batch, clean=body.clean)
+    found = {str(r.get("anom_id")) for r in rows}
+    skipped = [i for i in ids if i not in found]
+    if skipped:
+        out["warnings"].append(f"{len(skipped)} selected item(s) are no longer Anomalous with a Billed twin and were left out.")
+    out["skipped"] = skipped
+    return out
+
+
 @app.post("/api/double-itb/detect")
 def double_itb_detect(user: str = Depends(require_login)):
     config = load_config()
@@ -4780,6 +4820,28 @@ def bulk_checker_search(body: BulkCheckerSearchRequest, user: str = Depends(requ
     in_invoicing_idx = next((i for i, c in enumerate(result.columns) if c.lower() == "has_bill_in_invoicing"), None)
     pending_amount_idx = next((i for i, c in enumerate(result.columns) if c.lower() == "pending_amount"), None)
 
+    # RJ 2026-10-05: page totals (services / sub-accounts / services with a
+    # missing bill / bulks complete but no file) - counted once per bulk
+    # account (a bulk with more than one lot appears on several rows).
+    lc = [c.lower() for c in result.columns]
+    def _ix(name):
+        return lc.index(name) if name in lc else None
+    bunch_i, ts_i, ms_i, ta_i = _ix("id_payment_form_buncher"), _ix("total_services"), _ix("missing_services"), _ix("total_accounts")
+    seen_bulks: set = set()
+    total_services = missing_services = total_accounts = complete_no_file = 0
+    for row in result.rows:
+        key = row[bunch_i] if bunch_i is not None else id(row)
+        if key in seen_bulks:
+            continue
+        seen_bulks.add(key)
+        ts = int(row[ts_i] or 0) if ts_i is not None else 0
+        ms = int(row[ms_i] or 0) if ms_i is not None else 0
+        total_services += ts
+        missing_services += ms
+        total_accounts += int(row[ta_i] or 0) if ta_i is not None else 0
+        if file_number_idx is not None and row[file_number_idx] is None and ts > 0 and ms == 0:
+            complete_no_file += 1
+
     columns = result.columns + ["is_pending"]
     display_rows: list[list[str]] = []
     pending_count = 0
@@ -4839,6 +4901,11 @@ def bulk_checker_search(body: BulkCheckerSearchRequest, user: str = Depends(requ
         "missing_bill_count": missing_bill_count,
         "in_invoicing_count": in_invoicing_count,
         "outstanding_amount": outstanding_total,
+        "bulk_count": len(seen_bulks),
+        "total_services": total_services,
+        "missing_services": missing_services,
+        "total_accounts": total_accounts,
+        "complete_no_file_count": complete_no_file,
         "elapsed_ms": result.elapsed_ms,
         "status_filter": status_filter,
     }

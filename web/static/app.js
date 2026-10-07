@@ -54,8 +54,60 @@ function daRowClassForBillingPeriods(count) {
 // page's own scan to finish before it restores that page's filters.
 let _apiInflight = 0;
 
+// ---- Global loading indicator (RJ 2026-10-05: "a modern loading indicator
+// whenever a page is loading data, do it to all menu and functionalities").
+// Every api() call drives: a thin animated bar at the top of the window, a
+// floating "Loading data… Ns" pill, and a spinner on the button that
+// started it. Background polling (job status/progress) is ignored so the
+// indicator only means "you are waiting for data".
+const sgLoader = (() => {
+  let count = 0, started = 0, showTimer = null, tick = null, lastBtn = null, lastBtnAt = 0;
+  // Overview's per-card counts run in the background (each card already
+  // shows its own "…" while loading), so they don't hold the global pill.
+  const QUIET = /\/(status|progress|server-info|session)(\b|\?|\/|$)|\/jobs?\/[^/]+$|\/api\/overview\/count\//;
+  const els = () => ({ bar: document.getElementById("sg-topbar"), chip: document.getElementById("sg-loading-chip") });
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("button, .kpi-card, .overview-card, [data-overview-card]");
+    if (b) { lastBtn = b; lastBtnAt = Date.now(); }
+  }, true);
+  function render() {
+    const { bar, chip } = els();
+    const on = count > 0;
+    bar?.classList.toggle("is-on", on);
+    if (chip) {
+      chip.hidden = !on;
+      const s = Math.floor((Date.now() - started) / 1000);
+      const label = chip.querySelector(".sg-chip-text");
+      if (label) label.textContent = count > 1 ? `Loading data… ${count} requests · ${s}s` : `Loading data… ${s}s`;
+    }
+  }
+  return {
+    start(path) {
+      if (QUIET.test(path)) return null;
+      const btn = lastBtn && Date.now() - lastBtnAt < 600 ? lastBtn : null;
+      if (btn && btn.tagName === "BUTTON") btn.classList.add("is-busy");
+      if (count++ === 0) {
+        started = Date.now();
+        clearTimeout(showTimer);
+        showTimer = setTimeout(render, 120); // no flash for instant calls
+        clearInterval(tick);
+        tick = setInterval(render, 1000);
+      }
+      return btn;
+    },
+    end(token, path) {
+      if (QUIET.test(path)) return;
+      if (token && token.classList) token.classList.remove("is-busy");
+      count = Math.max(0, count - 1);
+      if (count === 0) { clearTimeout(showTimer); clearInterval(tick); }
+      render();
+    },
+  };
+})();
+
 async function api(path, options = {}) {
   _apiInflight++;
+  const _ldr = sgLoader.start(path);
   try {
     const resp = await fetch(path, {
       method: options.method || "GET",
@@ -72,6 +124,7 @@ async function api(path, options = {}) {
     return data;
   } finally {
     _apiInflight--;
+    sgLoader.end(_ldr, path);
   }
 }
 
@@ -5101,6 +5154,35 @@ $("#biss2-export-csv-btn").addEventListener("click", () => {
   const exportAll = !!$("#biss2-export-all")?.checked;
   const visible = biss2VisibleIndices(exportAll);
   if (!visible.length) return;
+  // RJ 2026-10-05: on the Missing Rate bill tab, export a dedicated row
+  // for the Rate service only (its own NISS / contract / bill columns),
+  // instead of every service of the account joined together.
+  if (biss2Tab === "missing-rate") {
+    const rh = ["id_payment_form", "reference", "rate_niss", "rate_id_contracted_service", "rate_end_date",
+      "rate_id_bill", "rate_billing_period", "rate_billing_status", "rate_status", "target_period", "other_missing_bills"];
+    const out = [rh.join(",")];
+    visible.forEach((idx) => {
+      const a = biss2Accounts[idx];
+      (a.services || []).filter((s) => String(s.id_offered_service) === "176" || s.offered_service_desc === "Rate").forEach((s) => {
+        const row = {
+          id_payment_form: a.id_payment_form, reference: a.reference,
+          rate_niss: s.niss || "", rate_id_contracted_service: s.id_contracted_service || "", rate_end_date: s.end_date || "",
+          rate_id_bill: s.id_bill || "(none)", rate_billing_period: s.id_billing_period || "", rate_billing_status: s.billing_status || "",
+          rate_status: s.reason === "missing_bill" ? "Missing bill" : s.reason === "period_mismatch" ? "Period mismatch" : "OK",
+          target_period: a.target_period || "",
+          other_missing_bills: (a.missing_services || []).filter((m) => m !== "Rate").join("; "),
+        };
+        out.push(rh.map((k) => `"${String(row[k] ?? "").replace(/"/g, '""')}"`).join(","));
+      });
+    });
+    const blob = new Blob([out.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a2 = document.createElement("a");
+    a2.href = url; a2.download = exportAll ? "bill_issuance_case2_rate_all.csv" : "bill_issuance_case2_missing_rate.csv";
+    document.body.appendChild(a2); a2.click(); a2.remove();
+    URL.revokeObjectURL(url);
+    return;
+  }
   const header = [
     "id_payment_form", "reference", "niss", "service_count", "needs_update_count", "missing_bill_count",
     "missing_bills", "period_mismatch_count", "target_period", "complete",
@@ -7460,12 +7542,14 @@ const DITB_COLUMNS = [
       ? `<span class="hx-pill hx-pill-billed">Needs rebilling</span>` : `<span class="hx-pill hx-pill-ghost">No</span>` },
   { key: "anom_ready_usage", label: "★ Ready Usage (anomalous)", num: true, render: (r) => `<strong>${escapeHtml(r.anom_ready_usage ?? "")}</strong>` },
   { key: "anom_reading_count", label: "Readings", num: true },
+  { key: "reading_types", label: "Reading type", render: (r) => ditbReadingTypePills(r.reading_types) },
   { key: "anom_id_item_to_bill", label: "Anomalous ITB", mono: true },
   { key: "anom_status", label: "Status", render: (r) => `<span class="hx-pill hx-pill-amber" title="${escapeHtml(r.anom_status ?? "")}">Anomalous</span>` },
   { key: "anom_billing_date", label: "Billing Date", date: true },
   { key: "billed_id_item_to_bill", label: "Billed ITB", mono: true },
   { key: "billed_status", label: "Status", render: (r) => `<span class="hx-pill hx-pill-green" title="${escapeHtml(r.billed_status ?? "")}">Billed</span>` },
   { key: "billed_id_bill", label: "ID Bill", mono: true },
+  { key: "san_anom_id_item_to_bill", label: "Sanitary dup. ITB (water)", mono: true, render: (r) => escapeHtml(r.san_anom_id_item_to_bill || (/water/i.test(r.offered_service || "") ? "—" : "")) },
   { key: "ini_date", label: "INI Date", date: true },
   { key: "end_date", label: "END Date", date: true },
   { key: "id_billing_service", label: "Billing Service", mono: true },
@@ -7476,6 +7560,33 @@ let ditbRows = [];
 let ditbSortKey = null;
 let ditbSortDir = 1;
 let ditbRebill = "";
+let ditbReadingType = "";
+// RJ 2026-10-06: reading type sent to bill, colour-coded (red = Removal).
+// Removal = TIPTL00002, Disconnection = TIPTL00010 (two different types).
+const DITB_RT_CLASS = { "cycle": "rt-cycle", "removal": "rt-removal", "disconnection": "rt-disconnection", "direct connection": "rt-direct", "distribution": "rt-distribution" };
+function ditbReadingTypePills(v) {
+  return String(v || "").split(",").map((s) => s.trim()).filter(Boolean).map((t) => {
+    const cls = DITB_RT_CLASS[t.toLowerCase()] || "rt-other";
+    return `<span class="ditb-rt-pill ${cls}" title="${escapeHtml(t)}">${escapeHtml(t)}</span>`;
+  }).join(" ") || "—";
+}
+// RJ 2026-10-05: fix-script selection (duplicate = Anomalous ITB id)
+let ditbSelected = new Set();
+
+function ditbUpdateSelectionUI(visible) {
+  visible = visible || ditbVisibleRows();
+  const all = $("#ditb-select-all");
+  const n = visible.filter((r) => ditbSelected.has(String(r.anom_id_item_to_bill))).length;
+  if (all) { all.checked = visible.length > 0 && n === visible.length; all.indeterminate = n > 0 && n < visible.length; }
+  const sel = ditbRows.filter((r) => ditbSelected.has(String(r.anom_id_item_to_bill)));
+  const reb = sel.filter((r) => String(r.needs_rebilling) === "1").length;
+  const hint = $("#ditb-selection-hint");
+  if (hint) hint.textContent = sel.length
+    ? `${sel.length} item(s) selected - ${reb} with ready usage > 0 will get a rebilling activity.`
+    : "☝️ Check one or more rows above (or the header box for every row shown) to enable Generate.";
+  const gen = $("#ditb-generate-btn");
+  if (gen) gen.disabled = sel.length === 0 || state.role === "viewer";
+}
 
 function ditbVisibleRows() {
   const q = $("#ditb-filter-search").value.trim().toLowerCase();
@@ -7483,8 +7594,9 @@ function ditbVisibleRows() {
   const svc = $("#ditb-filter-service").value;
   let rows = ditbRows.filter((r) => {
     if (bp && r.billing_period !== bp) return false;
-    if (svc && r.offered_service !== svc) return false;
+    if (svc && String(r.offered_service || "").toLowerCase() !== svc.toLowerCase()) return false;
     if (ditbRebill && String(r.needs_rebilling) !== ditbRebill) return false;
+    if (ditbReadingType && !String(r.reading_types || "").split(",").some((t) => t.trim().toLowerCase() === ditbReadingType.toLowerCase())) return false;
     if (q && ![r.niss, r.account, r.anom_id_item_to_bill, r.billed_id_item_to_bill, r.id_billing_service]
       .some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
     return true;
@@ -7501,7 +7613,7 @@ function ditbCell(c, r) {
 
 function ditbRenderTable() {
   const head = document.querySelector("#ditb-table thead tr");
-  head.innerHTML = DITB_COLUMNS.map((c) => {
+  head.innerHTML = `<th><input type="checkbox" id="ditb-select-all" title="Select / unselect every row shown" /></th>` + DITB_COLUMNS.map((c) => {
     const arrow = ditbSortKey === c.key ? `<span class="stats-table-sort-arrow">${ditbSortDir === 1 ? "▲" : "▼"}</span>` : "";
     return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
   }).join("");
@@ -7513,10 +7625,12 @@ function ditbRenderTable() {
   }));
   const rows = ditbVisibleRows();
   document.querySelector("#ditb-table tbody").innerHTML = rows.length
-    ? rows.map((r) => `<tr class="${String(r.needs_rebilling) === "1" ? "hx-row hx-row-anomalous" : "hx-row"}">` +
-        DITB_COLUMNS.map((c) => `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${ditbCell(c, r)}</td>`).join("") + "</tr>").join("")
-    : `<tr><td colspan="${DITB_COLUMNS.length}" class="hint-text">${ditbRows.length ? "No rows match the current filters." : "No double items to bill found."}</td></tr>`;
+    ? rows.map((r) => { const k = String(r.anom_id_item_to_bill); return `<tr class="${String(r.needs_rebilling) === "1" ? "hx-row hx-row-anomalous" : "hx-row"}${ditbSelected.has(k) ? " is-selected" : ""}">` +
+        `<td><input type="checkbox" class="ditb-row-cb" data-key="${escapeHtml(k)}"${ditbSelected.has(k) ? " checked" : ""} /></td>` +
+        DITB_COLUMNS.map((c) => `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${ditbCell(c, r)}</td>`).join("") + "</tr>"; }).join("")
+    : `<tr><td colspan="${DITB_COLUMNS.length + 1}" class="hint-text">${ditbRows.length ? "No rows match the current filters." : "No double items to bill found."}</td></tr>`;
   renderFilteredCount("#ditb-filtered-count", rows.length, ditbRows.length);
+  ditbUpdateSelectionUI(rows);
   if (ditbRows.length) {
     const n = rows.length;
     const rebill = rows.filter((r) => String(r.needs_rebilling) === "1");
@@ -7547,6 +7661,7 @@ $("#ditb-detect-btn").addEventListener("click", async () => {
   try {
     const data = await api("/api/double-itb/detect", { method: "POST" });
     ditbRows = data.rows || [];
+    ditbSelected = new Set();
     const periods = new Map();
     ditbRows.forEach((r) => { if (r.billing_period && !periods.has(r.billing_period)) periods.set(r.billing_period, Number(r.id_billing_period) || 0); });
     $("#ditb-filter-bp").innerHTML = `<option value="">All</option>` +
@@ -7564,8 +7679,73 @@ $("#ditb-detect-btn").addEventListener("click", async () => {
     btn.disabled = false;
   }
 });
+$("#ditb-table").addEventListener("change", (e) => {
+  if (e.target.id === "ditb-select-all") {
+    ditbVisibleRows().forEach((r) => { const k = String(r.anom_id_item_to_bill); if (e.target.checked) ditbSelected.add(k); else ditbSelected.delete(k); });
+    ditbRenderTable();
+    return;
+  }
+  const cb = e.target.closest(".ditb-row-cb");
+  if (!cb) return;
+  if (cb.checked) ditbSelected.add(cb.dataset.key); else ditbSelected.delete(cb.dataset.key);
+  cb.closest("tr").classList.toggle("is-selected", cb.checked);
+  ditbUpdateSelectionUI();
+});
+$("#ditb-generate-btn").addEventListener("click", async () => {
+  const ids = [...ditbSelected];
+  if (!ids.length) { showToast("Check one or more rows first.", true); return; }
+  const btn = $("#ditb-generate-btn");
+  btn.disabled = true;
+  try {
+    const res = await api("/api/double-itb/generate", {
+      method: "POST",
+      body: {
+        anom_ids: ids,
+        user: $("#ditb-user").value.trim(), program: $("#ditb-program").value.trim(),
+        creation_user: Number($("#ditb-creation-user").value) || 10000008456,
+        batch: $("#ditb-batch").checked, clean: $("#ditb-clean").checked,
+      },
+    });
+    $("#ditb-output").textContent = res.sql_text;
+    $("#ditb-gen-summary").textContent = `${res.itb_count} item(s) to bill cancelled (incl. Sanitary twins), ${res.reading_count} reading(s) set to Billed, ${res.rebilling_count} rebilling activit${res.rebilling_count === 1 ? "y" : "ies"} with ${res.rebilling_bill_count ?? res.rebilling_count} bill row(s).` +
+      (res.warnings.length ? ` ${res.warnings.length} warning(s) - see the top of the script.` : "");
+    showToast("Fix script generated.");
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    ditbUpdateSelectionUI();
+  }
+});
+$("#ditb-copy-btn").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#ditb-output").textContent); showToast("Script copied to clipboard."); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#ditb-download-btn").addEventListener("click", () => {
+  const blob = new Blob([$("#ditb-output").textContent], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "double_itb_fix.sql";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
 ["#ditb-filter-bp", "#ditb-filter-service"].forEach((id) => $(id).addEventListener("change", ditbRenderTable));
 $("#ditb-filter-search").addEventListener("input", ditbRenderTable);
+$("#ditb-filter-rtype").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-value]");
+  if (!b) return;
+  ditbReadingType = b.dataset.value;
+  $$("#ditb-filter-rtype button").forEach((x) => x.classList.toggle("is-active", x === b));
+  ditbRenderTable();
+});
+$("#ditb-filter-svc-seg").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-value]");
+  if (!b) return;
+  const sel = $("#ditb-filter-service");
+  if (b.dataset.value && ![...sel.options].some((o) => o.value === b.dataset.value)) sel.add(new Option(b.dataset.value, b.dataset.value));
+  sel.value = b.dataset.value;
+  $$("#ditb-filter-svc-seg button").forEach((x) => x.classList.toggle("is-active", x === b));
+  ditbRenderTable();
+});
 $("#ditb-filter-rebill").addEventListener("click", (ev) => {
   const b = ev.target.closest("button[data-value]");
   if (!b) return;
@@ -7579,14 +7759,17 @@ $("#ditb-filter-clear-btn").addEventListener("click", (ev) => {
   ["#ditb-filter-bp", "#ditb-filter-service", "#ditb-filter-search"].forEach((id) => { $(id).value = ""; });
   ditbRebill = "";
   $$("#ditb-filter-rebill button").forEach((x) => x.classList.toggle("is-active", x.dataset.value === ""));
+  $$("#ditb-filter-svc-seg button").forEach((x) => x.classList.toggle("is-active", x.dataset.value === ""));
+  ditbReadingType = "";
+  $$("#ditb-filter-rtype button").forEach((x) => x.classList.toggle("is-active", x.dataset.value === ""));
   ditbRenderTable();
 });
 $("#ditb-export-btn").addEventListener("click", () => {
   const rows = ditbVisibleRows();
   if (!rows.length) return;
   const cols = DITB_COLUMNS.map((c) => c.key);
-  const labels = ["NISS", "Billing Period", "Needs Rebilling", "Ready Usage (anomalous)", "Readings", "Anomalous ITB", "Anomalous Status",
-    "Anomalous Billing Date", "Billed ITB", "Billed Status", "ID Bill", "INI Date", "END Date", "Billing Service", "Account", "Service"];
+  const labels = ["NISS", "Billing Period", "Needs Rebilling", "Ready Usage (anomalous)", "Readings", "Reading Type", "Anomalous ITB", "Anomalous Status",
+    "Anomalous Billing Date", "Billed ITB", "Billed Status", "ID Bill", "Sanitary duplicate ITB (water)", "INI Date", "END Date", "Billing Service", "Account", "Service"];
   const lines = [labels.map((l) => `"${l}"`).join(",")];
   rows.forEach((r) => lines.push(cols.map((k) => {
     let v = r[k] ?? "";
@@ -8592,7 +8775,14 @@ function bcMonthToDate(monthStr) {
   return monthStr ? `${monthStr}-01` : "";
 }
 function bcDateToMonth(dateStr) {
-  return dateStr ? dateStr.slice(0, 7) : "";
+  // RJ 2026-10-06: saved searches can come back as "2026-09-01 00:00:00",
+  // "2026-09-01T..." or a locale date - normalise to "YYYY-MM" so the
+  // month inputs never end up silently blank.
+  if (!dateStr) return "";
+  const s = String(dateStr).trim();
+  if (/^\d{4}-\d{2}/.test(s)) return s.slice(0, 7);
+  const d = new Date(s);
+  return isNaN(d) ? "" : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 // One calendar month after the given "YYYY-MM" string.
 function bcNextMonth(monthStr) {
@@ -8685,9 +8875,17 @@ $("#bc-amount-max").addEventListener("input", () => {
 });
 
 async function bcRunSearch() {
-  const date_from = bcMonthToDate($("#bc-date-from").value);
-  const date_to = bcMonthToDate($("#bc-date-to").value);
-  const billing_period = $("#bc-billing-period").value.trim();
+  // RJ 2026-10-06: a KPI click (or Refresh) after a saved search re-uses the
+  // last successful search's cycle if the fields are empty/invalid now.
+  const last = bcState.lastSearch;
+  if (last) {
+    if (!$("#bc-date-from").value) $("#bc-date-from").value = bcDateToMonth(last.date_from);
+    if (!$("#bc-date-to").value) $("#bc-date-to").value = bcDateToMonth(last.date_to);
+    if (!$("#bc-billing-period").value.trim()) $("#bc-billing-period").value = last.billing_period;
+  }
+  const date_from = bcMonthToDate($("#bc-date-from").value) || (last && last.date_from) || "";
+  const date_to = bcMonthToDate($("#bc-date-to").value) || (last && last.date_to) || "";
+  const billing_period = $("#bc-billing-period").value.trim() || (last && last.billing_period) || "";
   if (!date_from || !date_to || !billing_period) {
     showToast("Fill in both dates and the billing period.", true);
     return;
@@ -8703,6 +8901,7 @@ async function bcRunSearch() {
     bcState.columns = result.columns;
     bcState.rows = result.display_rows;
     bcState.billingPeriod = billing_period;
+    bcState.lastSearch = { date_from, date_to, billing_period };
     $("#bc-search-status").textContent =
       `${result.row_count} row(s) in ${result.elapsed_ms.toFixed(0)} ms — ${result.pending_count} pending, ${result.missing_bill_count} missing bill, ${result.in_invoicing_count} in invoicing.`;
     $("#bc-results-card").hidden = false;
@@ -8874,10 +9073,18 @@ $("#bc-save-search-btn").addEventListener("click", async () => {
 // the already-active one clears back to "all". "Total" and "Outstanding"
 // have no matching single-status filter, so they stay plain.
 function bcRenderKpiRow(result) {
+  const n = (v) => (v == null ? "—" : Number(v).toLocaleString());
   const cards = [
-    ["rows", "📄", "Total", result.row_count, null],
+    ["rows", "📄", "Bulk accounts", result.row_count, null],
+    // RJ 2026-10-05: totals across the bulks - sub-accounts, services,
+    // services with no bill this period, and bulks that are complete
+    // (every service billed) but still have no file.
+    ["accounts", "👥", "Total accounts", n(result.total_accounts), null],
+    ["services", "🔌", "Total services", n(result.total_services), null],
+    ["missingsvc", "❗", "Services missing a bill", n(result.missing_services), "missing_bill"],
+    ["completenofile", "📦", "All billed, no file yet", n(result.complete_no_file_count), "complete_no_file"],
     ["pending", "🕓", "Pending (no file)", result.pending_count, "pending"],
-    ["missing", "⚠️", "Missing bill", result.missing_bill_count, "missing_bill"],
+    ["missing", "⚠️", "Bulks with missing bill", result.missing_bill_count, "missing_bill"],
     ["invoicing", "🧾", "In invoicing", result.in_invoicing_count, "in_invoicing"],
     ["outstanding", "💰", "Outstanding", result.outstanding_amount.toLocaleString(undefined, { maximumFractionDigits: 2 }), null],
   ];

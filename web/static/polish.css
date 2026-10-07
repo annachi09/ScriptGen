@@ -415,7 +415,76 @@ pre code { padding: 0; border: 0; background: none; }
 .as-sk { height: 90px; border-radius: var(--radius-lg); background: linear-gradient(90deg, var(--surface-2), var(--surface-hover), var(--surface-2)); background-size: 200% 100%; animation: asShimmer 1.2s infinite; }
 @keyframes asShimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 .as-loading { margin-top: 10px; }
-#billiss-table tr.is-selected td { background: var(--accent-bg-soft); }
+/* DOUBLE ITB reading type colours (RJ 2026-10-06: red = Removal) */
+.ditb-rt-pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 650; white-space: nowrap;
+  color: var(--rt); background: color-mix(in srgb, var(--rt) 15%, transparent); border: 1px solid color-mix(in srgb, var(--rt) 35%, transparent); }
+.rt-cycle { --rt: #3b82f6; }
+.rt-removal { --rt: #ef4444; }
+.rt-disconnection { --rt: #f97316; }
+.rt-direct { --rt: #10b981; }
+.rt-distribution { --rt: #8b5cf6; }
+.rt-other { --rt: #64748b; }
+.ditb-rt-seg button[class*="rt-"] { color: var(--rt); font-weight: 600; }
+.ditb-rt-seg button[class*="rt-"]::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--rt); margin-right: 6px; vertical-align: 0; }
+.ditb-rt-seg button[class*="rt-"].is-active { background: color-mix(in srgb, var(--rt) 18%, transparent); box-shadow: inset 0 0 0 1px var(--rt); }
+#ditb-table tr:has(.rt-removal) td:first-child { box-shadow: inset 3px 0 0 #ef4444; }
+
+#billiss-table tr.is-selected td, #ditb-table tr.is-selected td { background: var(--accent-bg-soft); }
+
+/* ===== Global loading indicator (RJ 2026-10-05) ===== */
+.sg-topbar { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 10000; pointer-events: none; opacity: 0; transition: opacity .2s; overflow: hidden; }
+.sg-topbar.is-on { opacity: 1; }
+.sg-topbar::before { content: ""; position: absolute; top: 0; bottom: 0; left: -40%; width: 40%; border-radius: 3px;
+  background: linear-gradient(90deg, transparent, #6366f1, #06b6d4, #22c55e, transparent);
+  animation: sgBar 1.15s cubic-bezier(.4,0,.2,1) infinite; }
+@keyframes sgBar { 0% { left: -40%; } 100% { left: 100%; } }
+.sg-loading-chip { position: fixed; right: 18px; bottom: 18px; z-index: 10000; display: inline-flex; align-items: center; gap: 10px;
+  padding: 9px 14px 9px 11px; border-radius: 999px; font-size: 12.5px; font-weight: 600; color: var(--text-primary);
+  background: color-mix(in srgb, var(--card-bg) 88%, transparent); backdrop-filter: blur(8px);
+  border: 1px solid var(--card-border); box-shadow: 0 8px 28px rgba(15, 23, 42, .18); animation: sgChipIn .18s ease-out; }
+.sg-loading-chip[hidden] { display: none; }
+@keyframes sgChipIn { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+.sg-spinner { width: 16px; height: 16px; border-radius: 50%; flex: none;
+  background: conic-gradient(from 0deg, transparent 0 25%, #6366f1 60%, #06b6d4 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+          mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  animation: sgSpin .8s linear infinite; }
+@keyframes sgSpin { to { transform: rotate(360deg); } }
+button.is-busy { position: relative; cursor: progress; }
+button.is-busy::after { content: ""; display: inline-block; width: 12px; height: 12px; margin-left: 8px; vertical-align: -2px; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent; animation: sgSpin .7s linear infinite; opacity: .85; }
+@media (prefers-reduced-motion: reduce) { .sg-topbar::before, .sg-spinner, button.is-busy::after { animation-duration: 2.5s; } }
+
+/* ===== Modern KPI cards (RJ 2026-10-05: "make the kpi indicators look better, and more modern") ===== */
+.kpi-row { gap: 12px; }
+.kpi-card { position: relative; overflow: hidden; border-radius: 14px; padding: 14px 16px 13px 16px;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--kpi-c, var(--accent)) 9%, var(--card-bg)) 0%, var(--card-bg) 62%);
+  border: 1px solid color-mix(in srgb, var(--kpi-c, var(--accent)) 22%, var(--card-border));
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .04); transition: transform .15s, box-shadow .15s, border-color .15s; display: flex; flex-direction: column-reverse; gap: 6px; }
+.kpi-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; height: auto; border-radius: 0; background: var(--kpi-c, var(--accent)); right: auto; }
+.kpi-card::after { content: ""; position: absolute; right: -28px; top: -28px; width: 90px; height: 90px; border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--kpi-c, var(--accent)) 22%, transparent), transparent 70%); pointer-events: none; }
+.kpi-card:hover { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(15, 23, 42, .10); }
+.kpi-card .kpi-value { font-size: 26px; font-weight: 800; letter-spacing: -.025em; line-height: 1.05; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.kpi-card .kpi-label { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--text-secondary); margin: 0; }
+.kpi-card .kpi-card-icon { width: 26px; height: 26px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; margin: 0;
+  font-size: 14px; opacity: 1; background: color-mix(in srgb, var(--kpi-c, var(--accent)) 16%, transparent); }
+.kpi-card-clickable { cursor: pointer; }
+.kpi-card-clickable.is-active { border-color: var(--kpi-c, var(--accent)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--kpi-c, var(--accent)) 35%, transparent), 0 8px 20px rgba(15,23,42,.08); }
+.kpi-card-clickable.is-active .kpi-value { color: var(--kpi-c, var(--accent)); }
+/* colour per KPI meaning (falls back to accent) */
+.kpi-card[data-kpi="rows"], .kpi-card[data-kpi="accounts"], .kpi-card[data-kpi="total"] { --kpi-c: #6366f1; }
+.kpi-card[data-kpi="services"], .kpi-card[data-kpi="invoicing"], .kpi-card[data-kpi="bills"] { --kpi-c: #0ea5e9; }
+.kpi-card[data-kpi="pending"], .kpi-card[data-kpi="needsaction"], .kpi-card[data-kpi="stuck"] { --kpi-c: #f59e0b; }
+.kpi-card[data-kpi="missing"], .kpi-card[data-kpi="missingsvc"], .kpi-card[data-kpi="missingbill"], .kpi-card[data-kpi="nulls"], .kpi-card[data-kpi="inactive"] { --kpi-c: #ef4444; }
+.kpi-card[data-kpi="complete"], .kpi-card[data-kpi="active"], .kpi-card[data-kpi="completeness"], .kpi-card[data-kpi="completenofile"] { --kpi-c: #10b981; }
+.kpi-card[data-kpi="outstanding"], .kpi-card[data-kpi="newcontract"], .kpi-card[data-kpi="duplicates"] { --kpi-c: #8b5cf6; }
+.kpi-card[data-kpi="electricity"] { --kpi-c: #eab308; }
+.kpi-card[data-kpi="water"] { --kpi-c: #06b6d4; }
+.kpi-card[data-kpi^="case"] { --kpi-c: #64748b; }
+:root[data-theme="dark"] .kpi-card { box-shadow: none; }
+.kpi-row-compact .kpi-card { padding: 9px 12px; }
+.kpi-row-compact .kpi-card .kpi-value { font-size: 19px; }
 
 /* RJ 2026-10-04: "How this works" query block (explanation + copy) */
 .sg-qhint { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--card-border); }
