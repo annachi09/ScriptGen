@@ -2926,6 +2926,42 @@ classes prefixed `hx-`); no server or query changes.
   reading-history pop-out is shared with Bulk Checker, which gets the
   same maximize button.
 
+## Bulk Checker: 5-min cache, "no file for most accounts" default, pop-out bills; KPI-coloured rows app-wide (2026-10-07)
+
+RJ: "allow up to 5 mins, try to cache the data so that it loads in the
+background, prioritize getting data without the file number ... by default
+show the one with no file number for most of the accounts ... if i click on
+a bulk account, i want it to be a pop out window ... add also measuring point
+type on the reading" and "i want the rows also highlighted by the same color
+of its kpi".
+
+- **5-minute timeout** - `mssql.run_query(..., timeout_seconds=300)` (per call,
+  global setting untouched).
+- **Server cache** - `/api/bulk-checker/search` runs the unfiltered query once
+  per (billing period, from, to), keeps it 30 min, and applies the status
+  filter in Python (`bulk_checker.row_matches_status`, mirrors each SQL clause).
+  KPI / filter clicks are instant. ⟳ Refresh sends `refresh: true` to reload
+  from the DB. Response adds `filter_counts`, `total_row_count`, `from_cache`,
+  `cached_at`; KPI counts are over the whole cached set.
+- **Background load** - 4 s after sign-in (and when the page opens) the app
+  picks the billing period for the current month and runs the search quietly
+  (no global loading pill), so the page is ready when opened.
+- **New default filter `nofile_majority`** - "No file for most accounts":
+  sub-accounts with a file < half of the bulk's sub-accounts
+  (`accounts_with_file * 2 < total_accounts`). A bulk with a few sub-accounts
+  already in a file is NOT treated as done. New KPI card (teal).
+- **Bills pop-out** - clicking a bulk opens its bills in a modal (same hx-modal
+  as Hierarchy Detail, maximize + Esc); 📖 Readings opens on top of it.
+- **MP type on readings** - reading-history popup gets an "MP Type" column:
+  `GCGT_RE_MEASUREMENT_POINT.MP_TYPE` via the reading's `ID_MEASURING_POINT`,
+  described by `GCGT_RE_MP_TYPE` (code on hover).
+- **Rows coloured by their KPI** - `polish.css` colour rules are now keyed on
+  `[data-kpi]` alone, so a card and a row tagged `tr.kpi-tint[data-kpi=...]`
+  (not `kpi-row` - that's the KPI card grid class; reusing it broke the tables)
+  (via `kpiRowTag`) share one colour. Applied to Bill Issuance Case 1/2/3,
+  Bulk Checker results + bills pop-out, DIFF DATES Detect All (status still
+  pending). Stuck Bill is now orange so it differs from Electricity (yellow).
+
 ## Bill Issuance Validator - Case 2 / Case 3 release script for complete accounts (2026-10-04)
 
 New **Release Script — Complete Accounts** card in the Case 2 and Case 3 tabs, built on RJ's own template:

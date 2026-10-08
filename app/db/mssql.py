@@ -244,7 +244,14 @@ def _fetch(conn, sql: str) -> tuple[list[str], list[list[Any]]]:
     return [d[0] for d in cur.description], [list(r) for r in cur.fetchall()]
 
 
-def run_query(conn_cfg: ConnectionConfig, sql: str) -> QueryResult:
+def run_query(conn_cfg: ConnectionConfig, sql: str, timeout_seconds: int | None = None) -> QueryResult:
+    # RJ 2026-10-07 (Bulk Checker: "allow up to 5 mins"): optional per-call
+    # timeout - a copy of the connection config with a longer timeout, so
+    # the global setting is untouched.
+    if timeout_seconds and timeout_seconds > (conn_cfg.timeout_seconds or 0):
+        import copy as _copy
+        conn_cfg = _copy.copy(conn_cfg)
+        conn_cfg.timeout_seconds = int(timeout_seconds)
     start = time.perf_counter()
     reused = getattr(_thread_local, "conn", None)
     owns_connection = reused is None

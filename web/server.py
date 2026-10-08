@@ -2520,6 +2520,10 @@ def hierarchy_analysis_reading_history(body: ReadingHistoryRequest, user: str = 
             {
                 "billing_period": diff_engine.cell_display(_da_col(r, "BILLING_PERIOD")),
                 "id_reading": diff_engine.cell_display(_da_col(r, "ID_READING")),
+                # RJ 2026-10-07: measuring point type on the reading
+                "id_measuring_point": diff_engine.cell_display(_da_col(r, "ID_MEASURING_POINT")),
+                "mp_type": diff_engine.cell_display(_da_col(r, "MP_TYPE")),
+                "mp_type_desc": diff_engine.cell_display(_da_col(r, "MP_TYPE_DESC")),
                 "reading_type": diff_engine.cell_display(_da_col(r, "READING_TYPE")),
                 "usage_type": diff_engine.cell_display(_da_col(r, "USAGE_TYPE")),
                 "read_status": diff_engine.cell_display(_da_col(r, "READ_STATUS")),
@@ -4792,7 +4796,40 @@ class BulkCheckerSearchRequest(BaseModel):
     date_from: str
     date_to: str
     billing_period: str
-    status_filter: str = "all"
+    status_filter: str = bulk_checker.DEFAULT_STATUS_FILTER
+    refresh: bool = False
+
+
+# RJ 2026-10-07: "allow up to 5 mins, try to cache the data so that it loads
+# in the background". One unfiltered run per (period, from, to), kept for
+# _BC_CACHE_TTL seconds; status filters are applied in Python
+# (bulk_checker.row_matches_status). A per-key lock means a background
+# prefetch and a user click share the same in-flight query instead of
+# running it twice.
+import threading as _bc_threading
+
+_BC_CACHE_TTL = 30 * 60
+_bc_cache: dict = {}            # key -> (fetched_at, QueryResult)
+_bc_locks: dict = {}
+_bc_locks_guard = _bc_threading.Lock()
+
+
+def _bc_get_all(conn, billing_period, date_from, date_to, refresh=False):
+    key = (billing_period, date_from.isoformat(), date_to.isoformat())
+    with _bc_locks_guard:
+        lock = _bc_locks.setdefault(key, _bc_threading.Lock())
+    with lock:
+        hit = _bc_cache.get(key)
+        if hit and not refresh and time.time() - hit[0] < _BC_CACHE_TTL:
+            return hit[1], True, hit[0]
+        result = mssql.run_query(
+            conn,
+            bulk_checker.build_pending_bulks_sql(billing_period, date_from, date_to, "all"),
+            timeout_seconds=bulk_checker.SEARCH_TIMEOUT_SECONDS,
+        )
+        now = time.time()
+        _bc_cache[key] = (now, result)
+        return result, False, now
 
 
 @app.post("/api/bulk-checker/search")
@@ -4809,11 +4846,27 @@ def bulk_checker_search(body: BulkCheckerSearchRequest, user: str = Depends(requ
     if not conn:
         raise HTTPException(status_code=400, detail="No connection configured.")
     try:
-        result = mssql.run_query(
-            conn, bulk_checker.build_pending_bulks_sql(billing_period, date_from, date_to, status_filter)
-        )
+        full, from_cache, fetched_at = _bc_get_all(conn, billing_period, date_from, date_to, body.refresh)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    lc_all = [c.lower() for c in full.columns]
+    # Per-filter counts over the whole cached set (one row per bulk/lot).
+    filter_counts = {f: 0 for f in bulk_checker.STATUS_FILTERS}
+    kept_rows = []
+    for r in full.rows:
+        d = dict(zip(lc_all, r))
+        for f in bulk_checker.STATUS_FILTERS:
+            if bulk_checker.row_matches_status(d, f):
+                filter_counts[f] += 1
+        if bulk_checker.row_matches_status(d, status_filter):
+            kept_rows.append(r)
+
+    class _R:  # filtered view with the same shape the code below expects
+        columns = full.columns
+        rows = kept_rows
+        elapsed_ms = 0 if from_cache else full.elapsed_ms
+    result = _R()
 
     file_number_idx = next((i for i, c in enumerate(result.columns) if c.lower() == "file_number"), None)
     missing_bill_idx = next((i for i, c in enumerate(result.columns) if c.lower() == "has_missing_bill"), None)
@@ -4876,17 +4929,19 @@ def bulk_checker_search(body: BulkCheckerSearchRequest, user: str = Depends(requ
     # (see bulk_checker_db.record_search's docstring for why a narrower
     # filter's row count isn't the period's true total). Best-effort:
     # never breaks the search itself.
-    if status_filter == "all":
+    # 2026-10-07: the cache always holds the unfiltered set, so record on
+    # every fresh fetch using the whole-set counts (filter_counts).
+    if not from_cache:
         try:
             bulk_checker_db.record_search(
                 config.internal_db_path,
                 billing_period=str(billing_period),
                 date_from=date_from.isoformat(),
                 date_to=date_to.isoformat(),
-                total=len(result.rows),
-                pending=pending_count,
-                missing_bill=missing_bill_count,
-                in_invoicing=in_invoicing_count,
+                total=len(full.rows),
+                pending=filter_counts.get("pending", 0),
+                missing_bill=filter_counts.get("missing_bill", 0),
+                in_invoicing=filter_counts.get("in_invoicing", 0),
                 outstanding_amount=outstanding_total,
                 searched_by=user,
             )
@@ -4906,6 +4961,11 @@ def bulk_checker_search(body: BulkCheckerSearchRequest, user: str = Depends(requ
         "missing_services": missing_services,
         "total_accounts": total_accounts,
         "complete_no_file_count": complete_no_file,
+        "nofile_majority_count": filter_counts.get("nofile_majority", 0),
+        "filter_counts": filter_counts,
+        "total_row_count": len(full.rows),
+        "from_cache": from_cache,
+        "cached_at": datetime.fromtimestamp(fetched_at).strftime("%Y-%m-%d %H:%M:%S"),
         "elapsed_ms": result.elapsed_ms,
         "status_filter": status_filter,
     }

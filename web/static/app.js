@@ -107,7 +107,9 @@ const sgLoader = (() => {
 
 async function api(path, options = {}) {
   _apiInflight++;
-  const _ldr = sgLoader.start(path);
+  // options.quiet: background loads (e.g. Bulk Checker prefetch) don't hold
+  // the global loading pill while you work on other menus.
+  const _ldr = options.quiet ? null : sgLoader.start(path);
   try {
     const resp = await fetch(path, {
       method: options.method || "GET",
@@ -124,7 +126,7 @@ async function api(path, options = {}) {
     return data;
   } finally {
     _apiInflight--;
-    sgLoader.end(_ldr, path);
+    if (!options.quiet) sgLoader.end(_ldr, path);
   }
 }
 
@@ -175,6 +177,9 @@ function showApp() {
   loadOverview(); // Overview is the default landing page - its own nav
   // click handler only fires on a manual click, so the initial render on
   // login/session-restore has to be kicked off here instead.
+  // RJ 2026-10-07: warm the Bulk Checker cache in the background right
+  // after sign-in, so the page is ready when it's opened.
+  setTimeout(() => { try { bcBackgroundPrefetch(); } catch (_) { /* page not allowed */ } }, 4000);
 }
 
 // Least-privilege UI: hides/disables the specific actions each role can't
@@ -2381,6 +2386,8 @@ function daCleanupRenderTable() {
       <td>${r.non_cycle_reading_types ? `<span class="badge-noncycle">${escapeHtml(r.non_cycle_reading_types)}</span>` : ""}</td>
       <td>${r.billing_period_count ?? ""}</td>
     `);
+    // RJ 2026-10-07: same colour as the "still pending" KPI card.
+    if (r.needs_status_advance && !tr.classList.contains("row-multi-period")) kpiRowTag(tr, "pending");
     tbody.appendChild(tr);
   });
   $("#da-cleanup-select-all").checked = visible.length > 0 && visible.every((i) => daCleanupSelected.has(i));
@@ -2573,7 +2580,7 @@ function daCleanupRenderDashboard(rows) {
     ["Distinct offered services", distinctServices, false, ""],
     ["Distinct accounts", distinctAccounts, false, ""],
   ].map(([label, value, clickable, title]) =>
-    `<div class="kpi-card${clickable ? " kpi-card-clickable" : ""}${clickable && advanceActive ? " is-active" : ""}"${clickable ? ` id="da-cleanup-kpi-advance" title="${title}"` : ""}><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div></div>`
+    `<div class="kpi-card${clickable ? " kpi-card-clickable" : ""}${clickable && advanceActive ? " is-active" : ""}"${clickable ? ` id="da-cleanup-kpi-advance" data-kpi="pending" title="${title}"` : ""}><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div></div>`
   ).join("");
 
   const advanceCard = $("#da-cleanup-kpi-advance");
@@ -4191,6 +4198,8 @@ function hierRenderReadingModal(rows, checkingBillingPeriod) {
     tr.innerHTML = (
       `<td>${escapeHtml(r.billing_period ?? "")}</td>` +
       `<td>${escapeHtml(r.id_reading ?? "")}</td>` +
+      // RJ 2026-10-07: measuring point type (description, code on hover)
+      `<td title="MP ${escapeHtml(r.id_measuring_point ?? "")} · ${escapeHtml(r.mp_type ?? "")}">${escapeHtml(r.mp_type_desc || r.mp_type || "")}</td>` +
       `<td>${escapeHtml(r.reading_type ?? "")}</td>` +
       `<td>${escapeHtml(r.usage_type ?? "")}</td>` +
       `<td>${escapeHtml(r.read_status ?? "")}</td>` +
@@ -4475,6 +4484,27 @@ const BISS_KPI_PRED = {
 };
 const BISS_KPI_CLEAR = { billiss: ["rows"], biss2: ["accounts"], biss3: ["rows", "accounts"], biss4: [] };
 
+// RJ 2026-10-07: "same with the colors of the KPI across the project, i want
+// the rows also highlighted by the same color of its kpi". A row gets
+// class kpi-row + data-kpi="<card key>"; polish.css keys its colour on
+// [data-kpi=...] for BOTH the card and the row, so they can never drift.
+// The order lists the most specific KPI first (a row matching several
+// cards takes the first).
+const BISS_ROW_KPI_ORDER = {
+  billiss: ["electricity", "water", "stuck", "newcontract"],
+  biss2: ["missingbill", "needsaction", "complete"],
+  biss3: ["active", "inactive"],
+};
+function kpiRowTag(tr, kpi) {
+  if (!tr || !kpi) return tr;
+  tr.classList.add("kpi-tint");   // NOT "kpi-row" - that's the KPI card grid class
+  tr.dataset.kpi = kpi;
+  return tr;
+}
+function bissRowKpi(key, row) {
+  return (BISS_ROW_KPI_ORDER[key] || []).find((k) => BISS_KPI_PRED[key][k] && BISS_KPI_PRED[key][k](row)) || null;
+}
+
 function bissKpiApply(key, rows, indices) {
   const pred = bissKpi[key] && BISS_KPI_PRED[key][bissKpi[key]];
   return pred ? indices.filter((i) => pred(rows[i])) : indices;
@@ -4484,7 +4514,11 @@ function bissKpiCardsHtml(key, cards) {
   return cards.map(([kpi, icon, label, value]) => {
     const filt = !!BISS_KPI_PRED[key][kpi];
     const clear = BISS_KPI_CLEAR[key].includes(kpi);
-    const active = filt ? bissKpi[key] === kpi : (clear && !bissKpi[key]);
+    let active = filt ? bissKpi[key] === kpi : (clear && !bissKpi[key]);
+    // Case 2: a KPI also lights up when its matching sub-tab / Status is on.
+    if (key === "biss2" && !bissKpi.biss2 && typeof biss2ActiveKpi === "function") {
+      active = biss2ActiveKpi() === kpi;
+    }
     const tip = filt ? (active ? "Click to clear this filter" : "Click to show only these") : clear ? "Click to show all" : "";
     return `<div class="kpi-card${filt || clear ? " kpi-card-clickable" : ""}${active ? " is-active" : ""}" data-kpi="${kpi}"${tip ? ` title="${tip}"` : ""}>
       <div class="kpi-value">${value}</div>
@@ -4608,6 +4642,7 @@ function billissRenderTable() {
       `<td>${escapeHtml(r.contract_status ?? "") || "-"}</td>`
     );
     if (billissSelected.has(key)) tr.classList.add("is-selected");
+    kpiRowTag(tr, bissRowKpi("billiss", r));
     tbody.appendChild(tr);
   });
   billissUpdateSelectionUI(visible);
@@ -4904,7 +4939,8 @@ function biss2UpdateTabs() {
   if (gen) gen.disabled = state.role === "viewer" || BISS2_TABS[biss2Tab].mode === null;
   // RJ 2026-10-04: show only the script card that fits the selected tab -
   // Complete = release script; every other tab = update script.
-  const isComplete = biss2Tab === "complete";
+  const isComplete = biss2Tab === "complete" ||
+    (biss2Tab === "all" && $("#biss2-status-filter")?.value === "complete");
   const upd = $("#biss2-update-card");
   const rel = document.querySelector('.biss-rel-card[data-biss-rel="case2"]');
   if (upd) upd.hidden = isComplete;
@@ -4948,10 +4984,27 @@ function biss2RenderKpiRow() {
 // tab (Status = All) - otherwise e.g. "Complete" on the Missing Rate tab
 // would always show 0 rows.
 bissKpiWire("biss2", "#biss2-kpi-row", () => { biss2Selected = new Set(); biss2RenderTable(); }, (kpi) => {
+  // RJ 2026-10-07: "Accounts already Complete" must land on the Complete
+  // tab, so the RELEASE script card shows (not the BP-update card).
+  // RJ 2026-10-07: "automatically select also the tab, if the same kpi is
+  // selected" - a KPI with its own sub-tab switches to that tab (so the right
+  // script card shows); the others go to All with the matching Status.
+  const KPI_TAB = { complete: "complete", services: "period-mismatch" };
+  if (kpi && KPI_TAB[kpi]) { biss2Tab = KPI_TAB[kpi]; bissKpi.biss2 = null; return; }
   biss2Tab = "all";
   const sf = $("#biss2-status-filter");
-  if (sf) sf.value = kpi === "needsaction" ? "needs-action" : "all";
+  if (sf) sf.value = ({ needsaction: "needs-action", missingbill: "missing-bill" })[kpi] || "all";
+  if (kpi === "missingbill") bissKpi.biss2 = null;   // the Status filter already does it
 });
+
+// Tab -> KPI card it corresponds to, so the KPI lights up with its tab.
+const BISS2_TAB_KPI = { complete: "complete", "period-mismatch": "services" };
+function biss2ActiveKpi() {
+  if (BISS2_TAB_KPI[biss2Tab]) return BISS2_TAB_KPI[biss2Tab];
+  if (biss2Tab !== "all") return null;
+  const sf = $("#biss2-status-filter")?.value;
+  return ({ "needs-action": "needsaction", "missing-bill": "missingbill", complete: "complete", all: "accounts" })[sf] || null;
+}
 
 function biss2RenderServiceRows(idx) {
   const acct = biss2Accounts[idx];
@@ -5014,6 +5067,7 @@ function biss2RenderTable() {
       `<td>${escapeHtml(acct.target_period ?? "")}</td>` +
       `<td><span class="biss2-status-pill ${acct.complete ? "is-complete" : "is-needs-action"}">${acct.complete ? "✅ Complete" : "⚠️ Needs action"}</span></td>`
     ));
+    kpiRowTag(tr, bissRowKpi("biss2", acct));
     tbody.appendChild(tr);
     if (expanded) {
       tbody.insertAdjacentHTML("beforeend", biss2RenderServiceRows(idx));
@@ -5225,8 +5279,11 @@ $("#biss2-generate-btn").addEventListener("click", async () => {
   // ACTIVE tab; the tab also picks which script parts are generated (mode).
   const tab = BISS2_TABS[biss2Tab];
   if (tab.mode === null) { showToast("Nothing to generate for complete accounts.", true); return; }
-  const picked = biss2Selected.size ? [...biss2Selected] : (biss2Tab === "all" ? [] : biss2VisibleIndices());
-  if (biss2Tab !== "all" && !picked.length) { showToast("No accounts on this tab.", true); return; }
+  // RJ 2026-10-07: on the All tab, complete accounts get the RELEASE script
+  // and the rest get the update script - one combined output.
+  if (biss2Tab === "all") { await biss2GenerateMixed(program, clean); return; }
+  const picked = biss2Selected.size ? [...biss2Selected] : biss2VisibleIndices();
+  if (!picked.length) { showToast("No accounts on this tab.", true); return; }
   const selectedForms = [...new Set(picked.map((idx) => String(biss2Accounts[idx].id_payment_form)))];
   const btn = $("#biss2-generate-btn");
   btn.disabled = true;
@@ -5246,6 +5303,52 @@ $("#biss2-generate-btn").addEventListener("click", async () => {
     btn.disabled = state.role === "viewer";
   }
 });
+
+// All tab: checked rows (or every visible row) split into complete ->
+// release script (/release-complete) and needs-action -> update script
+// (/case2/generate, mode "" = every part). Explicit id lists, never "all".
+async function biss2GenerateMixed(program, clean) {
+  const picked = biss2Selected.size ? [...biss2Selected] : biss2VisibleIndices();
+  if (!picked.length) { showToast("No accounts to generate for.", true); return; }
+  const ids = (list) => [...new Set(list.map((a) => String(a.id_payment_form)))];
+  const accts = picked.map((i) => biss2Accounts[i]).filter(Boolean);
+  const completeIds = ids(accts.filter((a) => a.complete));
+  const actionIds = ids(accts.filter((a) => !a.complete));
+  const relCard = document.querySelector('.biss-rel-card[data-biss-rel="case2"]');
+  const btn = $("#biss2-generate-btn");
+  btn.disabled = true;
+  const parts = [];
+  const msgs = [];
+  try {
+    if (actionIds.length) {
+      const r = await api("/api/bill-issuance/case2/generate", {
+        method: "POST", body: { id_payment_forms: actionIds, program, clean, mode: "" },
+      });
+      parts.push(r.sql_text);
+      msgs.push(`${r.update_count} bill update(s)` + (r.anomaly_count ? `, ${r.anomaly_count} anomaly insert(s)` : ""));
+    }
+    if (completeIds.length) {
+      if (!bissRelScan.case2) throw new Error("Scan Terminated Accounts first.");
+      const r = await api("/api/bill-issuance/release-complete", {
+        method: "POST",
+        body: {
+          case: "case2", id_payment_forms: completeIds, ...bissRelScan.case2, program,
+          // empty -> omit so the server default user applies
+          audit_user: relCard?.querySelector("[data-rel-user]")?.value.trim() || undefined,
+          clean,
+        },
+      });
+      parts.push(r.sql_text || "-- No complete accounts to release.");
+      msgs.push(`${r.account_count} complete account(s) released`);
+    }
+    $("#biss2-output").textContent = parts.join("\n\n");
+    showToast(`Script generated: ${msgs.join("; ")}.`);
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = state.role === "viewer";
+  }
+}
 
 $("#biss2-copy-btn").addEventListener("click", async () => {
   const text = $("#biss2-output").textContent;
@@ -5343,6 +5446,7 @@ function biss3RenderTable() {
       `<td>${escapeHtml(r.bills ?? "")}</td>` +
       `<td><span class="biss2-status-pill ${r.with_active_contract === "YES" ? "is-complete" : "is-needs-action"}">${escapeHtml(r.with_active_contract ?? "")}</span></td>`
     );
+    kpiRowTag(tr, bissRowKpi("biss3", r));
     tbody.appendChild(tr);
   });
   biss3RenderKpiRow();
@@ -8678,7 +8782,7 @@ $("#rv-export-csv-btn").addEventListener("click", () => {
 // can wire those in once this core is live-verified.
 const bcState = {
   columns: [], rows: [],          // raw values from the last search (rows[i][j] aligns with columns[j])
-  statusFilter: "all",
+  statusFilter: "nofile_majority",   // RJ 2026-10-07 default view
   search: "",
   amountMin: "", amountMax: "",   // pending_amount range filter, applied client-side (RJ, 2026-09-13)
   billingPeriod: "",
@@ -8791,17 +8895,48 @@ function bcNextMonth(monthStr) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function bcOnPageShown() {
-  if (!bcState.billingPeriodsLoaded) {
-    bcLoadBillingPeriods();
-    bcState.billingPeriodsLoaded = true;
-  }
+function bcDefaultDates() {
   if (!$("#bc-date-from").value && !$("#bc-date-to").value) {
     const now = new Date();
     const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
     $("#bc-date-from").value = thisMonth;
     $("#bc-date-to").value = bcNextMonth(thisMonth);
   }
+}
+
+// RJ 2026-10-07: "try to cache the data so that it loads in the background".
+// Picks the billing period whose INITIAL_DATE is in the From month, then runs
+// the search quietly (no global loading pill). The server caches the result,
+// so opening the page / clicking KPIs afterwards is instant.
+let bcPrefetchStarted = false;
+async function bcBackgroundPrefetch() {
+  if (bcPrefetchStarted || bcState.columns.length) return;
+  if (state.allowedMenus && !state.allowedMenus.includes("bulkchecker")) return;
+  bcPrefetchStarted = true;
+  bcDefaultDates();
+  await bcEnsureBillingPeriods();
+  if (!$("#bc-billing-period").value.trim()) {
+    const month = $("#bc-date-from").value;
+    const hit = Object.entries(bcPeriodsById).find(([, p]) => bcDateToMonth(p.initialDate) === month);
+    if (!hit) { bcPrefetchStarted = false; return; }
+    $("#bc-billing-period").value = hit[0];
+  }
+  await bcRunSearch({ background: true });
+}
+
+let _bcPeriodsPromise = null;
+function bcEnsureBillingPeriods() {
+  if (!_bcPeriodsPromise) {
+    bcState.billingPeriodsLoaded = true;
+    _bcPeriodsPromise = bcLoadBillingPeriods();
+  }
+  return _bcPeriodsPromise;
+}
+
+function bcOnPageShown() {
+  bcEnsureBillingPeriods();
+  bcDefaultDates();
+  bcBackgroundPrefetch();
 }
 
 // account_number -> billing period info ({initialDate}), keyed for the
@@ -8856,7 +8991,7 @@ document.addEventListener("click", (e) => {
 });
 
 // ---------------- Search ----------------
-$("#bc-search-btn").addEventListener("click", bcRunSearch);
+$("#bc-search-btn").addEventListener("click", () => bcRunSearch());
 $("#bc-status-filter").addEventListener("change", () => {
   bcState.statusFilter = $("#bc-status-filter").value;
   if (bcState.columns.length) bcRunSearch();
@@ -8874,7 +9009,7 @@ $("#bc-amount-max").addEventListener("input", () => {
   bcRenderResultsTable();
 });
 
-async function bcRunSearch() {
+async function bcRunSearch(opts = {}) {
   // RJ 2026-10-06: a KPI click (or Refresh) after a saved search re-uses the
   // last successful search's cycle if the fields are empty/invalid now.
   const last = bcState.lastSearch;
@@ -8892,24 +9027,29 @@ async function bcRunSearch() {
   }
   const btn = $("#bc-search-btn");
   btn.disabled = true;
-  $("#bc-search-status").textContent = "Searching…";
+  // RJ 2026-10-07: first load per cycle can take up to 5 min; it runs in the
+  // background (other menus stay usable) and every filter/KPI click after
+  // that is served from the server cache.
+  $("#bc-search-status").innerHTML = `<span class="bc-bg-spinner"></span> ${opts.background ? "Loading in the background" : "Loading"} — first load of a cycle can take up to 5 min; you can keep working on other menus.`;
   try {
     const result = await api("/api/bulk-checker/search", {
       method: "POST",
-      body: { date_from, date_to, billing_period, status_filter: bcState.statusFilter },
+      body: { date_from, date_to, billing_period, status_filter: bcState.statusFilter, refresh: !!opts.refresh },
+      quiet: !!opts.background,
     });
     bcState.columns = result.columns;
     bcState.rows = result.display_rows;
     bcState.billingPeriod = billing_period;
     bcState.lastSearch = { date_from, date_to, billing_period };
     $("#bc-search-status").textContent =
-      `${result.row_count} row(s) in ${result.elapsed_ms.toFixed(0)} ms — ${result.pending_count} pending, ${result.missing_bill_count} missing bill, ${result.in_invoicing_count} in invoicing.`;
+      `${result.row_count} of ${result.total_row_count ?? result.row_count} row(s) shown — ` +
+      (result.from_cache ? `cached data from ${result.cached_at} (Refresh ↻ to reload from the DB).`
+                         : `loaded from the DB in ${(result.elapsed_ms / 1000).toFixed(1)} s, now cached.`);
     $("#bc-results-card").hidden = false;
-    $("#bc-detail-card").hidden = true;
     bcRenderKpiRow(result);
     await bcLoadNotesForPeriod(billing_period);
     bcRenderResultsTable();
-    if (bcState.statusFilter === "all") {
+    if (result.total_row_count != null || bcState.statusFilter === "all") {
       bcLoadTrendContext(billing_period);
     } else {
       $("#bc-trend-hint").hidden = true;
@@ -9075,17 +9215,19 @@ $("#bc-save-search-btn").addEventListener("click", async () => {
 function bcRenderKpiRow(result) {
   const n = (v) => (v == null ? "—" : Number(v).toLocaleString());
   const cards = [
-    ["rows", "📄", "Bulk accounts", result.row_count, null],
+    ["rows", "📄", "Bulk accounts (all)", n(result.total_row_count ?? result.row_count), "all"],
+    // RJ 2026-10-07: default view - most sub-accounts still have no file.
+    ["nofilemaj", "🗂️", "No file for most accounts", n(result.nofile_majority_count), "nofile_majority"],
     // RJ 2026-10-05: totals across the bulks - sub-accounts, services,
     // services with no bill this period, and bulks that are complete
     // (every service billed) but still have no file.
     ["accounts", "👥", "Total accounts", n(result.total_accounts), null],
     ["services", "🔌", "Total services", n(result.total_services), null],
     ["missingsvc", "❗", "Services missing a bill", n(result.missing_services), "missing_bill"],
-    ["completenofile", "📦", "All billed, no file yet", n(result.complete_no_file_count), "complete_no_file"],
-    ["pending", "🕓", "Pending (no file)", result.pending_count, "pending"],
-    ["missing", "⚠️", "Bulks with missing bill", result.missing_bill_count, "missing_bill"],
-    ["invoicing", "🧾", "In invoicing", result.in_invoicing_count, "in_invoicing"],
+    ["completenofile", "📦", "All billed, no file yet", n((result.filter_counts || {}).complete_no_file ?? result.complete_no_file_count), "complete_no_file"],
+    ["pending", "🕓", "Pending (no file)", n((result.filter_counts || {}).pending ?? result.pending_count), "pending"],
+    ["missing", "⚠️", "Bulks with missing bill", n((result.filter_counts || {}).missing_bill ?? result.missing_bill_count), "missing_bill"],
+    ["invoicing", "🧾", "In invoicing", n((result.filter_counts || {}).in_invoicing ?? result.in_invoicing_count), "in_invoicing"],
     ["outstanding", "💰", "Outstanding", result.outstanding_amount.toLocaleString(undefined, { maximumFractionDigits: 2 }), null],
   ];
   hxGaugesAbove("#bc-kpi-row", [
@@ -9109,8 +9251,23 @@ $("#bc-kpi-row").addEventListener("click", (ev) => {
   const filterValue = card.dataset.bcStatusFilter;
   bcState.statusFilter = bcState.statusFilter === filterValue ? "all" : filterValue;
   $("#bc-status-filter").value = bcState.statusFilter;
-  bcRunSearch();
+  bcRunSearch();   // served from the server cache - instant after the first load
 });
+
+// Same predicates as bulk_checker.row_matches_status (server), most
+// specific first: missing bill (red) > all billed, no file (green) >
+// no file for most accounts (teal) > pending (amber).
+function bcTruthy(v) { return v === true || v === "1" || v === "Yes" || v === "true" || v === "True" || Number(v) > 0; }
+function bcRowKpi(row) {
+  const c = bcState.columns;
+  const g = (name) => bcCell(c, row, name);
+  const noFile = g("file_number") === "" || g("file_number") == null;
+  if (bcTruthy(g("has_missing_bill"))) return "missing";
+  if (noFile && Number(g("total_services")) > 0) return "completenofile";
+  if (Number(g("accounts_with_file") || 0) * 2 < Number(g("total_accounts") || 0)) return "nofilemaj";
+  if (noFile) return "pending";
+  return null;
+}
 
 function bcVisibleColumnIdx() {
   return bcState.columns.map((c, i) => i).filter((i) => !BC_RESULTS_HIDDEN_COLUMNS.has(bcState.columns[i]));
@@ -9160,8 +9317,8 @@ function bcRenderResultsTable() {
   $("#bc-results-hint").nextSibling; // no-op, keeps diff minimal if hint gains an id later
   visibleRows.forEach((row) => {
     const tr = document.createElement("tr");
-    const isPending = isPendingIdx !== -1 && row[isPendingIdx] === "Yes";
-    tr.className = isPending ? "row-not-billed" : "";
+    // RJ 2026-10-07: row colour = colour of the KPI card it falls under.
+    kpiRowTag(tr, bcRowKpi(row));
     tr.innerHTML = visibleIdx.map((i) => `<td>${escapeHtml(bcFormatCell(row[i]))}</td>`).join("");
 
     const flagsTd = document.createElement("td");
@@ -9268,10 +9425,14 @@ async function bcOpenDetail(accountNumber) {
   const billing_period = bcState.billingPeriod || $("#bc-billing-period").value.trim();
   bcState.detailAccount = accountNumber;
   bcState.detailFilter = "all";
+  bcState.detailColumns = []; bcState.detailRows = [];
   $("#bc-detail-account-name").textContent = accountNumber;
-  $("#bc-detail-card").hidden = false;
+  $("#bc-detail-kpi-row").innerHTML = "";
+  $("#bc-detail-table thead tr").innerHTML = "";
+  $("#bc-detail-table tbody").innerHTML = "";
   $("#bc-detail-status").textContent = "Loading…";
-  $("#bc-detail-card").scrollIntoView({ behavior: "smooth", block: "start" });
+  // RJ 2026-10-07: pop-out window, same as the reading detail.
+  hxOpenModal("bc-detail-card");
   try {
     // Always fetch the full, unfiltered bill list - the done/pending/
     // missing summary cards and their click-to-filter behavior (RJ's
@@ -9293,7 +9454,15 @@ async function bcOpenDetail(accountNumber) {
   }
 }
 
-$("#bc-detail-close-btn").addEventListener("click", () => { $("#bc-detail-card").hidden = true; });
+// Move the pop-out to <body> so no page container can clip/transform it.
+document.body.appendChild($("#bc-detail-card"));
+$("#bc-detail-close-btn").addEventListener("click", () => hxCloseModal("bc-detail-card"));
+$("#bc-detail-card").addEventListener("click", (e) => { if (e.target.id === "bc-detail-card") hxCloseModal("bc-detail-card"); });
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || $("#bc-detail-card").hidden) return;
+  if (!$("#hier-reading-modal-overlay").hidden) return;   // readings closes first
+  hxCloseModal("bc-detail-card");
+}, true);   // capture: runs before the readings handler closes its popup
 $("#bc-detail-search-box").addEventListener("input", () => {
   bcState.detailSearch = $("#bc-detail-search-box").value;
   bcRenderDetailTable();
@@ -9314,6 +9483,9 @@ function bcClassifyDetailRow(row) {
   return hasFileNumber ? "done" : "pending";
 }
 
+// detail status -> KPI colour key (shared with the row tint)
+const BC_DETAIL_KPI = { all: "total", done: "complete", pending: "pending", missing: "missing" };
+
 function bcRenderDetailKpiRow() {
   const rows = bcState.detailRows;
   let done = 0, pending = 0, missing = 0;
@@ -9331,7 +9503,7 @@ function bcRenderDetailKpiRow() {
   ];
   $("#bc-detail-kpi-row").innerHTML = cards.map(([key, label, value]) => {
     const active = bcState.detailFilter === key;
-    return `<div class="kpi-card kpi-card-clickable${active ? " is-active" : ""}" data-bc-kpi-filter="${key}" title="Click to filter the table to this status - click again to clear">` +
+    return `<div class="kpi-card kpi-card-clickable${active ? " is-active" : ""}" data-kpi="${BC_DETAIL_KPI[key]}" data-bc-kpi-filter="${key}" title="Click to filter the table to this status - click again to clear">` +
       `<div class="kpi-value">${value}</div><div class="kpi-label">${escapeHtml(label)}</div></div>`;
   }).join("");
 }
@@ -9379,8 +9551,7 @@ function bcRenderDetailTable() {
   tbody.innerHTML = "";
   bcVisibleDetailRows().forEach((row) => {
     const tr = document.createElement("tr");
-    const missing = idBillIdx !== -1 && !row[idBillIdx];
-    tr.className = missing ? "row-not-billed" : "";
+    kpiRowTag(tr, BC_DETAIL_KPI[bcClassifyDetailRow(row)]);
     tr.innerHTML = visibleIdx.map((i) => `<td>${escapeHtml(bcFormatCell(row[i]))}</td>`).join("");
 
     // Same reading-history popup Hierarchy Analysis uses (RJ: "add a
@@ -9552,7 +9723,8 @@ const HX_REFRESH = {
     return { btn: sub === "case1" ? "#billiss-detect-btn" : `#biss${sub.replace("case", "")}-detect-btn` };
   },
   incorrectbillingperiod: () => ({ btn: "#ibp-detect-btn" }),
-  bulkchecker: () => ({ btn: "#bc-search-btn" }),
+  // Refresh bypasses the server cache (RJ 2026-10-07 cache).
+  bulkchecker: () => ({ fn: () => bcRunSearch({ refresh: true }) }),
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
@@ -9757,6 +9929,13 @@ document.querySelectorAll(".biss-rel-card").forEach((card) => {
       out.textContent = res.sql_text || "-- No complete accounts to release.";
       let msg = `${res.account_count} complete account(s) in the release script${ids.length ? " (selection)" : ""}.`;
       if (res.warnings && res.warnings.length) msg += " " + res.warnings.join(" ");
+      // RJ 2026-10-07: the server re-checks live; if the page still shows
+      // complete accounts but none are complete now, the data moved on
+      // (e.g. the statement batch already processed the notices).
+      const shown = kind === "case2" ? biss2Accounts.filter((a) => a.complete).length : biss3Rows.length;
+      if (!res.account_count && shown) {
+        msg += ` ⚠ The page still shows ${shown} complete account(s) from your last scan, but none are pending any more in the DB - press ⟳ Refresh / Scan again.`;
+      }
       q("[data-rel-summary]").textContent = msg;
       showToast(`Release script generated: ${res.account_count} account(s).`);
     } catch (err) {

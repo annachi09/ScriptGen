@@ -473,15 +473,33 @@ button.is-busy::after { content: ""; display: inline-block; width: 12px; height:
 .kpi-card-clickable.is-active { border-color: var(--kpi-c, var(--accent)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--kpi-c, var(--accent)) 35%, transparent), 0 8px 20px rgba(15,23,42,.08); }
 .kpi-card-clickable.is-active .kpi-value { color: var(--kpi-c, var(--accent)); }
 /* colour per KPI meaning (falls back to accent) */
-.kpi-card[data-kpi="rows"], .kpi-card[data-kpi="accounts"], .kpi-card[data-kpi="total"] { --kpi-c: #6366f1; }
-.kpi-card[data-kpi="services"], .kpi-card[data-kpi="invoicing"], .kpi-card[data-kpi="bills"] { --kpi-c: #0ea5e9; }
-.kpi-card[data-kpi="pending"], .kpi-card[data-kpi="needsaction"], .kpi-card[data-kpi="stuck"] { --kpi-c: #f59e0b; }
-.kpi-card[data-kpi="missing"], .kpi-card[data-kpi="missingsvc"], .kpi-card[data-kpi="missingbill"], .kpi-card[data-kpi="nulls"], .kpi-card[data-kpi="inactive"] { --kpi-c: #ef4444; }
-.kpi-card[data-kpi="complete"], .kpi-card[data-kpi="active"], .kpi-card[data-kpi="completeness"], .kpi-card[data-kpi="completenofile"] { --kpi-c: #10b981; }
-.kpi-card[data-kpi="outstanding"], .kpi-card[data-kpi="newcontract"], .kpi-card[data-kpi="duplicates"] { --kpi-c: #8b5cf6; }
-.kpi-card[data-kpi="electricity"] { --kpi-c: #eab308; }
-.kpi-card[data-kpi="water"] { --kpi-c: #06b6d4; }
-.kpi-card[data-kpi^="case"] { --kpi-c: #64748b; }
+/* RJ 2026-10-07: these selectors are keyed on [data-kpi] alone, so the SAME
+   colour applies to the KPI card and to any table row tagged with that KPI
+   (tr.kpi-tint[data-kpi], see kpiRowTag in app.js) - card and row can't drift. */
+[data-kpi="rows"], [data-kpi="accounts"], [data-kpi="total"] { --kpi-c: #6366f1; }
+[data-kpi="services"], [data-kpi="invoicing"], [data-kpi="bills"] { --kpi-c: #0ea5e9; }
+[data-kpi="pending"], [data-kpi="needsaction"] { --kpi-c: #f59e0b; }
+[data-kpi="stuck"] { --kpi-c: #f97316; }
+[data-kpi="missing"], [data-kpi="missingsvc"], [data-kpi="missingbill"], [data-kpi="nulls"], [data-kpi="inactive"] { --kpi-c: #ef4444; }
+[data-kpi="complete"], [data-kpi="active"], [data-kpi="completeness"], [data-kpi="completenofile"] { --kpi-c: #10b981; }
+[data-kpi="nofilemaj"] { --kpi-c: #14b8a6; }
+[data-kpi="outstanding"], [data-kpi="newcontract"], [data-kpi="duplicates"] { --kpi-c: #8b5cf6; }
+[data-kpi="electricity"] { --kpi-c: #eab308; }
+[data-kpi="water"] { --kpi-c: #06b6d4; }
+[data-kpi^="case"] { --kpi-c: #64748b; }
+
+/* Row tinted with its KPI card's colour (class kpi-tint - "kpi-row" is the card grid) */
+table tbody tr.kpi-tint > td { background: color-mix(in srgb, var(--kpi-c) 11%, var(--card-bg)) !important; }
+table tbody tr.kpi-tint > td:first-child { box-shadow: inset 4px 0 0 var(--kpi-c); }
+table tbody tr.kpi-tint:hover > td { background: color-mix(in srgb, var(--kpi-c) 20%, var(--card-bg)) !important; }
+table tbody tr.kpi-tint.is-selected > td { background: color-mix(in srgb, var(--kpi-c) 26%, var(--card-bg)) !important; }
+:root[data-theme="dark"] table tbody tr.kpi-tint > td { background: color-mix(in srgb, var(--kpi-c) 18%, var(--card-bg)) !important; }
+:root[data-theme="dark"] table tbody tr.kpi-tint:hover > td { background: color-mix(in srgb, var(--kpi-c) 28%, var(--card-bg)) !important; }
+
+/* Bulk Checker background-load spinner */
+.bc-bg-spinner { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: -2px;
+  border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); animation: bcSpin .8s linear infinite; }
+@keyframes bcSpin { to { transform: rotate(360deg); } }
 :root[data-theme="dark"] .kpi-card { box-shadow: none; }
 .kpi-row-compact .kpi-card { padding: 9px 12px; }
 .kpi-row-compact .kpi-card .kpi-value { font-size: 19px; }

@@ -567,10 +567,19 @@ def build_reading_history_query(
     if excluded_reading_type is not None:
         where_clauses.append(f"r.{READING_TYPE_COLUMN} <> {format_sql_literal(excluded_reading_type)}")
     where_sql = "\n  AND ".join(where_clauses)
+    # RJ 2026-10-07 (Bulk Checker round): "add also measuring point type on
+    # the reading" - the reading's own measuring point's MP_TYPE plus its
+    # GCGT_RE_MP_TYPE description (same lookup build_pending_primaries_query
+    # uses). LEFT JOINs, so a reading with no MP row still shows.
+    mp_tbl = _qualified(READING_SCHEMA, MEASUREMENT_POINT_TABLE)
+    mp_type_lookup = _qualified(READING_SCHEMA, MP_TYPE_LOOKUP_TABLE)
     return (
         f"SELECT\n"
         f"    r.{BILLING_PERIOD_COLUMN} AS BILLING_PERIOD,\n"
         f"    r.ID_READING,\n"
+        f"    r.{MEASURING_POINT_COLUMN},\n"
+        f"    mp.{MP_TYPE_COLUMN},\n"
+        f"    mt.{MP_TYPE_LOOKUP_DESC_COLUMN} AS MP_TYPE_DESC,\n"
         f"    r.{READING_TYPE_COLUMN},\n"
         f"    r.USAGE_TYPE,\n"
         f"    r.{READ_STATUS_COLUMN},\n"
@@ -582,6 +591,8 @@ def build_reading_history_query(
         f"    r.READY_USAGE,\n"
         f"    r.IND_ESTIMATE\n"
         f"FROM {reading_tbl} r\n"
+        f"LEFT JOIN {mp_tbl} mp ON mp.{MEASURING_POINT_COLUMN} = r.{MEASURING_POINT_COLUMN}\n"
+        f"LEFT JOIN {mp_type_lookup} mt ON mt.{MP_TYPE_LOOKUP_KEY_COLUMN} = mp.{MP_TYPE_COLUMN}\n"
         f"WHERE {where_sql}\n"
         f"ORDER BY r.{BILLING_PERIOD_COLUMN} DESC;"
     )

@@ -37,7 +37,10 @@ from typing import Optional
 
 from .sql_format import format_sql_literal
 
-STATUS_FILTERS = ("all", "pending", "generated", "missing_bill", "in_invoicing", "complete_no_file")
+STATUS_FILTERS = ("all", "pending", "generated", "missing_bill", "in_invoicing", "complete_no_file", "nofile_majority")
+# RJ 2026-10-07: default view = bulks where MOST sub-accounts have no file yet
+DEFAULT_STATUS_FILTER = "nofile_majority"
+SEARCH_TIMEOUT_SECONDS = 300   # "allow up to 5 mins"
 BILL_FILTERS = ("all", "pending", "missing")
 
 # Same rationale as EWA's own MAX_BULK_ACCOUNTS - a guard on the bulk
@@ -52,7 +55,55 @@ _STATUS_FILTER_CLAUSES = {
     "in_invoicing": "AND ISNULL(BILLAGG.has_bill_in_invoicing, 0) = 1",
     # RJ 2026-10-05: every service already has its bill, but no file yet.
     "complete_no_file": "AND BDET.file_number IS NULL AND BILLAGG.ID_PAYMENT_FORM_BUNCHER IS NOT NULL AND ISNULL(BILLAGG.has_missing_bill, 0) = 0",
+    "nofile_majority": "AND ISNULL(BILLAGG.accounts_with_file, 0) * 2 < ISNULL(BILLAGG.total_accounts, 0)",
 }
+
+
+# RJ 2026-10-07: "allow up to 5 mins, try to cache the data so that it loads
+# in the background". The server runs the UNFILTERED query once per
+# (billing period, date range), caches it, and applies the status filters
+# below in Python - each Python predicate mirrors its SQL clause above
+# exactly, so switching filter / clicking a KPI never re-hits the DB.
+def _truthy(v) -> bool:
+    if v is None:
+        return False
+    try:
+        return int(v) != 0
+    except (TypeError, ValueError):
+        return bool(v)
+
+
+def _int(v) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def row_matches_status(row: dict, status_filter: str) -> bool:
+    """row = {lower-case column: raw value} of one build_pending_bulks_sql('all') row."""
+    f = status_filter
+    if f in ("", "all", None):
+        return True
+    if f == "pending":
+        return row.get("file_number") is None
+    if f == "generated":
+        return row.get("file_number") is not None
+    if f == "missing_bill":
+        return _truthy(row.get("has_missing_bill"))
+    if f == "in_invoicing":
+        return _truthy(row.get("has_bill_in_invoicing"))
+    if f == "complete_no_file":
+        return (row.get("file_number") is None and _int(row.get("total_services")) > 0
+                and not _truthy(row.get("has_missing_bill")))
+    if f == "nofile_majority":
+        # "show the one with no file number for most of the accounts (some
+        # cases will have few sub accounts with file number so do not
+        # consider them as complete already)" - fewer than half the
+        # sub-accounts have a file yet.
+        return _int(row.get("accounts_with_file")) * 2 < _int(row.get("total_accounts"))
+    return True
+
 
 _BILL_FILTER_CLAUSES = {
     "all": "",
@@ -110,7 +161,8 @@ SELECT DISTINCT
     ISNULL(BILLAGG.has_bill_in_invoicing, 0) AS has_bill_in_invoicing,
     ISNULL(BILLAGG.total_services, 0) AS total_services,
     ISNULL(BILLAGG.missing_services, 0) AS missing_services,
-    ISNULL(BILLAGG.total_accounts, 0) AS total_accounts
+    ISNULL(BILLAGG.total_accounts, 0) AS total_accounts,
+    ISNULL(BILLAGG.accounts_with_file, 0) AS accounts_with_file
 FROM GCCOM_ACCOUNT_BUNCHER ab
 JOIN GCCOM_PAYMENT_FORM pf ON ab.ID_PAYMENT_FORM = pf.ID_PAYMENT_FORM
 JOIN GCCOM_CONTRACTED_SERVICE cs ON cs.ID_PAYMENT_FORM = ab.ID_PAYMENT_FORM
@@ -153,7 +205,10 @@ LEFT JOIN (
         -- services with no bill at all this period).
         COUNT(DISTINCT cs2.ID_CONTRACTED_SERVICE) AS total_services,
         COUNT(DISTINCT CASE WHEN b2.id_bill IS NULL THEN cs2.ID_CONTRACTED_SERVICE END) AS missing_services,
-        COUNT(DISTINCT ab2.ID_PAYMENT_FORM) AS total_accounts
+        COUNT(DISTINCT ab2.ID_PAYMENT_FORM) AS total_accounts,
+        -- RJ 2026-10-07: sub-accounts whose bill is already in a lot/file
+        -- (a bulk with only a FEW of these is still pending, not complete)
+        COUNT(DISTINCT CASE WHEN bl2.FILE_NUMBER IS NOT NULL THEN ab2.ID_PAYMENT_FORM END) AS accounts_with_file
     FROM GCCOM_ACCOUNT_BUNCHER ab2
     JOIN GCCOM_PAYMENT_FORM pf1b ON pf1b.ID_PAYMENT_FORM = ab2.ID_PAYMENT_FORM
     JOIN GCCOM_CONTRACTED_SERVICE cs2 ON cs2.ID_PAYMENT_FORM = ab2.ID_PAYMENT_FORM

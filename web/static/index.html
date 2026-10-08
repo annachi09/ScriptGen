@@ -2202,6 +2202,7 @@
           <div class="key-panel-row">
             <label class="field-label">Status</label>
             <select id="bc-status-filter" class="text-input text-input-sm">
+              <option value="nofile_majority" selected>No file for most accounts (default)</option>
               <option value="all">All</option>
               <option value="pending">Pending only</option>
               <option value="generated">Generated only</option>
@@ -2217,7 +2218,7 @@
             <input id="bc-search-box" class="text-input text-input-sm" placeholder="Search all columns…" style="width:220px;" />
           </div>
           <p class="hint-text">Click a column header to sort. Click a KPI card above to filter to that status.</p>
-          <div class="hint-text" id="bc-results-hint">Click a row to see its bills. Click 📝 to flag an account with a note for teammates. <span class="row-not-billed-swatch">■</span> = no file generated yet.</div>
+          <div class="hint-text" id="bc-results-hint">Click a row to open its bills in a pop-out. Click 📝 to flag an account with a note for teammates. Row colour = the KPI card it falls under (red missing bill · green all billed, no file · teal no file for most accounts · amber pending).</div>
           <div class="grid-wrap">
             <table class="data-grid" id="bc-results-table">
               <thead><tr></tr></thead>
@@ -2226,32 +2227,38 @@
           </div>
         </div>
 
-        <div class="card" id="bc-detail-card" hidden>
-          <div class="card-header">
-            <h2>Bills for <span id="bc-detail-account-name">—</span></h2>
-            <div class="card-header-actions">
+        <!-- RJ 2026-10-07: "if i click on a bulk account, i want it to be a pop
+             out window, same as the reading detail" - same hx-modal as
+             Hierarchy Detail; sits under the reading popup (z-index 1050). -->
+        <div class="hier-reading-modal-overlay hx-modal-overlay" id="bc-detail-card" hidden>
+         <div class="hier-reading-modal hx-modal hx-modal-wide" id="bc-detail-modal">
+          <div class="hx-modal-head">
+            <div><h2>Bills for <span id="bc-detail-account-name">—</span></h2>
+              <div class="hint-text" id="bc-detail-status"></div></div>
+            <div class="hx-modal-actions">
               <label class="field-label" style="display:flex;align-items:center;gap:6px;" title="Unchecked = only the rows the current filter/search show. Checked = every bill for this account.">
                 <input type="checkbox" id="bc-detail-export-all" />
                 Export all rows
               </label>
               <button type="button" class="btn btn-pill" id="bc-detail-export-csv-btn">⬇ CSV</button>
               <button type="button" class="btn btn-pill" id="bc-detail-export-xlsx-btn">⬇ Excel</button>
-              <button type="button" class="btn btn-pill-sm" id="bc-detail-close-btn">✕ Close</button>
+              <button type="button" class="hx-icon-btn" data-maximize="bc-detail-modal" title="Maximize / restore">⤢</button>
+              <button type="button" class="hx-icon-btn" id="bc-detail-close-btn" title="Close (Esc)">✕</button>
             </div>
           </div>
-          <p class="hint-text">Click a summary card below to filter the table to that status - click it again to clear. <span class="row-not-billed-swatch">■</span> = missing bill. Click 📖 Readings on a row to see that supply's full reading history, same popup as Hierarchy Analysis.</p>
+          <p class="hint-text hx-modal-note">Click a summary card to filter - click again to clear. Row colour = its card's colour. 📖 Readings opens the supply's reading history on top.</p>
           <div class="kpi-row kpi-row-compact" id="bc-detail-kpi-row"></div>
           <div class="key-panel-row">
             <label class="field-label">Search</label>
             <input id="bc-detail-search-box" class="text-input text-input-sm" placeholder="Search all columns…" style="width:220px;" />
           </div>
-          <div class="grid-wrap">
+          <div class="grid-wrap hx-modal-body">
             <table class="data-grid" id="bc-detail-table">
               <thead><tr></tr></thead>
               <tbody></tbody>
             </table>
           </div>
-          <div class="editor-status" id="bc-detail-status"></div>
+         </div>
         </div>
 
         <!-- Note modal - reuses the same generic fixed-overlay modal
@@ -2621,7 +2628,7 @@
           <div class="grid-wrap hx-modal-body">
             <table class="data-grid" id="hier-reading-modal-table">
               <thead><tr>
-                <th>Billing Period</th><th>ID Reading</th><th>Reading Type</th><th>Usage Type</th>
+                <th>Billing Period</th><th>ID Reading</th><th>MP Type</th><th>Reading Type</th><th>Usage Type</th>
                 <th>Read Status</th><th>Prev Date</th><th>Reading Date</th><th>Prev Value</th>
                 <th>Value</th><th>Reading Usage</th><th>★ Ready Usage</th><th>Est.</th>
               </tr></thead>
