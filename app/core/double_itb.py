@@ -78,7 +78,37 @@ REB_DN_STATUS_BATCH = "EREALB0005"          # Recalculado Batch
 REB_ACTIVITY_STATUS_PENDING = "ESTREF0002"  # En tratamiento (In process)
 REB_ACTIVITY_TYPE = "TIPREF0005"            # Massive Substitutive
 BILL_STATUS_DISPUTED = "ESTFAC0010"         # Reclamada / Disputed
+# RJ 2026-10-08: "in the Description column, please add 'AUTO REBILLING DOUBLE
+# ITB', then at the end of script generate add a commented query to get all
+# with this comment, and the status is not resolved or rebilled ... create
+# date, id_rebilling_activity and status in english". Live
+# GCCOM_REB_ACTIVITY_STATUS: 0001 Pending, 0002 In process, 0003 Rejected
+# (resolved), 0004 Rebilled -> the follow-up lists everything not 0003/0004.
+# DESCRIPTION is varchar(300) -> plain literal (no N'...').
+REB_DESCRIPTION = "AUTO REBILLING DOUBLE ITB"
+REB_ACTIVITY_FINAL_STATUSES = ("ESTREF0003", "ESTREF0004")  # Rejected, Rebilled
 FIX_PROGRAM_DEFAULT = "DOUBLE_ITB"
+
+
+def build_followup_query() -> str:
+    """Open rebilling activities created by this fix (DESCRIPTION tag), with
+    the status in English. Appended to every fix script as a /* */ comment so
+    it survives the 'clean' option (which only strips -- lines)."""
+    final = ", ".join(format_sql_literal(s) for s in REB_ACTIVITY_FINAL_STATUSES)
+    return f"""SELECT ra.ID_REBILLING_ACTIVITY,
+       ra.CREATE_DATE,
+       ra.REB_ACTIVITY_STATUS,
+       COALESCE(d.TEXT, st.NAME_TYPE) AS STATUS_EN,
+       ra.ID_CUSTOMER,
+       ra.BILLS_NUMBER,
+       ra.UPDATE_USER,
+       ra.UPDATE_PROGRAM
+FROM OUC_ADMIN.GCCOM_REBILLING_ACTIVITY ra WITH (NOLOCK)
+LEFT JOIN OUC_ADMIN.GCCOM_REB_ACTIVITY_STATUS st ON st.COD_DEVELOP = ra.REB_ACTIVITY_STATUS
+LEFT JOIN GCTS_DICTIONARY d ON d.ID = st.NAME_TYPE_XI18N AND d.LOCALE = 'EN'
+WHERE ra.DESCRIPTION = {format_sql_literal(REB_DESCRIPTION)}
+  AND ra.REB_ACTIVITY_STATUS NOT IN ({final})   -- not Rejected (resolved) / Rebilled
+ORDER BY ra.CREATE_DATE DESC;"""
 FIX_USER_DEFAULT = "RMA"
 REB_CREATION_USER_DEFAULT = 10000008456
 
@@ -277,7 +307,7 @@ def build_fix_script(rows: list[dict], *, user: str = FIX_USER_DEFAULT, program:
                     "       SELECTED_TO_DATE, SELECTED_RATE_ID, OFF_CYCLE_STATEMENT, IND_BILLING_OR_CREATE_DATE, PROCESSING_INFO, ID_OFFICE,",
                     "       SESSION_ID, IND_CYCLE_PRINTING, SELECTED_ACCOUNT)",
                     f"VALUES (GETDATE(), GETDATE(), {u}, {p}, 1, {var}, N'{REB_ACTIVITY_STATUS_PENDING}', N'{REB_ACTIVITY_TYPE}', NULL, CAST(GETDATE() AS DATE),",
-                    f"       NULL, NULL, {int(cust)}, {len(bills)}, 0.000000, NULL, NULL, N'REBRES003', {int(creation_user)}, NULL, NULL,",
+                    f"       NULL, NULL, {int(cust)}, {len(bills)}, 0.000000, {format_sql_literal(REB_DESCRIPTION)}, NULL, N'REBRES003', {int(creation_user)}, NULL, NULL,",
                     "       CAST(GETDATE() + 1 AS DATE), NULL, NULL, NULL, NULL, NULL, 1, NULL, 1, NULL, 1, NULL);",
                     *info_rows,
                     # RJ 2026-10-06: "then the gccom_bill should be updated to Disputed"
@@ -302,6 +332,11 @@ def build_fix_script(rows: list[dict], *, user: str = FIX_USER_DEFAULT, program:
     text = "\n".join(header) + ("\n\n".join(blocks) if blocks else "-- Nothing to fix.") + "\n\n-- Review before running.\n"
     if clean:
         text = "\n".join(l for l in text.splitlines() if not l.strip().startswith("--")) + "\n"
+    if n_reb:
+        # /* */ (not --) so it is kept even with the clean option.
+        text += ("\n/* Follow-up: open rebilling activities created by this fix "
+                 f"(DESCRIPTION = '{REB_DESCRIPTION}', not Rejected/Rebilled)\n"
+                 + build_followup_query() + "\n*/\n")
     return {"sql_text": text, "itb_count": n_itb, "reading_count": n_read, "rebilling_count": n_reb,
             "rebilling_bill_count": n_info, "sanitary_kept_count": n_kept, "warnings": warnings}
 

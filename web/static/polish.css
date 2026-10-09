@@ -427,6 +427,14 @@ pre code { padding: 0; border: 0; background: none; }
 .ditb-rt-seg button[class*="rt-"] { color: var(--rt); font-weight: 600; }
 .ditb-rt-seg button[class*="rt-"]::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--rt); margin-right: 6px; vertical-align: 0; }
 .ditb-rt-seg button[class*="rt-"].is-active { background: color-mix(in srgb, var(--rt) 18%, transparent); box-shadow: inset 0 0 0 1px var(--rt); }
+/* RJ 2026-10-08: segmented filters must never spill into the next grid cell
+   (DOUBLE ITB reading-type pills overlapped "Rebilling"). Wide groups get
+   their own row; any group that is still too wide wraps inside its cell. */
+.hx-filter-grid .hx-field:has(> .hx-seg) { grid-column: span 2; }
+.hx-filter-grid .hx-field.hx-field-row:has(> .hx-seg), .hx-filter-grid .hx-field-row { grid-column: 1 / -1; }
+.hx-filter-grid .hx-seg { flex-wrap: wrap; max-width: 100%; box-sizing: border-box; }
+.hx-filter-grid .hx-seg button { white-space: nowrap; flex: 0 1 auto; }
+.ditb-rt-seg { justify-self: start; }
 #ditb-table tr:has(.rt-removal) td:first-child { box-shadow: inset 3px 0 0 #ef4444; }
 
 #billiss-table tr.is-selected td, #ditb-table tr.is-selected td { background: var(--accent-bg-soft); }

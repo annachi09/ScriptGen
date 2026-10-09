@@ -3908,6 +3908,17 @@ function hxGaugesAbove(kpiRowSelector, gauges) {
   strip.innerHTML = hxGaugesHtml(shown);
 }
 
+// RJ 2026-10-08: a scan that finds nothing must reset the KPIs, not leave
+// the previous scan's numbers. Keeps the tile labels, sets every value to 0
+// and drops the gauges / split bar (nothing to show a share of).
+function hxZeroDashboard(containerId) {
+  const el = document.getElementById(containerId);
+  if (!el || !el.innerHTML.trim()) return;
+  el.querySelectorAll(".hx-gauges, .hx-split").forEach((g) => g.remove());
+  el.classList.add("hx-dashboard-nogauges");
+  el.querySelectorAll(".hx-tile-value").forEach((v) => { v.textContent = "0"; });
+}
+
 function hxRenderDashboard(containerId, { gauges = [], tiles = [], split = null } = {}) {
   const el = document.getElementById(containerId);
   if (!el) return;
@@ -5829,6 +5840,7 @@ function ibpRenderTable() {
   });
   $("#ibp-select-all").checked = visible.length > 0 && visible.every((r) => ibpSelected.has(String(r.id_anomalous)));
   renderFilteredCount("#ibp-filtered-count", visible.length, ibpRows.length);
+  if (!ibpRows.length) hxZeroDashboard("ibp-dash");
   if (ibpRows.length) {
     const n = visible.length;
     hxRenderDashboard("ibp-dash", {
@@ -6027,6 +6039,7 @@ function tcdRenderTable() {
       }).join("") + "</tr>").join("")
     : `<tr><td colspan="${TCD_COLUMNS.length}" class="hint-text">No pairs match the current filters.</td></tr>`;
   renderFilteredCount("#tcd-filtered-count", rows.length, tcdRows.length);
+  if (!tcdRows.length) hxZeroDashboard("tcd-dash");
   if (tcdRows.length) {
     const n = rows.length;
     hxRenderDashboard("tcd-dash", {
@@ -6186,10 +6199,12 @@ function wshRenderTable() {
     : `<tr><td colspan="${WSH_COLUMNS.length + 1}" class="hint-text">${wshRows.length ? "No rows match the current filters." : "No stuck secondaries found."}</td></tr>`;
   renderFilteredCount("#wsh-filtered-count", rows.length, wshRows.length);
   wshUpdateSelectionUI();
-  if (wshRows.length) {
+  // RJ 2026-10-08: always redraw - a scan that finds nothing must reset the
+  // KPIs to 0 instead of leaving the previous scan's numbers on screen.
+  {
     const n = rows.length;
     hxRenderDashboard("wsh-dash", {
-      gauges: [
+      gauges: n === 0 ? [] : [
         { label: "Service-190 also stuck", count: rows.filter((r) => r.status_190 === "STTOBILL09").length, total: n, c1: "#f97316", c2: "#ef4444",
           hint: "The account's service-190 item for the same period is also STTOBILL09 (goes in the script too)" },
         { label: "No service-190 item", count: rows.filter((r) => !r.status_190).length, total: n, c1: "#94a3b8", c2: "#64748b" },
@@ -6555,6 +6570,7 @@ function wbcRenderTable() {
     `<span>Rows ${(wbcPage * WBC_PAGE_SIZE + 1).toLocaleString()}–${Math.min((wbcPage + 1) * WBC_PAGE_SIZE, all.length).toLocaleString()} of ${all.length.toLocaleString()} · page ${wbcPage + 1} / ${pages}</span>` +
     `<button type="button" class="hx-icon-btn" data-wbc-page="next" ${wbcPage >= pages - 1 ? "disabled" : ""} title="Next page">›</button>`;
   renderFilteredCount("#wbc-filtered-count", all.length, wbcRows.length);
+  if (!wbcRows.length) hxZeroDashboard("wbc-dash");
   if (wbcRows.length) {
     const n = all.length;
     const nz = (k) => all.filter((r) => Math.abs(Number(r[k])) >= 0.001);
@@ -6755,6 +6771,7 @@ function usanRenderTable() {
         `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${c.render ? c.render(r) : c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? "")}</td>`).join("") + "</tr>").join("")
     : `<tr><td colspan="${USAN_COLUMNS.length}" class="hint-text">${usanRows.length ? "No rows match the current filters." : "✅ No unusual high Sanitary bills found."}</td></tr>`;
   renderFilteredCount("#usan-filtered-count", rows.length, usanRows.length);
+  if (!usanRows.length) hxZeroDashboard("usan-dash");
   if (usanRows.length) {
     hxRenderDashboard("usan-dash", {
       gauges: [],
@@ -7172,6 +7189,7 @@ function wbszRender() {
         `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${c.render ? c.render(r) : c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? "")}</td>`).join("") + "</tr>").join("")
     : `<tr><td colspan="${WBSZ_COLUMNS.length}" class="hint-text">${wbszRows.length ? "No rows match the current filters." : "✅ No sanitary bill at 0 with water consumption."}</td></tr>`;
   renderFilteredCount("#wbsz-filtered-count", rows.length, wbszRows.length);
+  if (!wbszRows.length) hxZeroDashboard("wbsz-dash");
   if (wbszRows.length) {
     const n = rows.length;
     hxRenderDashboard("wbsz-dash", {
@@ -7735,6 +7753,7 @@ function ditbRenderTable() {
     : `<tr><td colspan="${DITB_COLUMNS.length + 1}" class="hint-text">${ditbRows.length ? "No rows match the current filters." : "No double items to bill found."}</td></tr>`;
   renderFilteredCount("#ditb-filtered-count", rows.length, ditbRows.length);
   ditbUpdateSelectionUI(rows);
+  if (!ditbRows.length) hxZeroDashboard("ditb-dash");
   if (ditbRows.length) {
     const n = rows.length;
     const rebill = rows.filter((r) => String(r.needs_rebilling) === "1");
@@ -7762,6 +7781,9 @@ $("#ditb-detect-btn").addEventListener("click", async () => {
   const btn = $("#ditb-detect-btn");
   btn.disabled = true;
   $("#ditb-summary").textContent = "Scanning…";
+  // RJ 2026-10-08: a new scan invalidates any script built from the old rows.
+  $("#ditb-output").textContent = "No fix script generated yet — Scan, check the rows, then Generate.";
+  $("#ditb-gen-summary").textContent = "";
   try {
     const data = await api("/api/double-itb/detect", { method: "POST" });
     ditbRows = data.rows || [];
@@ -7963,6 +7985,7 @@ function dtnbRenderTable() {
       }).join("") + "</tr>").join("")
     : `<tr><td colspan="${DTNB_COLUMNS.length}" class="hint-text">${dtnbRows.length ? "No rows match the current filters." : "No TNB disconnections with ready usage found."}</td></tr>`;
   renderFilteredCount("#dtnb-filtered-count", rows.length, dtnbRows.length);
+  if (!dtnbRows.length) hxZeroDashboard("dtnb-dash");
   if (dtnbRows.length) {
     const n = rows.length;
     hxRenderDashboard("dtnb-dash", {
@@ -8377,6 +8400,7 @@ function rvRenderTable() {
   renderFilteredCount("#rv-filtered-count", indices.length, rvRows.length);
   rvApplyChainHighlight();
   rvUpdateDirtyUI();
+  if (!rvRows.length) hxZeroDashboard("rv-dash");
   if (rvRows.length) {
     const vis = indices.map((i) => rvRows[i]);
     const n = vis.length;
@@ -9872,6 +9896,54 @@ async function hxRefreshPage(pageId, refreshBtn) {
     refreshBtn.classList.remove("is-spinning");
   }
 }
+
+// ---- Clear the old script before every Generate (RJ 2026-10-08: "in all
+// generate script functionality, always clean the old ones before generating
+// new one, specifically in the double ITB"). Capture phase, so it runs
+// before each page's own Generate handler: if that handler then fails or
+// stops on a validation message, no stale script is left to be copied.
+const SG_GEN_OUTPUTS = {
+  "generate-update-btn": ["#script-output"],
+  "generate-rollback-btn": ["#script-output"],
+  "da-generate-btn": ["#da-output"],
+  "da-cleanup-generate-btn": ["#da-cleanup-output"],
+  "rv-generate-btn": ["#rv-script-output"],
+  "wsh-generate-btn": ["#wsh-output"],
+  "ditb-generate-btn": ["#ditb-output", "#ditb-gen-summary"],
+  "billiss-release-generate-btn": ["#billiss-release-output"],
+  "biss2-generate-btn": ["#biss2-output"],
+  "ibp-generate-btn": ["#ibp-output"],
+};
+const SG_GEN_CLEARED = "-- Previous script cleared (a new one appears here when Generate succeeds).";
+function sgClearScriptOutputs(sels) {
+  sels.forEach((sel) => {
+    const el = $(sel);
+    if (!el) return;
+    el.textContent = el.tagName === "PRE" ? SG_GEN_CLEARED : "";
+  });
+}
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn || btn.disabled) return;
+  if (SG_GEN_OUTPUTS[btn.id]) { sgClearScriptOutputs(SG_GEN_OUTPUTS[btn.id]); return; }
+  if (btn.hasAttribute("data-rel-generate")) {
+    const card = btn.closest(".biss-rel-card");
+    card?.querySelector("[data-rel-output]") && (card.querySelector("[data-rel-output]").textContent = SG_GEN_CLEARED);
+    card?.querySelector("[data-rel-summary]") && (card.querySelector("[data-rel-summary]").textContent = "");
+  }
+}, true);
+// Copy / Download must never hand out the "cleared" placeholder as a script.
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn || !/(copy|download)/i.test(btn.id + " " + [...btn.attributes].map((a) => a.name).join(" "))) return;
+  const scope = btn.closest(".card, .biss-rel-card, .page") || document;
+  const pre = scope.querySelector("pre.script-output");
+  if (pre && pre.textContent.startsWith("-- Previous script cleared")) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    showToast("No script yet - Generate first.", true);
+  }
+}, true);
 
 function hxInstallRefreshButtons() {
   Object.keys(HX_REFRESH).forEach((pageId) => {

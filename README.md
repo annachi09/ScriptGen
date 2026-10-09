@@ -2926,6 +2926,42 @@ classes prefixed `hx-`); no server or query changes.
   reading-history pop-out is shared with Bulk Checker, which gets the
   same maximize button.
 
+## KPIs reset when a scan finds nothing (2026-10-08)
+
+RJ: "for wrong stuck in Hierarchy itb, if you refresh or scan, it should reload
+the KPI, now nothing is detected but KPI numbers are still the same". Several
+menus only redrew their dashboard `if (rows.length)`, so an empty scan left
+the previous numbers. New `hxZeroDashboard(id)` keeps the tile labels, sets
+the values to 0 and removes the gauges/split bar. Applied to Wrong Stuck in
+Hierarchy (always redraws now), Incorrect Billing Period, TNB Cycle/Disc,
+Wrong Billed Consumption, Wrong Bill Case 1 + 3, DOUBLE ITB, Disconnection TNB
+and Reading Validation.
+
+Generate clears the old script first (same day, RJ: "in all generate script
+functionality, always clean the old ones before generating new one,
+specifically in the double ITB"): a capture-phase listener (`SG_GEN_OUTPUTS`
+in app.js) wipes the script output + summary of every Generate button (Script,
+DIFF DATES single/cleanup, Reading Validation, Wrong Stuck, DOUBLE ITB, Bill
+Issuance Case 1/2 + release cards, Incorrect Billing Period) before the page's
+own handler runs, so a failed generate never leaves an old script to copy.
+Copy/Download refuse while the output holds the "cleared" placeholder. DOUBLE
+ITB also clears its script on every re-scan. DOUBLE ITB filters: reading type
+on its own row, segmented filters wrap instead of overlapping.
+
+DOUBLE ITB rebilling tag (same day): every GCCOM_REBILLING_ACTIVITY the fix
+inserts gets DESCRIPTION = 'AUTO REBILLING DOUBLE ITB' (`double_itb.REB_DESCRIPTION`),
+and when the script contains any rebilling it ends with a /* */ follow-up query
+(`build_followup_query`): activities with that description whose status is not
+ESTREF0003 Rejected / ESTREF0004 Rebilled, with ID_REBILLING_ACTIVITY,
+CREATE_DATE and the status in English (GCCOM_REB_ACTIVITY_STATUS +
+GCTS_DICTIONARY). /* */ so the "clean" option keeps it. Verified live (runs in
+~2s; 0 tagged rows before the first run).
+
+Bill Issuance Case 2 (same day): a KPI that has its own sub-tab switches to it
+(Complete -> Complete tab + release card, Services needing update -> Period
+mismatch); the All tab's Generate splits complete accounts (release script)
+from the rest (update script).
+
 ## Bulk Checker: 5-min cache, "no file for most accounts" default, pop-out bills; KPI-coloured rows app-wide (2026-10-07)
 
 RJ: "allow up to 5 mins, try to cache the data so that it loads in the
