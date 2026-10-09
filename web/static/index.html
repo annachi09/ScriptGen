@@ -147,6 +147,9 @@
         <button class="nav-item" data-page="anomalystats" title="Anomalies Statistics">
           <span class="nav-icon">📈</span><span class="nav-label">Anomalies Statistics</span>
         </button>
+        <button class="nav-item" data-page="rebillingmonitor" title="Rebilling Monitor">
+          <span class="nav-icon">🔁</span><span class="nav-label">Rebilling Monitor</span>
+        </button>
         <button class="nav-item" data-page="documentation" title="Documentation">
           <span class="nav-icon">📚</span><span class="nav-label">Documentation</span>
         </button>
@@ -1204,15 +1207,49 @@
           </div>
         </div>
 
+        <!-- RJ 2026-10-09: automatic rebilling, same criteria as DOUBLE ITB -->
+        <div class="card">
+          <div class="card-header"><h2>Generate Rebilling Script</h2></div>
+          <p class="hint-text">For every <strong>checked</strong> Sanitary bill, one <code>GCCOM_REBILLING_ACTIVITY</code> is inserted holding <strong>both bills</strong>: the Sanitary bill and the account's Water bill(s) for the same billing period / billing date (one <code>GCCOM_REB_ACTIVITY_INFORMATION</code> row each). Same criteria as DOUBLE ITB: <strong>In process</strong> (<code>ESTREF0002</code>), <strong>Massive substitutive</strong> (<code>TIPREF0005</code>), reason <code>REBRES003</code>, DESCRIPTION <code>'WRONG-SANITARY HIGH BILL'</code>; the bills go to <strong>Disputed</strong> (<code>ESTFAC0010</code>). With "Process by batch" the bill notes go in <code>EREALB0005</code>. The state is re-read right before generating; bills already in an open rebilling activity are skipped. The script ends with a commented monitoring query (open activities with this description, status in English).</p>
+          <div class="hint-text" id="usan-selection-hint">Every detected bill starts checked - untick any you don't want to rebill.</div>
+          <div class="key-panel-row" style="margin:10px 0;flex-wrap:wrap;">
+            <label class="field-label">User</label>
+            <input id="usan-user" class="text-input text-input-sm" value="RMA" style="width:90px;" />
+            <label class="field-label">Program</label>
+            <input id="usan-program" class="text-input text-input-sm" value="WRONG_SANITARY_HIGH" style="width:170px;" />
+            <label class="field-label" title="GCCOM_REBILLING_ACTIVITY.CREATION_USER">Creation user</label>
+            <input id="usan-creation-user" class="text-input text-input-sm" value="10000008456" style="width:120px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="usan-batch" checked /> Process rebilling by batch</label>
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="usan-clean" /> Clean script (no comments)</label>
+            <button type="button" class="btn btn-primary" id="usan-generate-btn" disabled>📝 Generate Rebilling Script</button>
+          </div>
+          <div class="hint-text" id="usan-gen-summary"></div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" id="usan-copy-btn">📋 Copy</button>
+            <button type="button" class="btn btn-pill" id="usan-download-btn">⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" id="usan-output">No rebilling script generated yet — Scan, check the bills, then Generate.</pre>
+          <details class="hx-hint" id="usan-rollback-wrap" hidden style="margin-top:10px;">
+            <summary>↩ Rollback script (undo of the rebilling above)</summary>
+            <div class="card-header-actions" style="margin:6px 0;">
+              <button type="button" class="btn btn-pill" data-rb-copy="#usan-rollback">📋 Copy rollback</button>
+              <button type="button" class="btn btn-pill" data-rb-download="#usan-rollback" data-rb-name="wrong_sanitary_high_rebilling_ROLLBACK.sql">⬇ Download rollback</button>
+            </div>
+            <pre class="script-output" id="usan-rollback"></pre>
+          </details>
+        </div>
+
         <div class="card hx-card usan-alert-card">
           <div class="usan-alert-head">
             <h3>📧 Daily e-mail alert</h3>
             <div class="usan-alert-actions">
               <button type="button" class="btn btn-pill" id="usan-alert-refresh-btn">↻ Status</button>
               <button type="button" class="btn btn-primary" id="usan-send-now-btn">📨 Check &amp; send e-mail now</button>
+              <button type="button" class="btn btn-pill" id="digest-send-now-btn" title="Counts every menu (Overview cards) and e-mails the areas that have cases">📬 Send daily digest now</button>
             </div>
           </div>
           <p class="hint-text" id="usan-alert-summary">Loading alert status…</p>
+          <p class="hint-text">📬 <strong>Daily digest</strong> (new): at the same hour, one e-mail lists every menu that has cases (Overview counts, incl. open ScriptGen rebillings). Nothing open = no e-mail. <span id="digest-last"></span></p>
           <div class="grid-wrap">
             <table class="data-grid" id="usan-alert-log">
               <thead><tr><th>Attempted</th><th>Status</th><th>Rows</th><th>Detail</th></tr></thead>
@@ -1574,6 +1611,14 @@
             <button type="button" class="btn btn-pill" id="ditb-download-btn">⬇ Download .sql</button>
           </div>
           <pre class="script-output" id="ditb-output">No fix script generated yet — Scan, check the rows, then Generate.</pre>
+          <details class="hx-hint" id="ditb-rollback-wrap" hidden style="margin-top:10px;">
+            <summary>↩ Rollback script (undo of the fix above)</summary>
+            <div class="card-header-actions" style="margin:6px 0;">
+              <button type="button" class="btn btn-pill" data-rb-copy="#ditb-rollback">📋 Copy rollback</button>
+              <button type="button" class="btn btn-pill" data-rb-download="#ditb-rollback" data-rb-name="double_itb_fix_ROLLBACK.sql">⬇ Download rollback</button>
+            </div>
+            <pre class="script-output" id="ditb-rollback"></pre>
+          </details>
         </div>
       </section>
 
@@ -1697,6 +1742,40 @@
 
           <div class="grid-wrap" style="margin-top:14px;">
             <table class="data-grid" id="dtnb-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Rebilling Monitor (RJ 2026-10-09) ===== -->
+      <section class="page" id="page-rebillingmonitor">
+        <header class="page-header">
+          <h1>Rebilling Monitor</h1>
+          <p class="page-subtitle">Every rebilling activity inserted by a ScriptGen script (DESCRIPTION 'AUTO REBILLING DOUBLE ITB' or 'WRONG-SANITARY HIGH BILL'), with the status in English, the bills inside and how long it has been open.</p>
+        </header>
+        <div class="card">
+          <div class="card-header">
+            <h2>Tagged rebilling activities</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="rbm-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="rbm-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="rbm-summary">Click Scan to load.</div>
+          <div class="kpi-row" id="rbm-kpi-row" style="margin:14px 0 4px;"></div>
+          <div class="key-panel-row" id="rbm-filter-row" hidden>
+            <label class="field-label">Source</label>
+            <select id="rbm-filter-source" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Search</label>
+            <input id="rbm-filter-search" class="text-input text-input-sm" placeholder="Activity, account, bill…" style="width:190px;" />
+            <label class="field-label" title="Open activities older than this are flagged as stuck">Stuck after (days)</label>
+            <input id="rbm-stuck-days" class="text-input text-input-sm" type="number" min="0" value="3" style="width:70px;" />
+          </div>
+          <div class="hint-text" id="rbm-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="rbm-table">
               <thead><tr></tr></thead>
               <tbody></tbody>
             </table>

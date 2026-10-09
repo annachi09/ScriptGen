@@ -459,6 +459,11 @@ const OVERVIEW_CARDS = [
     group: "Bulk Checker",
   },
   {
+    key: "rebillingmonitor", icon: "🔁", label: "Rebilling Monitor", color: "#0ea5e9",
+    desc: "ScriptGen rebilling activities still open (not Rebilled / Rejected).",
+    page: "rebillingmonitor", group: "History",
+  },
+  {
     key: "history", icon: "🕓", label: "Script History", color: "#06b6d4",
     desc: "Scripts generated/released, all tools combined.",
     page: "history", localValue: (s) => s.script_total,
@@ -1092,7 +1097,7 @@ function renderHistory(entries) {
     tr.innerHTML = `
       <td>${escapeHtml(e.created_at_utc.slice(0, 16).replace("T", " "))}</td>
       <td>${escapeHtml(e.username)}</td>
-      <td>${escapeHtml(e.kind)}</td>
+      <td>${escapeHtml(HISTORY_KIND_LABELS[e.kind] || e.kind)}</td>
       <td>${escapeHtml(table)}</td>
       <td>${e.statement_count}</td>
       <td>${e.warning_count || ""}</td>
@@ -1110,11 +1115,20 @@ function renderHistory(entries) {
   });
 }
 
+// RJ 2026-10-09: readable names for every script kind (app/db/script_history.py)
+const HISTORY_KIND_LABELS = {
+  update: "Workspace Update", rollback: "Rollback", date_anomaly_correction: "DIFF DATES",
+  bill_issuance_correction: "Bill Issuance", incorrect_billing_period_correction: "Incorrect Billing Period",
+  wrong_stuck_hierarchy_correction: "Wrong Stuck in Hierarchy", double_itb_fix: "DOUBLE ITB",
+  high_sanitary_rebilling: "High Sanitary Rebilling", bill_issuance_release: "Bill Issuance Release",
+  generated_rollback: "Rollback (generated)",
+};
+
 async function viewHistoryEntry(id) {
   try {
     const entry = await api(`/api/history/${id}`);
     $("#script-title").textContent =
-      `History #${entry.id} — ${entry.kind} — ${entry.table_name} (${entry.created_at_utc.slice(0, 16).replace("T", " ")} UTC, ${entry.username})`;
+      `History #${entry.id} — ${HISTORY_KIND_LABELS[entry.kind] || entry.kind} — ${entry.table_name} (${entry.created_at_utc.slice(0, 16).replace("T", " ")} UTC, ${entry.username})`;
     $("#script-output").textContent = entry.sql_text;
     $("#script-output").dataset.filename = `history_${entry.id}.sql`;
     goToScriptPage();
@@ -6753,12 +6767,30 @@ function usanVisibleRows() {
   return rows;
 }
 
+// RJ 2026-10-09: rebilling selection (keyed by the Sanitary ID_BILL).
+let usanSelected = new Set();
+function usanUpdateSelectionUI(rows) {
+  rows = rows || usanVisibleRows();
+  const all = $("#usan-select-all");
+  const nVis = rows.filter((r) => usanSelected.has(String(r.id_bill))).length;
+  if (all) { all.checked = rows.length > 0 && nVis === rows.length; all.indeterminate = nVis > 0 && nVis < rows.length; }
+  const n = usanSelected.size;
+  $("#usan-selection-hint").textContent = n
+    ? `${n} Sanitary bill(s) selected - each becomes one rebilling activity with its Water bill.`
+    : "☝️ Check one or more bills above to enable Generate.";
+  $("#usan-generate-btn").disabled = n === 0 || state.role === "viewer";
+}
+
 function usanRenderTable() {
   const head = document.querySelector("#usan-table thead tr");
-  head.innerHTML = USAN_COLUMNS.map((c) => {
+  head.innerHTML = `<th><input type="checkbox" id="usan-select-all" title="Select all visible bills" /></th>` + USAN_COLUMNS.map((c) => {
     const arrow = usanSortKey === c.key ? `<span class="stats-table-sort-arrow">${usanSortDir === 1 ? "▲" : "▼"}</span>` : "";
     return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
   }).join("");
+  $("#usan-select-all").addEventListener("change", (ev) => {
+    usanVisibleRows().forEach((r) => { if (ev.target.checked) usanSelected.add(String(r.id_bill)); else usanSelected.delete(String(r.id_bill)); });
+    usanRenderTable();
+  });
   head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
     const k = th.dataset.sort;
     usanSortDir = usanSortKey === k ? -usanSortDir : 1;
@@ -6767,10 +6799,12 @@ function usanRenderTable() {
   }));
   const rows = usanVisibleRows();
   document.querySelector("#usan-table tbody").innerHTML = rows.length
-    ? rows.map((r) => `<tr class="hx-row hx-row-anomalous">` + USAN_COLUMNS.map((c) =>
-        `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${c.render ? c.render(r) : c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? "")}</td>`).join("") + "</tr>").join("")
-    : `<tr><td colspan="${USAN_COLUMNS.length}" class="hint-text">${usanRows.length ? "No rows match the current filters." : "✅ No unusual high Sanitary bills found."}</td></tr>`;
+    ? rows.map((r) => { const id = String(r.id_bill ?? ""); return `<tr class="hx-row hx-row-anomalous${usanSelected.has(id) ? " is-selected" : ""}">` +
+        `<td><input type="checkbox" class="usan-row-cb" data-id="${escapeHtml(id)}"${usanSelected.has(id) ? " checked" : ""} /></td>` + USAN_COLUMNS.map((c) =>
+        `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${c.render ? c.render(r) : c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? "")}</td>`).join("") + "</tr>"; }).join("")
+    : `<tr><td colspan="${USAN_COLUMNS.length + 1}" class="hint-text">${usanRows.length ? "No rows match the current filters." : "✅ No unusual high Sanitary bills found."}</td></tr>`;
   renderFilteredCount("#usan-filtered-count", rows.length, usanRows.length);
+  usanUpdateSelectionUI(rows);
   if (!usanRows.length) hxZeroDashboard("usan-dash");
   if (usanRows.length) {
     hxRenderDashboard("usan-dash", {
@@ -6795,6 +6829,11 @@ async function usanScan() {
   try {
     const data = await api("/api/unusual-sanitary/detect", { method: "POST" });
     usanRows = data.rows || [];
+    // keep only selections that are still detected; a new scan invalidates the old script
+    // "automatically generate": every detected bill starts checked
+    usanSelected = new Set(usanRows.map((r) => String(r.id_bill)));
+    $("#usan-output").textContent = "No rebilling script generated yet — Scan, check the bills, then Generate.";
+    $("#usan-gen-summary").textContent = "";
     const keepBp = $("#usan-filter-bp").value, keepSt = $("#usan-filter-status").value;
     $("#usan-filter-bp").innerHTML = `<option value="">All</option>` +
       [...new Set(usanRows.map((r) => String(r.id_billing_period)))].sort().reverse().map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
@@ -6817,6 +6856,74 @@ async function usanScan() {
     btn.disabled = false;
   }
 }
+
+document.querySelector("#usan-table tbody").addEventListener("change", (ev) => {
+  const cb = ev.target.closest(".usan-row-cb");
+  if (!cb) return;
+  if (cb.checked) usanSelected.add(cb.dataset.id); else usanSelected.delete(cb.dataset.id);
+  cb.closest("tr").classList.toggle("is-selected", cb.checked);
+  usanUpdateSelectionUI();
+});
+
+$("#usan-generate-btn").addEventListener("click", async () => {
+  const ids = [...usanSelected];
+  if (!ids.length) { showToast("Check one or more bills first.", true); return; }
+  const btn = $("#usan-generate-btn");
+  btn.disabled = true;
+  try {
+    const res = await api("/api/unusual-sanitary/rebilling", {
+      method: "POST",
+      body: {
+        bill_ids: ids, user: $("#usan-user").value.trim(), program: $("#usan-program").value.trim(),
+        creation_user: Number($("#usan-creation-user").value) || 10000008456,
+        batch: $("#usan-batch").checked, clean: $("#usan-clean").checked,
+      },
+    });
+    $("#usan-output").textContent = res.sql_text;
+    sgShowRollback("usan", res.rollback_sql);
+    $("#usan-gen-summary").textContent = `${res.rebilling_count} rebilling activit${res.rebilling_count === 1 ? "y" : "ies"} with ${res.bill_count} bill row(s) (Sanitary + Water).` +
+      (res.warnings.length ? ` ${res.warnings.length} warning(s) - see the top of the script.` : "");
+    showToast("Rebilling script generated.");
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    usanUpdateSelectionUI();
+  }
+});
+$("#usan-copy-btn").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#usan-output").textContent); showToast("Script copied to clipboard."); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#usan-download-btn").addEventListener("click", () => {
+  const blob = new Blob([$("#usan-output").textContent], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "wrong_sanitary_high_rebilling.sql";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// RJ 2026-10-09: daily digest e-mail (web/alerts.py run_daily_digest)
+async function digestLoadStatus() {
+  try {
+    const { log } = await api("/api/alerts/digest/status");
+    const last = (log || [])[0];
+    $("#digest-last").textContent = last ? `Last: ${String(last.attempted_at).slice(0, 16).replace("T", " ")} - ${last.status}${last.detail ? " (" + last.detail + ")" : ""}` : "Not run yet.";
+  } catch (_) { /* optional */ }
+}
+$("#digest-send-now-btn").addEventListener("click", async () => {
+  const btn = $("#digest-send-now-btn");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/alerts/digest/send-now", { method: "POST" });
+    showToast(r.status === "sent" ? `Digest sent (${r.areas} area(s) with cases).` : `Digest: ${r.status}${r.detail ? " - " + r.detail : ""}`, r.status === "error");
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+    digestLoadStatus();
+  }
+});
 
 const USAN_STATUS_LABELS = { sent: "✅ Sent", no_cases: "— No cases", error: "⚠️ Error", already_sent: "Already sent" };
 async function usanLoadAlertStatus() {
@@ -6846,7 +6953,7 @@ async function usanLoadAlertStatus() {
 // .da-subnav-btn[data-wb-sub=caseN] with a [data-wb-count=caseN] badge, a
 // .da-subpage[data-wb-sub=caseN], an entry in WB_TABS, and HX_REFRESH.wrongbill.
 const WB_TABS = {
-  case1: { scan: () => usanScan(), loaded: () => usanScanned, onShow: () => usanLoadAlertStatus() },
+  case1: { scan: () => usanScan(), loaded: () => usanScanned, onShow: () => { usanLoadAlertStatus(); digestLoadStatus(); } },
   case2: { scan: () => wbpdScan(), loaded: () => wbpdScanned },
   case3: { scan: () => wbszScan(), loaded: () => wbszScanned, onShow: () => wbszLoadPeriods() },
   case4: { scan: () => wbfrScan(), loaded: () => wbfrScanned, onShow: () => wbfrLoadPeriods() },
@@ -7833,6 +7940,7 @@ $("#ditb-generate-btn").addEventListener("click", async () => {
       },
     });
     $("#ditb-output").textContent = res.sql_text;
+    sgShowRollback("ditb", res.rollback_sql);
     $("#ditb-gen-summary").textContent = `${res.itb_count} item(s) to bill cancelled (incl. Sanitary twins), ${res.reading_count} reading(s) set to Billed, ${res.rebilling_count} rebilling activit${res.rebilling_count === 1 ? "y" : "ies"} with ${res.rebilling_bill_count ?? res.rebilling_count} bill row(s).` +
       (res.warnings.length ? ` ${res.warnings.length} warning(s) - see the top of the script.` : "");
     showToast("Fix script generated.");
@@ -9749,6 +9857,7 @@ const HX_REFRESH = {
   incorrectbillingperiod: () => ({ btn: "#ibp-detect-btn" }),
   // Refresh bypasses the server cache (RJ 2026-10-07 cache).
   bulkchecker: () => ({ fn: () => bcRunSearch({ refresh: true }) }),
+  rebillingmonitor: () => ({ btn: "#rbm-detect-btn" }),
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
@@ -9759,7 +9868,7 @@ const HX_REFRESH = {
 // Reading Validation NISS, DIFF DATES single NISS / batch, Bulk Checker)
 // are left alone; Wrong Bill and Anomalies Statistics already auto-load.
 const HX_AUTO_PAGES = new Set(["hierarchy", "tnbcycledisc", "wrongstuckhierarchy", "doubleitb",
-  "wrongbilledconsumption", "disconnectiontnb", "billissuance", "incorrectbillingperiod", "dateanomaly"]);
+  "wrongbilledconsumption", "disconnectiontnb", "billissuance", "incorrectbillingperiod", "dateanomaly", "rebillingmonitor"]);
 const hxAutoLoaded = new Set();
 let hxAutoTimer = null;
 
@@ -9897,6 +10006,139 @@ async function hxRefreshPage(pageId, refreshBtn) {
   }
 }
 
+// ---------------- Rebilling Monitor (RJ 2026-10-09) ----------------
+// See app/core/rebilling_monitor.py. KPI cards filter the table; rows are
+// tinted with their card's colour (kpiRowTag). "Stuck" = still open and
+// older than the "Stuck after (days)" box.
+let rbmRows = [];
+let rbmKpi = null;
+let rbmSortKey = null, rbmSortDir = 1;
+const RBM_STATUS_KPI = { ESTREF0001: "pending", ESTREF0002: "invoicing", ESTREF0004: "complete", ESTREF0003: "inactive" };
+const RBM_COLUMNS = [
+  { key: "id_rebilling_activity", label: "Activity", mono: true },
+  { key: "source", label: "Source" },
+  { key: "account", label: "Account", mono: true },
+  { key: "status_en", label: "Status" },
+  { key: "create_date", label: "Created", date: true },
+  { key: "age_days", label: "Age (days)", num: true },
+  { key: "bills_number", label: "# Bills", num: true },
+  { key: "bill_statuses", label: "Bills (current status)", mono: true },
+  { key: "id_customer", label: "Customer", mono: true },
+  { key: "update_date", label: "Last update", date: true },
+  { key: "update_program", label: "Updated by program" },
+];
+function rbmStuckDays() { const n = Number($("#rbm-stuck-days").value); return Number.isFinite(n) ? n : 3; }
+function rbmIsStuck(r) { return r.is_open && Number(r.age_days) > rbmStuckDays(); }
+const RBM_KPI_PRED = {
+  open: (r) => r.is_open,
+  stuck: (r) => rbmIsStuck(r),
+  pending: (r) => r.reb_activity_status === "ESTREF0001",
+  invoicing: (r) => r.reb_activity_status === "ESTREF0002",
+  complete: (r) => r.reb_activity_status === "ESTREF0004",
+  inactive: (r) => r.reb_activity_status === "ESTREF0003",
+};
+function rbmVisibleRows() {
+  const src = $("#rbm-filter-source").value;
+  const q = $("#rbm-filter-search").value.trim().toLowerCase();
+  let rows = rbmRows.filter((r) => {
+    if (src && r.source !== src) return false;
+    if (rbmKpi && RBM_KPI_PRED[rbmKpi] && !RBM_KPI_PRED[rbmKpi](r)) return false;
+    if (q && ![r.id_rebilling_activity, r.account, r.bill_ids, r.id_customer].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    return true;
+  });
+  if (rbmSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[rbmSortKey], b[rbmSortKey], rbmSortDir));
+  return rows;
+}
+function rbmRender() {
+  const all = rbmRows;
+  const cnt = (k) => all.filter(RBM_KPI_PRED[k]).length;
+  const cards = [
+    ["total", "🔁", "All tagged activities", all.length],
+    ["open", "⏳", "Open (not Rebilled / Rejected)", cnt("open")],
+    ["missing", "🚨", `Stuck > ${rbmStuckDays()} day(s)`, cnt("stuck")],
+    ["pending", "🕓", "Pending", cnt("pending")],
+    ["invoicing", "⚙️", "In process", cnt("invoicing")],
+    ["complete", "✅", "Rebilled", cnt("complete")],
+    ["inactive", "⛔", "Rejected", cnt("inactive")],
+  ];
+  const filterOf = { total: null, open: "open", missing: "stuck", pending: "pending", invoicing: "invoicing", complete: "complete", inactive: "inactive" };
+  $("#rbm-kpi-row").innerHTML = cards.map(([kpi, icon, label, value]) => {
+    const f = filterOf[kpi];
+    const active = f ? rbmKpi === f : !rbmKpi;
+    return `<div class="kpi-card kpi-card-clickable${active ? " is-active" : ""}" data-kpi="${kpi}" data-rbm-filter="${f ?? ""}" title="Click to filter - click again to clear">` +
+      `<div class="kpi-value">${value}</div><div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${escapeHtml(label)}</div></div>`;
+  }).join("");
+  const head = $("#rbm-table thead tr");
+  head.innerHTML = RBM_COLUMNS.map((c) => {
+    const arrow = rbmSortKey === c.key ? `<span class="stats-table-sort-arrow">${rbmSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    rbmSortDir = rbmSortKey === th.dataset.sort ? -rbmSortDir : 1;
+    rbmSortKey = th.dataset.sort;
+    rbmRender();
+  }));
+  const rows = rbmVisibleRows();
+  const tbody = $("#rbm-table tbody");
+  tbody.innerHTML = "";
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="${RBM_COLUMNS.length}" class="hint-text">${rbmRows.length ? "No activities match the current filters." : "No tagged rebilling activities yet."}</td></tr>`;
+  }
+  rows.forEach((r) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = RBM_COLUMNS.map((c) => {
+      let v = c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? "");
+      if (c.key === "age_days" && rbmIsStuck(r)) v = `<strong title="Open longer than ${rbmStuckDays()} day(s)">🚨 ${v}</strong>`;
+      return `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${v}</td>`;
+    }).join("");
+    kpiRowTag(tr, rbmIsStuck(r) ? "missing" : RBM_STATUS_KPI[r.reb_activity_status]);
+    tbody.appendChild(tr);
+  });
+  renderFilteredCount("#rbm-filtered-count", rows.length, rbmRows.length);
+}
+$("#rbm-kpi-row").addEventListener("click", (e) => {
+  const card = e.target.closest("[data-rbm-filter]");
+  if (!card) return;
+  const f = card.dataset.rbmFilter || null;
+  rbmKpi = rbmKpi === f ? null : f;
+  rbmRender();
+});
+["#rbm-filter-source", "#rbm-stuck-days"].forEach((id) => $(id).addEventListener("change", rbmRender));
+["#rbm-filter-search", "#rbm-stuck-days"].forEach((id) => $(id).addEventListener("input", rbmRender));
+$("#rbm-detect-btn").addEventListener("click", async () => {
+  const btn = $("#rbm-detect-btn");
+  btn.disabled = true;
+  $("#rbm-summary").textContent = "Loading…";
+  try {
+    const data = await api("/api/rebilling-monitor/detect", { method: "POST" });
+    rbmRows = data.rows || [];
+    const keep = $("#rbm-filter-source").value;
+    $("#rbm-filter-source").innerHTML = `<option value="">All</option>` +
+      Object.values(data.tags || {}).map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+    $("#rbm-filter-source").value = keep;
+    $("#rbm-filter-row").hidden = false;
+    $("#rbm-export-btn").disabled = rbmRows.length === 0;
+    $("#rbm-summary").textContent = `${data.count} tagged activit${data.count === 1 ? "y" : "ies"}, ${data.open_count} still open.`;
+    rbmRender();
+  } catch (err) {
+    $("#rbm-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#rbm-export-btn").addEventListener("click", () => {
+  const rows = rbmVisibleRows();
+  if (!rows.length) return;
+  const keys = RBM_COLUMNS.map((c) => c.key).concat(["reb_activity_status", "bill_ids", "description"]);
+  const lines = [keys.join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = "rebilling_monitor.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
 // ---- Clear the old script before every Generate (RJ 2026-10-08: "in all
 // generate script functionality, always clean the old ones before generating
 // new one, specifically in the double ITB"). Capture phase, so it runs
@@ -9913,8 +10155,33 @@ const SG_GEN_OUTPUTS = {
   "billiss-release-generate-btn": ["#billiss-release-output"],
   "biss2-generate-btn": ["#biss2-output"],
   "ibp-generate-btn": ["#ibp-output"],
+  "usan-generate-btn": ["#usan-output", "#usan-gen-summary"],
 };
 const SG_GEN_CLEARED = "-- Previous script cleared (a new one appears here when Generate succeeds).";
+// RJ 2026-10-09: rollback generated together with the fix (DOUBLE ITB, Case 1)
+function sgShowRollback(prefix, sql) {
+  const wrap = $(`#${prefix}-rollback-wrap`);
+  if (!wrap) return;
+  $(`#${prefix}-rollback`).textContent = sql || "";
+  wrap.hidden = !sql;
+}
+document.addEventListener("click", async (e) => {
+  const c = e.target.closest("[data-rb-copy]");
+  if (c) {
+    try { await navigator.clipboard.writeText($(c.dataset.rbCopy).textContent); showToast("Rollback copied to clipboard."); }
+    catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+    return;
+  }
+  const d = e.target.closest("[data-rb-download]");
+  if (d) {
+    const url = URL.createObjectURL(new Blob([$(d.dataset.rbDownload).textContent], { type: "text/plain" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = d.dataset.rbName || "rollback.sql";
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+});
+
 function sgClearScriptOutputs(sels) {
   sels.forEach((sel) => {
     const el = $(sel);
@@ -9925,7 +10192,11 @@ function sgClearScriptOutputs(sels) {
 document.addEventListener("click", (e) => {
   const btn = e.target.closest("button");
   if (!btn || btn.disabled) return;
-  if (SG_GEN_OUTPUTS[btn.id]) { sgClearScriptOutputs(SG_GEN_OUTPUTS[btn.id]); return; }
+  if (SG_GEN_OUTPUTS[btn.id]) {
+    sgClearScriptOutputs(SG_GEN_OUTPUTS[btn.id]);
+    sgShowRollback(btn.id.replace(/-generate-btn$/, ""), "");   // old rollback goes too
+    return;
+  }
   if (btn.hasAttribute("data-rel-generate")) {
     const card = btn.closest(".biss-rel-card");
     card?.querySelector("[data-rel-output]") && (card.querySelector("[data-rel-output]").textContent = SG_GEN_CLEARED);

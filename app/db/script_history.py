@@ -51,6 +51,11 @@ KIND_DATE_ANOMALY = "date_anomaly_correction"
 KIND_BILL_ISSUANCE = "bill_issuance_correction"
 KIND_INCORRECT_BILLING_PERIOD = "incorrect_billing_period_correction"
 KIND_WRONG_STUCK_HIERARCHY = "wrong_stuck_hierarchy_correction"
+# RJ 2026-10-09 ("script history for all menus"):
+KIND_DOUBLE_ITB = "double_itb_fix"
+KIND_HIGH_SANITARY_REBILLING = "high_sanitary_rebilling"
+KIND_RELEASE = "bill_issuance_release"
+KIND_GENERATED_ROLLBACK = "generated_rollback"
 
 
 @dataclass

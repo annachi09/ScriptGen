@@ -2926,6 +2926,66 @@ classes prefixed `hx-`); no server or query changes.
   reading-history pop-out is shared with Bulk Checker, which gets the
   same maximize button.
 
+## Four new features: Rebilling Monitor, script history everywhere, rollback scripts, daily digest (2026-10-09)
+
+RJ asked for suggestions and picked all four.
+
+1. **Rebilling Monitor** (new menu `rebillingmonitor`, `app/core/rebilling_monitor.py`,
+   `/api/rebilling-monitor/detect`): every GCCOM_REBILLING_ACTIVITY with a ScriptGen
+   DESCRIPTION tag ('AUTO REBILLING DOUBLE ITB', 'WRONG-SANITARY HIGH BILL' - add new
+   tags to `TAGS`), status in English, bills inside with their current status, account,
+   age in days. KPI cards (All / Open / Stuck / Pending / In process / Rebilled /
+   Rejected) filter the table and tint the rows; "Stuck" = open longer than the
+   "Stuck after (days)" box (default 3). Overview card + Overview counter = open count.
+   Live first run: 4 tagged activities already exist (~1.4s).
+2. **Script history for all menus**: DOUBLE ITB, High Sanitary rebilling and the
+   Bill Issuance release cards now record to the local script history too
+   (`_record_script` in server.py; new kinds in `app/db/script_history.py`); the
+   History page shows readable kind names.
+3. **Rollback scripts**: DOUBLE ITB and High Sanitary rebilling return `rollback_sql`
+   next to the fix (shown in a "↩ Rollback script" panel with Copy / Download, saved
+   to history, and attached to the alert e-mail as `_ROLLBACK.sql`). The fix's live
+   re-check now also captures the before-states (`READING_STATES`, `ANOM_STATES` as
+   `id:STATUS` lists; bill statuses). Every rollback UPDATE only touches rows still in
+   the status the fix set. Rebilling rows are deleted by DESCRIPTION tag + customer +
+   still In process (ESTREF0002) - once the batch processed an activity it is never
+   deleted (`double_itb.rebilling_rollback_lines`). Verified live on DOUBLE ITB
+   1040620522: readings were 6000STSRED, anomaly 1380273 was ESTAN00009.
+4. **Daily digest e-mail** (`web/alerts.py run_daily_digest`): at the same send hour,
+   one e-mail with every Overview counter that has cases (anomaly statistics left
+   out - always large), incl. open ScriptGen rebillings. Once a day; nothing open = no
+   e-mail; errors retried on the alert cadence. "📬 Send daily digest now" on the
+   Wrong Bill Case 1 alert card (`/api/alerts/digest/send-now`, always sends).
+
+## Wrong Bill Case 1 - automatic rebilling script (2026-10-09)
+
+RJ: "for wrong bill, case 1 high sanitary, automatically generate a rebilling
+activity, same as double itb criteria, get the water bill and add both in the
+same rebilling activity, generate script for insert and monitoring,
+description should be 'WRONG-SANITARY HIGH BILL'".
+
+- New "Generate Rebilling Script" card under the Case 1 table; every detected
+  bill starts checked. One activity per Sanitary bill holding the Sanitary bill
+  + the account's Water bill(s) of the same billing period / billing date.
+- The insert is shared with DOUBLE ITB: `double_itb.rebilling_insert_lines`
+  (ESTREF0002 In process, TIPREF0005, REBRES003, info rows in EREALB0005 when
+  batch, bills -> ESTFAC0010 Disputed). DOUBLE ITB now calls the same function
+  (output unchanged). `double_itb.followup_block(description)` adds the /* */
+  monitoring query to both scripts.
+- `/api/unusual-sanitary/rebilling` re-reads the bills live
+  (`unusual_sanitary.build_rebilling_context_query`): customer, Water bill(s),
+  and any OPEN rebilling activity already holding one of the bills -> skipped
+  with a warning. Bills not Invoiced (ESTFAC0005) get a warning line.
+- Live 2026-10-09: 2 detected bills (accounts 1103110209, 1103126171), each with
+  1 Water bill, both still ESTFAC0008 Generated, no open rebilling; context
+  query ~1.2s. RJ (same day): "yes rebill now, even generated" -> Generated
+  (ESTFAC0008) is rebilled like Invoiced, no warning (`REBILLABLE_STATUSES`).
+- The 7 AM alert e-mail (web/alerts.py) now carries the rebilling script for
+  every detected bill (RJ: "when you send the email, add the script"):
+  attached as `wrong_sanitary_high_rebilling_<date>.sql` and pasted at the end
+  of the body. Default user/program/creation user, batch on, live re-check;
+  if the script fails the mail still goes out with a note.
+
 ## KPIs reset when a scan finds nothing (2026-10-08)
 
 RJ: "for wrong stuck in Hierarchy itb, if you refresh or scan, it should reload

@@ -90,10 +90,96 @@ REB_ACTIVITY_FINAL_STATUSES = ("ESTREF0003", "ESTREF0004")  # Rejected, Rebilled
 FIX_PROGRAM_DEFAULT = "DOUBLE_ITB"
 
 
-def build_followup_query() -> str:
+def rebilling_insert_lines(var: str, customer: int, bills: list[int], *, u: str, p: str, dn: str,
+                           creation_user: int, description: str) -> list[str]:
+    """Shared rebilling block (RJ 2026-10-09: Wrong Bill Case 1 uses the
+    "same as double itb criteria"): one GCCOM_REBILLING_ACTIVITY (In process
+    ESTREF0002, Massive substitutive TIPREF0005, REASON REBRES003,
+    INITIAL_CREATION_DATE today, BILLS_NUMBER = len(bills), DESCRIPTION tag),
+    one GCCOM_REB_ACTIVITY_INFORMATION per bill (REB_DN_STATUS = dn), then the
+    bills -> Disputed. u / p are already-formatted SQL literals."""
+    info_rows: list[str] = []
+    for bid in bills:
+        info_rows += [
+            "INSERT INTO OUC_ADMIN.GCCOM_REB_ACTIVITY_INFORMATION (CREATE_DATE, UPDATE_DATE, UPDATE_USER, UPDATE_PROGRAM, OPTIMIST_LOCK,",
+            "       ID_REB_ACTIVITY_INFORMATION, ID_REBILLING_ACTIVITY, ID_BILL, REB_DN_STATUS, IND_RECALCULATE, COD_EXP_DATE_TYPE,",
+            "       SESSION_ID, ID_REB_ACT_MASSIVE_ASSOC, IND_USG_MODIF)",
+            f"VALUES (GETDATE(), GETDATE(), {u}, {p}, 1, NEXT VALUE FOR OUC_ADMIN.SEC_GCCOM_REBACTIVITYINFORMAT1, {var},",
+            f"       {int(bid)}, N'{dn}', 0, NULL, NULL, NULL, NULL);",
+        ]
+    return [
+        f"DECLARE {var} NUMERIC(15, 0) = NEXT VALUE FOR OUC_ADMIN.SEC_GCCOM_REBILLINGACTIVITY1;",
+        "INSERT INTO oucewa.OUC_ADMIN.GCCOM_REBILLING_ACTIVITY (CREATE_DATE, UPDATE_DATE, UPDATE_USER, UPDATE_PROGRAM,",
+        "       OPTIMIST_LOCK, ID_REBILLING_ACTIVITY, REB_ACTIVITY_STATUS, REB_ACTIVITY_TYPE, ID_RECLAMATION, INITIAL_CREATION_DATE,",
+        "       DIVERGENT_AMOUNT, ID_CURRENCY, ID_CUSTOMER, BILLS_NUMBER, AFFECTED_AMOUNT, DESCRIPTION, IND_COMPLEMENTARY, REASON_TYPE,",
+        "       CREATION_USER, RESOLUTION_USER, RESOLUTION_DATE, EXP_RESOLUTION_DATE, BATCH_NAME, SELECTED_FROM_DATE,",
+        "       SELECTED_TO_DATE, SELECTED_RATE_ID, OFF_CYCLE_STATEMENT, IND_BILLING_OR_CREATE_DATE, PROCESSING_INFO, ID_OFFICE,",
+        "       SESSION_ID, IND_CYCLE_PRINTING, SELECTED_ACCOUNT)",
+        f"VALUES (GETDATE(), GETDATE(), {u}, {p}, 1, {var}, N'{REB_ACTIVITY_STATUS_PENDING}', N'{REB_ACTIVITY_TYPE}', NULL, CAST(GETDATE() AS DATE),",
+        f"       NULL, NULL, {int(customer)}, {len(bills)}, 0.000000, {format_sql_literal(description)}, NULL, N'REBRES003', {int(creation_user)}, NULL, NULL,",
+        "       CAST(GETDATE() + 1 AS DATE), NULL, NULL, NULL, NULL, NULL, 1, NULL, 1, NULL, 1, NULL);",
+        *info_rows,
+        f"UPDATE OUC_COMMON_ADMIN.GCCOM_BILL SET BILLING_STATUS = N'{BILL_STATUS_DISPUTED}', "
+        f"UPDATE_DATE = GETDATE(), UPDATE_USER = {u}, UPDATE_PROGRAM = {p} "
+        f"WHERE ID_BILL IN ({', '.join(str(int(b)) for b in bills)}) AND BILLING_STATUS <> N'{BILL_STATUS_DISPUTED}';",
+    ]
+
+
+def rebilling_rollback_lines(customer: int, bills: list[int], *, description: str,
+                             prior_bill_status: dict, u: str, p: str) -> list[str]:
+    """Undo of rebilling_insert_lines (RJ 2026-10-09 rollback feature):
+    delete the info rows + activity it inserted - found by DESCRIPTION tag +
+    customer + still In process (ESTREF0002), so an activity the batch already
+    processed is never touched - and put each bill back to its status before
+    the fix (only if it is still Disputed)."""
+    tag = format_sql_literal(description)
+    bl = ", ".join(str(int(b)) for b in bills)
+    act = (f"ra.DESCRIPTION = {tag} AND ra.ID_CUSTOMER = {int(customer)} "
+           f"AND ra.REB_ACTIVITY_STATUS = {format_sql_literal(REB_ACTIVITY_STATUS_PENDING)}")
+    lines = [
+        "-- only works while the activity is still In process (ESTREF0002); once processed, rebill/cancel it in the application instead",
+        "DELETE ri FROM OUC_ADMIN.GCCOM_REB_ACTIVITY_INFORMATION ri",
+        "  JOIN OUC_ADMIN.GCCOM_REBILLING_ACTIVITY ra ON ra.ID_REBILLING_ACTIVITY = ri.ID_REBILLING_ACTIVITY",
+        f" WHERE {act} AND ri.ID_BILL IN ({bl});",
+        f"DELETE ra FROM OUC_ADMIN.GCCOM_REBILLING_ACTIVITY ra WHERE {act}",
+        "   AND NOT EXISTS (SELECT 1 FROM OUC_ADMIN.GCCOM_REB_ACTIVITY_INFORMATION ri WHERE ri.ID_REBILLING_ACTIVITY = ra.ID_REBILLING_ACTIVITY);",
+    ]
+    for b in bills:
+        st = prior_bill_status.get(int(b)) or prior_bill_status.get(str(b))
+        if st and st != BILL_STATUS_DISPUTED:
+            lines.append(
+                f"UPDATE OUC_COMMON_ADMIN.GCCOM_BILL SET BILLING_STATUS = {format_sql_literal(st)}, "
+                f"UPDATE_DATE = GETDATE(), UPDATE_USER = {u}, UPDATE_PROGRAM = {p} "
+                f"WHERE ID_BILL = {int(b)} AND BILLING_STATUS = {format_sql_literal(BILL_STATUS_DISPUTED)};")
+        else:
+            lines.append(f"-- bill {int(b)}: status before the fix unknown - set it back by hand if needed")
+    return lines
+
+
+def _parse_states(raw) -> dict[str, list[str]]:
+    """'id:STATUS,id:STATUS' -> {STATUS: [ids]} (rollback helper)."""
+    out: dict[str, list[str]] = {}
+    for part in str(raw or "").split(","):
+        if ":" not in part:
+            continue
+        i, s = part.split(":", 1)
+        if i.strip().isdigit() and s.strip():
+            out.setdefault(s.strip(), []).append(i.strip())
+    return out
+
+
+def followup_block(description: str) -> str:
+    """The /* */ monitoring query appended to a script (kept by 'clean')."""
+    return (f"\n/* Follow-up: open rebilling activities created by this script "
+            f"(DESCRIPTION = '{description}', not Rejected/Rebilled)\n"
+            + build_followup_query(description) + "\n*/\n")
+
+
+def build_followup_query(description: str = None) -> str:
     """Open rebilling activities created by this fix (DESCRIPTION tag), with
     the status in English. Appended to every fix script as a /* */ comment so
     it survives the 'clean' option (which only strips -- lines)."""
+    description = description or REB_DESCRIPTION
     final = ", ".join(format_sql_literal(s) for s in REB_ACTIVITY_FINAL_STATUSES)
     return f"""SELECT ra.ID_REBILLING_ACTIVITY,
        ra.CREATE_DATE,
@@ -106,7 +192,7 @@ def build_followup_query() -> str:
 FROM OUC_ADMIN.GCCOM_REBILLING_ACTIVITY ra WITH (NOLOCK)
 LEFT JOIN OUC_ADMIN.GCCOM_REB_ACTIVITY_STATUS st ON st.COD_DEVELOP = ra.REB_ACTIVITY_STATUS
 LEFT JOIN GCTS_DICTIONARY d ON d.ID = st.NAME_TYPE_XI18N AND d.LOCALE = 'EN'
-WHERE ra.DESCRIPTION = {format_sql_literal(REB_DESCRIPTION)}
+WHERE ra.DESCRIPTION = {format_sql_literal(description)}
   AND ra.REB_ACTIVITY_STATUS NOT IN ({final})   -- not Rejected (resolved) / Rebilled
 ORDER BY ra.CREATE_DATE DESC;"""
 FIX_USER_DEFAULT = "RMA"
@@ -148,7 +234,17 @@ SELECT a.ID_ITEM_TO_BILL AS ANOM_ID, cs.ID_OFFERED_SERVICE AS ID_OFFERED_SERVICE
        (SELECT STRING_AGG(CAST(g.ID_ITEM_TO_BILL AS varchar(20)), ',') WITHIN GROUP (ORDER BY g.ID_ITEM_TO_BILL)
           FROM GCCOM_ITEMS_TO_BILL g
          WHERE g.ID_BILLING_SERVICE = sk.SBS AND g.INI_DATE = sk.SINI AND g.END_DATE = sk.SEND
-           AND g.STATUS = {anomalous}) AS SAN_GROUP_IDS
+           AND g.STATUS = {anomalous}) AS SAN_GROUP_IDS,
+       -- RJ 2026-10-09 (rollback): before-states, as ID:STATUS lists
+       (SELECT STRING_AGG(CAST(rr.ID_READING AS varchar(20)) + ':' + ISNULL(rr.READ_STATUS, ''), ',')
+          FROM {READING_TABLE} rr
+         WHERE rr.ID_READING IN (SELECT rit.ID_READING FROM {rit_t} rit WHERE rit.ID_ITEM_TO_BILL = a.ID_ITEM_TO_BILL)) AS READING_STATES,
+       (SELECT STRING_AGG(CAST(an.ID_ANOMALOUS AS varchar(20)) + ':' + an.ANOMALOUS_STATUS, ',')
+          FROM OUC_ADMIN.GCCOM_ANOMALOUS an
+         WHERE an.ANOMALOUS_STATUS IN ({', '.join(format_sql_literal(s) for s in ANOMALOUS_OPEN_STATUSES)})
+           AND an.ID_ITEM_TO_BILL IN (SELECT g.ID_ITEM_TO_BILL FROM GCCOM_ITEMS_TO_BILL g
+                                      WHERE g.ID_BILLING_SERVICE = sk.SBS AND g.INI_DATE = sk.SINI AND g.END_DATE = sk.SEND
+                                        AND g.STATUS = {anomalous})) AS ANOM_STATES
 FROM GCCOM_ITEMS_TO_BILL a
 CROSS APPLY (
     SELECT TOP 1 b.ID_ITEM_TO_BILL, b.ID_BILL FROM GCCOM_ITEMS_TO_BILL b
@@ -192,12 +288,15 @@ def build_fix_script(rows: list[dict], *, user: str = FIX_USER_DEFAULT, program:
     dn = REB_DN_STATUS_BATCH if batch else REB_DN_STATUS_CLAIMED
     warnings: list[str] = []
     blocks: list[str] = []
+    rb_blocks: list[str] = []   # RJ 2026-10-09: matching rollback, same order
     n_read = n_reb = n_itb = n_info = n_kept = n_anom_items = 0
+    st = format_sql_literal
     for i, r in enumerate(rows, start=1):
         anom = r.get("anom_id")
         acct = r.get("account") or ""
         lines = [f"-- [{i}] Account {acct}, NISS {r.get('niss') or ''}: duplicate ITB {anom} (Anomalous) - billed twin "
                  f"{r.get('billed_id')} / bill {r.get('billed_id_bill')}"]
+        rb = [f"-- [{i}] ROLLBACK account {acct}, duplicate ITB {anom}"]
         is_water = str(r.get("id_offered_service") or "") == str(OFFERED_WATER)
         san_ids = [x for x in str(r.get("san_anom_ids") or "").split(",") if x.strip().isdigit()]
         san_group = [x for x in str(r.get("san_group_ids") or "").split(",") if x.strip().isdigit()] or san_ids
@@ -224,6 +323,23 @@ def build_fix_script(rows: list[dict], *, user: str = FIX_USER_DEFAULT, program:
             f"UPDATE OUC_ADMIN.GCCOM_ITEMS_TO_BILL SET STATUS = {format_sql_literal(ITB_STATUS_CANCELLED)}, "
             f"UPDATE_DATE = GETDATE(), UPDATE_USER = {u}, UPDATE_PROGRAM = {p} "
             f"WHERE ID_ITEM_TO_BILL IN ({', '.join(cancel_ids)}) AND STATUS = {format_sql_literal(ITB_STATUS_ANOMALOUS)};")
+        rb.append(f"UPDATE OUC_ADMIN.GCCOM_ITEMS_TO_BILL SET STATUS = {st(ITB_STATUS_ANOMALOUS)}, UPDATE_DATE = GETDATE(), "
+                  f"UPDATE_USER = {u}, UPDATE_PROGRAM = {p} WHERE ID_ITEM_TO_BILL IN ({', '.join(cancel_ids)}) "
+                  f"AND STATUS = {st(ITB_STATUS_CANCELLED)};")
+        if keep_san:
+            rb.append(f"UPDATE OUC_ADMIN.GCCOM_ITEMS_TO_BILL SET STATUS = {st(ITB_STATUS_ANOMALOUS)}, UPDATE_DATE = GETDATE(), "
+                      f"UPDATE_USER = {u}, UPDATE_PROGRAM = {p} WHERE ID_ITEM_TO_BILL = {int(keep_san)} "
+                      f"AND STATUS = {st(ITB_STATUS_PENDING)};")
+        if is_water and san_group:
+            for prev, ids_ in _parse_states(r.get("anom_states")).items():
+                rb.append(f"UPDATE OUC_ADMIN.GCCOM_ANOMALOUS SET ANOMALOUS_STATUS = {st(prev)}, UPDATE_DATE = GETDATE(), "
+                          f"UPDATE_USER = {u}, UPDATE_PROGRAM = {p} WHERE ID_ANOMALOUS IN ({', '.join(ids_)}) "
+                          f"AND ANOMALOUS_STATUS = {st(ANOMALOUS_STATUS_CANCELLED)};")
+        for prev, ids_ in _parse_states(r.get("reading_states")).items():
+            if prev != READ_STATUS_BILLED:   # already Billed -> the fix did not touch it
+                rb.append(f"UPDATE {READING_TABLE} SET READ_STATUS = {st(prev)}, UPDATE_DATE = GETDATE(), "
+                          f"UPDATE_USER = {u}, UPDATE_PROGRAM = {p} WHERE ID_READING IN ({', '.join(ids_)}) "
+                          f"AND READ_STATUS = {st(READ_STATUS_BILLED)};")
         if keep_san:
             n_kept += 1
             lines += [
@@ -283,39 +399,21 @@ def build_fix_script(rows: list[dict], *, user: str = FIX_USER_DEFAULT, program:
                 n_reb += 1
                 n_info += len(bills)
                 var = f"@ID_REB_{i}"
-                info_rows = []
-                for bid in bills:
-                    info_rows += [
-                        "INSERT INTO OUC_ADMIN.GCCOM_REB_ACTIVITY_INFORMATION (CREATE_DATE, UPDATE_DATE, UPDATE_USER, UPDATE_PROGRAM, OPTIMIST_LOCK,",
-                        "       ID_REB_ACTIVITY_INFORMATION, ID_REBILLING_ACTIVITY, ID_BILL, REB_DN_STATUS, IND_RECALCULATE, COD_EXP_DATE_TYPE,",
-                        "       SESSION_ID, ID_REB_ACT_MASSIVE_ASSOC, IND_USG_MODIF)",
-                        f"VALUES (GETDATE(), GETDATE(), {u}, {p}, 1, NEXT VALUE FOR OUC_ADMIN.SEC_GCCOM_REBACTIVITYINFORMAT1, {var},",
-                        f"       {bid}, N'{dn}', 0, NULL, NULL, NULL, NULL);",
-                    ]
-                disputed = [
-                    f"UPDATE OUC_COMMON_ADMIN.GCCOM_BILL SET BILLING_STATUS = N'{BILL_STATUS_DISPUTED}', "
-                    f"UPDATE_DATE = GETDATE(), UPDATE_USER = {u}, UPDATE_PROGRAM = {p} "
-                    f"WHERE ID_BILL IN ({', '.join(str(b) for b in bills)}) AND BILLING_STATUS <> N'{BILL_STATUS_DISPUTED}';"
-                ]
                 lines += [
                     f"-- ready usage {usage:g} > 0 -> rebilling of bill(s) {', '.join(str(b) for b in bills)}" + (" (processed by batch)" if batch else ""),
-                    f"DECLARE {var} NUMERIC(15, 0) = NEXT VALUE FOR OUC_ADMIN.SEC_GCCOM_REBILLINGACTIVITY1;",
-                    "INSERT INTO oucewa.OUC_ADMIN.GCCOM_REBILLING_ACTIVITY (CREATE_DATE, UPDATE_DATE, UPDATE_USER, UPDATE_PROGRAM,",
-                    "       OPTIMIST_LOCK, ID_REBILLING_ACTIVITY, REB_ACTIVITY_STATUS, REB_ACTIVITY_TYPE, ID_RECLAMATION, INITIAL_CREATION_DATE,",
-                    "       DIVERGENT_AMOUNT, ID_CURRENCY, ID_CUSTOMER, BILLS_NUMBER, AFFECTED_AMOUNT, DESCRIPTION, IND_COMPLEMENTARY, REASON_TYPE,",
-                    "       CREATION_USER, RESOLUTION_USER, RESOLUTION_DATE, EXP_RESOLUTION_DATE, BATCH_NAME, SELECTED_FROM_DATE,",
-                    "       SELECTED_TO_DATE, SELECTED_RATE_ID, OFF_CYCLE_STATEMENT, IND_BILLING_OR_CREATE_DATE, PROCESSING_INFO, ID_OFFICE,",
-                    "       SESSION_ID, IND_CYCLE_PRINTING, SELECTED_ACCOUNT)",
-                    f"VALUES (GETDATE(), GETDATE(), {u}, {p}, 1, {var}, N'{REB_ACTIVITY_STATUS_PENDING}', N'{REB_ACTIVITY_TYPE}', NULL, CAST(GETDATE() AS DATE),",
-                    f"       NULL, NULL, {int(cust)}, {len(bills)}, 0.000000, {format_sql_literal(REB_DESCRIPTION)}, NULL, N'REBRES003', {int(creation_user)}, NULL, NULL,",
-                    "       CAST(GETDATE() + 1 AS DATE), NULL, NULL, NULL, NULL, NULL, 1, NULL, 1, NULL, 1, NULL);",
-                    *info_rows,
-                    # RJ 2026-10-06: "then the gccom_bill should be updated to Disputed"
-                    *disputed,
+                    # RJ 2026-10-06: activity + info rows, then bills -> Disputed
+                    *rebilling_insert_lines(var, int(cust), bills, u=u, p=p, dn=dn,
+                                            creation_user=creation_user, description=REB_DESCRIPTION),
                 ]
+                prior = {int(bill): r.get("bill_status")}
+                if r.get("san_id_bill"):
+                    prior[int(r.get("san_id_bill"))] = r.get("san_bill_status")
+                rb += rebilling_rollback_lines(int(cust), bills, description=REB_DESCRIPTION,
+                                               prior_bill_status=prior, u=u, p=p)
         else:
             lines.append("-- ready usage = 0 -> no rebilling")
         blocks.append("\n".join(lines))
+        rb_blocks.append("\n".join(rb))
     header = [
         "-- DOUBLE ITB fix script - generated by ScriptGen",
         f"-- Generated (UTC): {_dt.datetime.now(_dt.timezone.utc).isoformat()}",
@@ -334,11 +432,22 @@ def build_fix_script(rows: list[dict], *, user: str = FIX_USER_DEFAULT, program:
         text = "\n".join(l for l in text.splitlines() if not l.strip().startswith("--")) + "\n"
     if n_reb:
         # /* */ (not --) so it is kept even with the clean option.
-        text += ("\n/* Follow-up: open rebilling activities created by this fix "
-                 f"(DESCRIPTION = '{REB_DESCRIPTION}', not Rejected/Rebilled)\n"
-                 + build_followup_query() + "\n*/\n")
-    return {"sql_text": text, "itb_count": n_itb, "reading_count": n_read, "rebilling_count": n_reb,
+        text += followup_block(REB_DESCRIPTION)
+    rollback = rollback_header("DOUBLE ITB fix", user, program) + "\n\n".join(rb_blocks) + "\n" if rb_blocks else ""
+    return {"sql_text": text, "rollback_sql": rollback, "itb_count": n_itb, "reading_count": n_read, "rebilling_count": n_reb,
             "rebilling_bill_count": n_info, "sanitary_kept_count": n_kept, "warnings": warnings}
+
+
+def rollback_header(what: str, user: str, program: str) -> str:
+    import datetime as _dt
+    return "\n".join([
+        f"-- ROLLBACK of the {what} script - generated by ScriptGen together with the fix",
+        f"-- Generated (UTC): {_dt.datetime.now(_dt.timezone.utc).isoformat()} - user / program: {user} / {program}",
+        "-- Puts every row back to the status it had when the fix was GENERATED (re-read live at that moment).",
+        "-- Every UPDATE only touches rows still in the status the fix set, so rows changed since are left alone.",
+        "-- Keep this with the fix; run only if the fix has to be undone. Review before running.",
+        "",
+    ]) + "\n"
 
 
 def build_double_itb_query() -> str:

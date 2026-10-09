@@ -46,6 +46,7 @@ from app.core import disconnection_tnb
 from app.core import double_itb
 from app.core import wrong_billed_consumption
 from app.core import unusual_sanitary
+from app.core import rebilling_monitor
 from app.core import wrong_bill_perc_dist
 from app.core import wrong_bill_sanitary_zero
 from app.core import wrong_bill_first_regularized
@@ -1261,6 +1262,12 @@ def overview_stats(user: str = Depends(require_login)):
         script_history.KIND_ROLLBACK: "Rollback",
         script_history.KIND_DATE_ANOMALY: "DIFF DATES",
         script_history.KIND_BILL_ISSUANCE: "Bill Issuance",
+        script_history.KIND_INCORRECT_BILLING_PERIOD: "Incorrect Billing Period",
+        script_history.KIND_WRONG_STUCK_HIERARCHY: "Wrong Stuck in Hierarchy",
+        script_history.KIND_DOUBLE_ITB: "DOUBLE ITB",
+        script_history.KIND_HIGH_SANITARY_REBILLING: "High Sanitary Rebilling",
+        script_history.KIND_RELEASE: "Bill Issuance Release",
+        script_history.KIND_GENERATED_ROLLBACK: "Rollback (generated)",
     }
     kind_counts: dict[str, int] = {}
     for e in entries:
@@ -1365,7 +1372,24 @@ _OVERVIEW_COUNTERS = {
     "wrongbill_case4": lambda conn, user: wrong_bill_first_regularized_detect(body=None, user=user)["count"],
     "anomstats_billing": lambda conn, user: int(mssql.run_query(conn, anomaly_stats.build_billing_count_query()).rows[0][0]),
     "anomstats_reading": lambda conn, user: int(mssql.run_query(conn, anomaly_stats.build_reading_count_query()).rows[0][0]),
+    # RJ 2026-10-09: ScriptGen-tagged rebilling activities still open
+    "rebillingmonitor": lambda conn, user: rebilling_monitor_detect(user=user)["open_count"],
 }
+
+# RJ 2026-10-09: daily digest e-mail = the same counters, readable labels.
+_DIGEST_LABELS = {
+    "dateanomaly": "DIFF DATES anomalies", "hierarchy": "Hierarchy - pending primaries",
+    "billissuance_case1": "Bill Issuance Case 1", "billissuance_case2": "Bill Issuance Case 2",
+    "billissuance_case3": "Bill Issuance Case 3", "billissuance_case4": "Bill Issuance Case 4 (unclassified)",
+    "incorrectbillingperiod": "Incorrect Billing Period", "tnbcycledisc": "TNB Cycle/Disc",
+    "wrongstuckhierarchy": "Wrong Stuck in Hierarchy ITB", "wrongstuckhierarchy_sanitary": "Wrong Stuck - Sanitary vs Water",
+    "disconnectiontnb": "Disconnection TNB", "doubleitb": "DOUBLE ITB (needs rebilling)",
+    "unusualsanitary": "Wrong Bill Case 1 - High Sanitary", "wrongbill_case2": "Wrong Bill Case 2",
+    "wrongbill_case3": "Wrong Bill Case 3", "wrongbill_case4": "Wrong Bill Case 4",
+    "rebillingmonitor": "Open ScriptGen rebillings",
+}
+alerts.register_digest_counters({k: (_DIGEST_LABELS.get(k, k), fn) for k, fn in _OVERVIEW_COUNTERS.items()
+                                 if not k.startswith("anomstats")})
 
 
 @app.get("/api/overview/count/{key}")
@@ -3463,6 +3487,9 @@ def bill_issuance_release_complete(body: BillIssuanceReleaseCompleteRequest, use
         warnings.append(f"Case 3 scan hit its {data.get('limit')} row limit - narrow by billing period to be sure every account is included.")
     if skipped:
         warnings.append(f"{len(skipped)} selected account(s) are not complete any more and were left out.")
+    if script.bill_count:
+        _record_script(user, script_history.KIND_RELEASE, f"{label} release ({script.bill_count} account(s))",
+                       body.program, script.sql_text, script.bill_count, len(warnings))
     return {"sql_text": script.sql_text, "account_count": script.bill_count, "skipped": skipped, "warnings": warnings}
 
 
@@ -4358,6 +4385,81 @@ def unusual_sanitary_detect(user: str = Depends(require_login)):
     }
 
 
+def _record_script(user: str, kind: str, title: str, program: str, sql_text: str,
+                   statements: int = 0, warnings: int = 0) -> None:
+    """RJ 2026-10-09 ("script history for all menus"): best-effort audit
+    entry for a generated script - never breaks the generate itself."""
+    try:
+        script_history.record_script(
+            load_config().internal_db_path, username=user, kind=kind, schema_name="",
+            table_name=title, program=program or "", statement_count=int(statements or 0),
+            warning_count=int(warnings or 0), sql_text=sql_text or "", source=script_history.SOURCE_WEB,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ---------------------------------------------------------------------
+# Rebilling Monitor (RJ 2026-10-09) - every rebilling activity a ScriptGen
+# script inserted (DESCRIPTION tag), status in English. See
+# app/core/rebilling_monitor.py.
+# ---------------------------------------------------------------------
+@app.post("/api/rebilling-monitor/detect")
+def rebilling_monitor_detect(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, rebilling_monitor.build_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    out = rebilling_monitor.shape(rows)
+    out["stuck_days_default"] = rebilling_monitor.DEFAULT_STUCK_DAYS
+    return out
+
+
+class UnusualSanitaryRebillRequest(BaseModel):
+    bill_ids: list[str]
+    user: str = double_itb.FIX_USER_DEFAULT
+    program: str = unusual_sanitary.FIX_PROGRAM_DEFAULT
+    creation_user: int = double_itb.REB_CREATION_USER_DEFAULT
+    batch: bool = True
+    clean: bool = False
+
+
+@app.post("/api/unusual-sanitary/rebilling")
+def unusual_sanitary_rebilling(body: UnusualSanitaryRebillRequest, user: str = Depends(require_editor)):
+    """RJ 2026-10-09: rebilling script for the selected high-Sanitary bills -
+    one activity per Sanitary bill holding the Sanitary + Water bill(s), same
+    criteria as DOUBLE ITB, DESCRIPTION 'WRONG-SANITARY HIGH BILL', plus the
+    monitoring query. Re-reads the live state first (open rebillings skipped)."""
+    ids = [str(x).strip() for x in body.bill_ids if str(x).strip().isdigit()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Select at least one bill.")
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, unusual_sanitary.build_rebilling_context_query(ids))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): v for c, v in zip(res.columns, r)} for r in res.rows]
+    program = (body.program or "").strip() or unusual_sanitary.FIX_PROGRAM_DEFAULT
+    out = unusual_sanitary.build_rebilling_script(
+        rows, user=(body.user or "").strip() or double_itb.FIX_USER_DEFAULT,
+        program=program, creation_user=body.creation_user, batch=body.batch, clean=body.clean)
+    _record_script(user, script_history.KIND_HIGH_SANITARY_REBILLING,
+                   f"High Sanitary rebilling ({out['rebilling_count']} activity(ies), {out['bill_count']} bill(s))",
+                   program, out["sql_text"], out["rebilling_count"], len(out["warnings"]))
+    if out.get("rollback_sql"):
+        _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "ROLLBACK of High Sanitary rebilling",
+                       program, out["rollback_sql"], out["rebilling_count"], 0)
+    return out
+
+
 @app.post("/api/wrong-bill/perc-dist/detect")
 def wrong_bill_perc_dist_detect(user: str = Depends(require_login)):
     """Wrong Bill Case 2 (RJ 2026-10-01): % distribution primaries (calc
@@ -4580,6 +4682,19 @@ def anomaly_stats_reading(user: str = Depends(require_login)):
             "generated_at": anomaly_stats.generated_at(), "seconds": round(time.time() - t0, 1)}
 
 
+@app.post("/api/alerts/digest/send-now")
+def daily_digest_send_now(user: str = Depends(require_editor)):
+    """RJ 2026-10-09: run the daily digest now (sends even if nothing is open,
+    so the e-mail can be checked)."""
+    return alerts.run_daily_digest(force=True)
+
+
+@app.get("/api/alerts/digest/status")
+def daily_digest_status(user: str = Depends(require_login)):
+    config = load_config()
+    return {"log": alerts.recent_log(config.internal_db_path, alerts.DIGEST_KEY)}
+
+
 @app.get("/api/alerts/unusual-sanitary/status")
 def unusual_sanitary_alert_status(user: str = Depends(require_login)):
     config = load_config()
@@ -4696,6 +4811,13 @@ def double_itb_generate(body: DoubleItbGenerateRequest, user: str = Depends(requ
     if skipped:
         out["warnings"].append(f"{len(skipped)} selected item(s) are no longer Anomalous with a Billed twin and were left out.")
     out["skipped"] = skipped
+    program = (body.program or "").strip() or double_itb.FIX_PROGRAM_DEFAULT
+    _record_script(user, script_history.KIND_DOUBLE_ITB,
+                   f"DOUBLE ITB fix ({len(rows)} duplicate(s), {out['rebilling_count']} rebilling)",
+                   program, out["sql_text"], out["itb_count"], len(out["warnings"]))
+    if out.get("rollback_sql"):
+        _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "ROLLBACK of DOUBLE ITB fix",
+                       program, out["rollback_sql"], out["itb_count"], 0)
     return out
 
 

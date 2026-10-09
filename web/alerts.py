@@ -155,14 +155,104 @@ def run_unusual_sanitary(force: bool = False) -> dict:
         return {"status": "no_cases", "row_count": 0}
     subject, body = unusual_sanitary.build_email(rows, today)
     csv_bytes = unusual_sanitary.rows_to_csv(rows).encode("utf-8-sig")
+    attachments = [(f"unusual_high_sanitary_{today}.csv", csv_bytes, "text/csv")]
+    # RJ 2026-10-09: "when you send the email, add the script" - the rebilling
+    # script for every detected bill (default user/program/creation user,
+    # batch on), re-checked live like the page's Generate. Attached as .sql
+    # and pasted at the end of the body. A failure here never blocks the mail.
     try:
-        send_email(cfg.email, subject, body,
-                   attachments=[(f"unusual_high_sanitary_{today}.csv", csv_bytes, "text/csv")])
+        ids = sorted({str(r.get("id_bill")) for r in rows if str(r.get("id_bill") or "").isdigit()})
+        ctx = mssql.run_query(conn, unusual_sanitary.build_rebilling_context_query(ids))
+        ctx_rows = [{c.lower(): v for c, v in zip(ctx.columns, r)} for r in ctx.rows]
+        script = unusual_sanitary.build_rebilling_script(ctx_rows)
+        attachments.append((f"wrong_sanitary_high_rebilling_{today}.sql", script["sql_text"].encode("utf-8"), "text/plain"))
+        if script.get("rollback_sql"):
+            attachments.append((f"wrong_sanitary_high_rebilling_{today}_ROLLBACK.sql",
+                                script["rollback_sql"].encode("utf-8"), "text/plain"))
+        body += (f"\n\n==== REBILLING SCRIPT ({script['rebilling_count']} activit"
+                 f"{'y' if script['rebilling_count'] == 1 else 'ies'}, {script['bill_count']} bill row(s)) - "
+                 f"also attached as .sql. Review before running. ====\n\n" + script["sql_text"])
+    except Exception as exc:  # noqa: BLE001
+        body += f"\n\n(Rebilling script could not be generated: {exc} - use ScriptGen > Wrong Bill > Case 1 > Generate Rebilling Script.)"
+    try:
+        send_email(cfg.email, subject, body, attachments=attachments)
     except Exception as exc:  # noqa: BLE001
         log_attempt(db, key, today, "error", len(rows), f"E-mail failed: {exc}")
         return {"status": "error", "row_count": len(rows), "detail": f"E-mail failed: {exc}"}
     log_attempt(db, key, today, "sent", len(rows), "Sent to " + ", ".join(cfg.email.recipients))
     return {"status": "sent", "row_count": len(rows)}
+
+
+# ----------------------------------------------------------- daily digest
+# RJ 2026-10-09 (picked from the suggested features): one morning e-mail with
+# every menu's count - only sections that have cases. The counters are the
+# Overview cards' own functions, handed over by web/server.py at startup
+# (register_digest_counters) because server.py imports this module.
+DIGEST_KEY = "daily_digest"
+_digest_counters: dict = {}   # key -> (label, fn(conn, user) -> int)
+
+
+def register_digest_counters(counters: dict) -> None:
+    _digest_counters.clear()
+    _digest_counters.update(counters)
+
+
+def _done_today(db: str, key: str, run_date: str) -> bool:
+    """Digest: one run per day - 'sent' or 'no_cases' both count as done."""
+    with _connect(db) as c:
+        row = c.execute(f"SELECT 1 FROM {_TABLE} WHERE alert_key=? AND run_date=? AND status IN ('sent','no_cases') LIMIT 1",
+                        (key, run_date)).fetchone()
+    return row is not None
+
+
+def build_digest(results: list[tuple[str, Optional[int], str]], run_date: str) -> tuple[str, str]:
+    """results: (label, count or None, error). Returns (subject, body)."""
+    hits = [(l, n) for l, n, e in results if n]
+    errs = [(l, e) for l, n, e in results if n is None and e]
+    total = sum(n for _, n in hits)
+    subject = f"[ScriptGen] Daily digest {run_date}: {total} case(s) in {len(hits)} area(s)"
+    lines = ["Hello RJ,", "", f"ScriptGen morning digest for {run_date}. Only areas with cases are listed.", ""]
+    if hits:
+        w = max(len(l) for l, _ in hits)
+        lines += [f"  {l.ljust(w)}  {n:>6,}" for l, n in sorted(hits, key=lambda x: -x[1])]
+    else:
+        lines.append("  Nothing to review today.")
+    if errs:
+        lines += ["", "Could not be counted (check the tunnel / the page):"] + [f"  - {l}: {e[:150]}" for l, e in errs]
+    lines += ["", "Open ScriptGen > Overview for details.", "", "-- Sent automatically by ScriptGen"]
+    return subject, "\n".join(lines)
+
+
+def run_daily_digest(force: bool = False) -> dict:
+    cfg = load_config()
+    today = datetime.date.today().isoformat()
+    db = cfg.internal_db_path
+    if not force and _done_today(db, DIGEST_KEY, today):
+        return {"status": "already_sent", "run_date": today}
+    conn = cfg.get_active_connection()
+    if not conn:
+        log_attempt(db, DIGEST_KEY, today, "error", None, "No database connection configured.")
+        return {"status": "error", "detail": "No database connection configured."}
+    if not _digest_counters:
+        return {"status": "error", "detail": "Digest counters not registered (server not started?)."}
+    results = []
+    for key, (label, fn) in _digest_counters.items():
+        try:
+            results.append((label, int(fn(conn, "digest") or 0), ""))
+        except Exception as exc:  # noqa: BLE001 - one failing area must not stop the digest
+            results.append((label, None, str(getattr(exc, "detail", exc))))
+    hits = sum(1 for _, n, _ in results if n)
+    if not hits and not force:
+        log_attempt(db, DIGEST_KEY, today, "no_cases", 0, "Nothing to report.")
+        return {"status": "no_cases", "results": results}
+    subject, body = build_digest(results, today)
+    try:
+        send_email(cfg.email, subject, body)
+    except Exception as exc:  # noqa: BLE001
+        log_attempt(db, DIGEST_KEY, today, "error", hits, f"E-mail failed: {exc}")
+        return {"status": "error", "detail": f"E-mail failed: {exc}", "results": results}
+    log_attempt(db, DIGEST_KEY, today, "sent", hits, "Sent to " + ", ".join(cfg.email.recipients))
+    return {"status": "sent", "areas": hits, "results": results}
 
 
 # -------------------------------------------------------------- scheduler
@@ -180,11 +270,17 @@ def _tick() -> None:
         return
     today = now.date().isoformat()
     db = cfg.internal_db_path
+    retry = datetime.timedelta(minutes=max(1, int(em.retry_minutes)))
+    # daily digest (RJ 2026-10-09): once a day; errors retried on the same cadence
+    if not _done_today(db, DIGEST_KEY, today):
+        last_d = last_attempt_at(db, DIGEST_KEY, today)
+        if not last_d or (now - last_d) >= retry:
+            run_daily_digest()
     key = unusual_sanitary.ALERT_KEY
     if sent_today(db, key, today):
         return
     last = last_attempt_at(db, key, today)
-    if last and (now - last) < datetime.timedelta(minutes=max(1, int(em.retry_minutes))):
+    if last and (now - last) < retry:
         return
     run_unusual_sanitary()
 
