@@ -2926,6 +2926,77 @@ classes prefixed `hx-`); no server or query changes.
   reading-history pop-out is shared with Bulk Checker, which gets the
   same maximize button.
 
+## Temp Dashboard (2026-10-11)
+
+RJ: "create a new menu temp dashboard, optimize and use the query that i will give
+you, I want to get all account where there is reading for them". Menu id
+`tempdashboard`, `app/core/temp_dashboard.py`, `/api/temp-dashboard/detect`
+(billing period default 10000000238, optional single account, 5-min timeout).
+Source support_admin.ddi_new_offering WHERE BILL_AMOUNT_OCT IS NULL; flags
+WITH_ELE / WITH_READING_ELE / WITH_WATER / WITH_READING_WATER over active services
+(status not ESTSC00001/4/5), readings READ_STATUS <> 0500STSRED, READING_TYPE IN
+(TIPTL00003, TIPTL00005). Optimized: 4 correlated EXISTS per row -> services and
+the period's readings read once, flags = MAX() per account (same answer). One row
+per account. FIX flagged to RJ: his WITH_READING_WATER block used
+id_offered_service = 1 (copy of the Electricity block) - uses 19 here.
+Page: KPI cards (all / with a reading / no reading / with Electricity / Electricity
+reading / with Water / Water reading) filter + tint rows; default view = with a
+reading; table shows the first 2,000 rows, Copy accounts / CSV export cover all.
+Live 2026-10-11: the app login (ouc_read_only) gets "SELECT permission was denied on
+SUPPORT_ADMIN.ddi_new_offering" -> RJ: "replace table to EWA_DDI_ELIGIBILITY"
+(OUC_COMMON_ADMIN, same columns, readable). There "no October bill" is 0, never NULL
+(0 NULL / 56,883 zero / 166,674 rows), so the filter is ISNULL(BILL_AMOUNT_OCT,0) = 0.
+Full run: 56,883 accounts, 35,148 with a reading (Electricity 31,180 of 56,857;
+Water 34,563 of 56,794), ~15.5s; account 1099311910 = YES/NO/YES/NO.
+Same day: ELE_BILLED / WATER_BILLED columns. RJ: "i am saying read_status =
+'7000STSRED'" - billed = the service's sector supply has a reading of the same
+period and reading types (TIPTL00003/TIPTL00005) with READ_STATUS = 7000STSRED
+(`rb` CTE; replaces a first GCCOM_BILL-based version).
+KPI cards "Electricity / Water read, not billed"; rows amber when read but not billed.
+Same day: RJ "to consider with reading, the read_status should be '5000STSRED',
+'7000STSRED',6000STSRED" - WITH_READING_* now READ_STATUS IN (5000 Consumo Anomalo,
+6000 Enviado a Facturar, 7000 Facturada) instead of <> 0500STSRED (`READING_STATUSES`).
+Same day: RJ "add filters, with reading ele, not billed ele, with reading water, not
+billed water or both" - filter row has an Electricity and a Water dropdown (Any / With
+reading / Read, not billed / Billed / No reading) and Match = Both (AND) / Either (OR);
+combined with the KPI card and search; Copy / CSV follow the filters. Clear resets.
+Same day: RJ "change it bill_amount_set is null then main focus for now is billing
+period september" - source filter now BILL_AMOUNT_SET (`BILL_AMOUNT_COLUMN`), default
+period 10000000237 (9-September 2026). Live: BILL_AMOUNT_SET has 0 NULLs / 3,248 zeros,
+so the filter stays ISNULL(BILL_AMOUNT_SET, 0) = 0 (covers "is null" + stored zeros).
+Same day: RJ "let's focus on this accounts for now" (387 accounts). The Account box is
+now a textarea: paste accounts (one per line / comma / space, an "account" header is
+ignored); `temp_dashboard.parse_accounts` -> `AND o.ACCOUNT IN (...)`. The route returns
+`requested_accounts` + `not_found`; the summary lists pasted accounts that came back
+missing. A pasted list switches the KPI view to All; the list is remembered per browser.
+Live, September (10000000237), the 387: all in EWA_DDI_ELIGIBILITY with BILL_AMOUNT_SET 0;
+376 with a reading / 11 without; Electricity read 337, billed 220, read-not-billed 117;
+Water read 362, billed 157, read-not-billed 205; 79 have no September bill in GCCOM_BILL.
+Same day: RJ "allow to add multiple account filter same as what i pasted" - the
+filter-row Search is a textarea too: one value = contains search, several pasted
+accounts (line / comma / space, "account" header ignored) = exact list filter on the
+loaded rows; shows "N accounts pasted - M not in results" (hover lists the missing).
+Clear also empties it. Combines with the KPI card and the Electricity / Water filters.
+Equivalence proven on 300 real payment forms (GCCOM_PAYMENT_FORM sample, same
+logic): original 28.8s vs optimized 6.0s, 0 flag differences in 1,200 flags; the
+Water-reading fix changes 110 of 300 rows (as given: 266 YES = same as Electricity;
+fixed: 178 YES).
+
+## Pending Service Request menu + Overview card (2026-10-09)
+
+RJ's query kept as given (`app/core/pending_service_request.py`,
+`/api/pending-sr/detect`, menu id `pendingsr`): SRs of responsible employees
+10000000620 / 10000008456 with a GCGT_WF_PACTIVITY comment LIKE '%JIRA%', status not
+SREQSTA207/003/004/203, status in English, first JIRA comment. Added columns only
+(same rows): CREATION_SR_DATE, AGE_DAYS, SERVREQ_STATUS, SERVREQ_TYPE, responsible
+employee. Page: one KPI card per status (own colour, rows tinted the same), "Older
+than N days" card (default 30, rows red), search, Jira number parsed from the
+comment ("Jira 19097", "CLEWAOUCEA-18781", "18589 Jira"), copy SR codes, CSV.
+Overview card (group "Service Requests") + Overview counter + daily digest section.
+Live: 33 SRs (~2.6s) - Pending Resolution 12, Move Out Billing Type Selection 11,
+Pending Work Order Generation 6, Pending Confirmation 2, Pending Services Selection 1,
+Review reading 1; 12 older than 30 days, oldest 51 days.
+
 ## Four new features: Rebilling Monitor, script history everywhere, rollback scripts, daily digest (2026-10-09)
 
 RJ asked for suggestions and picked all four.
@@ -2956,6 +3027,15 @@ RJ asked for suggestions and picked all four.
    out - always large), incl. open ScriptGen rebillings. Once a day; nothing open = no
    e-mail; errors retried on the alert cadence. "📬 Send daily digest now" on the
    Wrong Bill Case 1 alert card (`/api/alerts/digest/send-now`, always sends).
+   Same day, RJ: "email is so bad ... send something similar as our dashboard with
+   colors and formatting" -> the digest is now an HTML e-mail (`build_digest_html`,
+   plain text kept as fallback): dark gradient header with the total, 3 KPI cards
+   (total / areas with cases / all clear), areas grouped like Overview (Wrong Bill,
+   Billing fixes, Bill Issuance, Hierarchy, TNB) each with icon, coloured left border,
+   count and a proportional bar, green "All clear" chips, amber box for areas that
+   couldn't be counted, "Open ScriptGen" button. Table layout + inline styles only so
+   Outlook renders it. "👁 Preview digest" (`/api/alerts/digest/preview`) shows the
+   layout with sample numbers without sending.
 
 ## Wrong Bill Case 1 - automatic rebilling script (2026-10-09)
 

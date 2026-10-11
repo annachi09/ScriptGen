@@ -147,6 +147,12 @@
         <button class="nav-item" data-page="anomalystats" title="Anomalies Statistics">
           <span class="nav-icon">📈</span><span class="nav-label">Anomalies Statistics</span>
         </button>
+        <button class="nav-item" data-page="tempdashboard" title="Temp Dashboard">
+          <span class="nav-icon">🧪</span><span class="nav-label">Temp Dashboard</span>
+        </button>
+        <button class="nav-item" data-page="pendingsr" title="Pending Service Request">
+          <span class="nav-icon">🎫</span><span class="nav-label">Pending Service Request</span>
+        </button>
         <button class="nav-item" data-page="rebillingmonitor" title="Rebilling Monitor">
           <span class="nav-icon">🔁</span><span class="nav-label">Rebilling Monitor</span>
         </button>
@@ -1246,6 +1252,7 @@
               <button type="button" class="btn btn-pill" id="usan-alert-refresh-btn">↻ Status</button>
               <button type="button" class="btn btn-primary" id="usan-send-now-btn">📨 Check &amp; send e-mail now</button>
               <button type="button" class="btn btn-pill" id="digest-send-now-btn" title="Counts every menu (Overview cards) and e-mails the areas that have cases">📬 Send daily digest now</button>
+              <a class="btn btn-pill" href="/api/alerts/digest/preview" target="_blank" rel="noopener" title="See the digest layout with sample numbers - nothing is sent">👁 Preview digest</a>
             </div>
           </div>
           <p class="hint-text" id="usan-alert-summary">Loading alert status…</p>
@@ -1742,6 +1749,101 @@
 
           <div class="grid-wrap" style="margin-top:14px;">
             <table class="data-grid" id="dtnb-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Temp Dashboard (RJ 2026-10-11) ===== -->
+      <section class="page" id="page-tempdashboard">
+        <header class="page-header">
+          <h1>Temp Dashboard</h1>
+          <p class="page-subtitle">Accounts of EWA_DDI_ELIGIBILITY with no September bill amount (BILL_AMOUNT_SET): active Electricity / Water services and whether they have a reading (Cycle types TIPTL00003 / TIPTL00005, status 5000 / 6000 / 7000STSRED) in the billing period.</p>
+        </header>
+        <div class="card">
+          <div class="card-header">
+            <h2>Accounts &amp; readings</h2>
+            <div class="card-header-actions">
+              <label class="field-label">Billing period</label>
+              <input id="tmpd-bp" class="text-input text-input-sm" value="10000000237" title="10000000237 = September 2026" style="width:130px;" />
+              <label class="field-label">Accounts</label>
+              <!-- RJ 2026-10-11: paste a list of accounts (one per line / comma / space); empty = all -->
+              <textarea id="tmpd-account" class="text-input text-input-sm" placeholder="(all) - paste accounts, one per line" rows="2" style="width:200px;resize:vertical;"></textarea>
+              <span class="hint-text" id="tmpd-account-count"></span>
+              <button type="button" class="btn btn-pill" id="tmpd-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="tmpd-copy-btn" disabled title="Copy the visible accounts (one per line)">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="tmpd-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="tmpd-summary">Click Scan to load.</div>
+          <div class="kpi-row" id="tmpd-kpi-row" style="margin:14px 0 4px;"></div>
+          <div class="key-panel-row" id="tmpd-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <!-- RJ 2026-10-11: "allow to add multiple account filter same as what i pasted" -->
+            <textarea id="tmpd-filter-search" class="text-input text-input-sm" rows="2" placeholder="Account… or paste many, one per line" style="width:200px;resize:vertical;"></textarea>
+            <span class="hint-text" id="tmpd-filter-search-count"></span>
+            <!-- RJ 2026-10-11: filters with reading / not billed, Electricity, Water or both -->
+            <label class="field-label">⚡ Electricity</label>
+            <select id="tmpd-f-ele" class="text-input text-input-sm">
+              <option value="">Any</option>
+              <option value="read">With reading</option>
+              <option value="notbilled">Read, not billed</option>
+              <option value="billed">Billed</option>
+              <option value="noread">No reading</option>
+            </select>
+            <label class="field-label">💧 Water</label>
+            <select id="tmpd-f-water" class="text-input text-input-sm">
+              <option value="">Any</option>
+              <option value="read">With reading</option>
+              <option value="notbilled">Read, not billed</option>
+              <option value="billed">Billed</option>
+              <option value="noread">No reading</option>
+            </select>
+            <label class="field-label">Match</label>
+            <select id="tmpd-f-mode" class="text-input text-input-sm" title="When both Electricity and Water are set">
+              <option value="and">Both (Electricity AND Water)</option>
+              <option value="or">Either (Electricity OR Water)</option>
+            </select>
+            <button type="button" class="btn btn-pill btn-sm" id="tmpd-f-clear">Clear</button>
+          </div>
+          <div class="hint-text" id="tmpd-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="tmpd-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Pending Service Request (RJ 2026-10-09) ===== -->
+      <section class="page" id="page-pendingsr">
+        <header class="page-header">
+          <h1>Pending Service Request</h1>
+          <p class="page-subtitle">Service requests of the responsible employees 10000000620 / 10000008456 that carry a JIRA comment and are not closed (status not SREQSTA207 / 003 / 004 / 203).</p>
+        </header>
+        <div class="card">
+          <div class="card-header">
+            <h2>Pending SRs with a JIRA</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="psr-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="psr-copy-btn" disabled title="Copy the SR codes (one per line)">📋 Copy SR codes</button>
+              <button type="button" class="btn btn-pill" id="psr-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="psr-summary">Click Scan to load.</div>
+          <div class="kpi-row" id="psr-kpi-row" style="margin:14px 0 4px;"></div>
+          <div class="key-panel-row" id="psr-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <input id="psr-filter-search" class="text-input text-input-sm" placeholder="SR code, Jira, NISS, comment…" style="width:240px;" />
+            <label class="field-label" title="Rows older than this are flagged">Old after (days)</label>
+            <input id="psr-old-days" class="text-input text-input-sm" type="number" min="0" value="30" style="width:70px;" />
+          </div>
+          <div class="hint-text" id="psr-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="psr-table">
               <thead><tr></tr></thead>
               <tbody></tbody>
             </table>

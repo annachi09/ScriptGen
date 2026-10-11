@@ -47,6 +47,8 @@ from app.core import double_itb
 from app.core import wrong_billed_consumption
 from app.core import unusual_sanitary
 from app.core import rebilling_monitor
+from app.core import pending_service_request
+from app.core import temp_dashboard
 from app.core import wrong_bill_perc_dist
 from app.core import wrong_bill_sanitary_zero
 from app.core import wrong_bill_first_regularized
@@ -1374,6 +1376,8 @@ _OVERVIEW_COUNTERS = {
     "anomstats_reading": lambda conn, user: int(mssql.run_query(conn, anomaly_stats.build_reading_count_query()).rows[0][0]),
     # RJ 2026-10-09: ScriptGen-tagged rebilling activities still open
     "rebillingmonitor": lambda conn, user: rebilling_monitor_detect(user=user)["open_count"],
+    # RJ 2026-10-09: pending service requests with a JIRA comment
+    "pendingsr": lambda conn, user: pending_service_request_detect(user=user)["count"],
 }
 
 # RJ 2026-10-09: daily digest e-mail = the same counters, readable labels.
@@ -1387,6 +1391,7 @@ _DIGEST_LABELS = {
     "unusualsanitary": "Wrong Bill Case 1 - High Sanitary", "wrongbill_case2": "Wrong Bill Case 2",
     "wrongbill_case3": "Wrong Bill Case 3", "wrongbill_case4": "Wrong Bill Case 4",
     "rebillingmonitor": "Open ScriptGen rebillings",
+    "pendingsr": "Pending Service Requests (JIRA)",
 }
 alerts.register_digest_counters({k: (_DIGEST_LABELS.get(k, k), fn) for k, fn in _OVERVIEW_COUNTERS.items()
                                  if not k.startswith("anomstats")})
@@ -4400,6 +4405,62 @@ def _record_script(user: str, kind: str, title: str, program: str, sql_text: str
 
 
 # ---------------------------------------------------------------------
+# Temp Dashboard (RJ 2026-10-11) - app/core/temp_dashboard.py
+# ---------------------------------------------------------------------
+class TempDashboardRequest(BaseModel):
+    billing_period: int = temp_dashboard.DEFAULT_BILLING_PERIOD
+    account: Optional[str] = None
+
+
+@app.post("/api/temp-dashboard/detect")
+def temp_dashboard_detect(body: TempDashboardRequest, user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    # RJ 2026-10-11: account box accepts a pasted list (one per line / comma / space).
+    accounts = temp_dashboard.parse_accounts(body.account)
+    try:
+        res = mssql.run_query(conn, temp_dashboard.build_query(body.billing_period, accounts or None),
+                              timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    found = {str(r.get("account")) for r in rows}
+    not_found = [a for a in accounts if a not in found]
+    yes = lambda k: sum(1 for r in rows if r.get(k) == "YES")  # noqa: E731
+    any_reading = sum(1 for r in rows if "YES" in (r.get("with_reading_ele"), r.get("with_reading_water")))
+    return {
+        "rows": rows, "count": len(rows), "elapsed_ms": res.elapsed_ms, "billing_period": body.billing_period,
+        "with_ele": yes("with_ele"), "with_reading_ele": yes("with_reading_ele"),
+        "with_water": yes("with_water"), "with_reading_water": yes("with_reading_water"),
+        "with_any_reading": any_reading, "without_reading": len(rows) - any_reading,
+        "ele_billed": yes("ele_billed"), "water_billed": yes("water_billed"),
+        "requested_accounts": len(accounts), "not_found": not_found,
+    }
+
+
+# ---------------------------------------------------------------------
+# Pending Service Request (RJ 2026-10-09) - app/core/pending_service_request.py
+# ---------------------------------------------------------------------
+@app.post("/api/pending-sr/detect")
+def pending_service_request_detect(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, pending_service_request.build_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    by_status: dict[str, int] = {}
+    for r in rows:
+        by_status[r.get("status") or "?"] = by_status.get(r.get("status") or "?", 0) + 1
+    return {"rows": rows, "count": len(rows), "by_status": by_status, "elapsed_ms": res.elapsed_ms}
+
+
+# ---------------------------------------------------------------------
 # Rebilling Monitor (RJ 2026-10-09) - every rebilling activity a ScriptGen
 # script inserted (DESCRIPTION tag), status in English. See
 # app/core/rebilling_monitor.py.
@@ -4451,9 +4512,10 @@ def unusual_sanitary_rebilling(body: UnusualSanitaryRebillRequest, user: str = D
     out = unusual_sanitary.build_rebilling_script(
         rows, user=(body.user or "").strip() or double_itb.FIX_USER_DEFAULT,
         program=program, creation_user=body.creation_user, batch=body.batch, clean=body.clean)
-    _record_script(user, script_history.KIND_HIGH_SANITARY_REBILLING,
-                   f"High Sanitary rebilling ({out['rebilling_count']} activity(ies), {out['bill_count']} bill(s))",
-                   program, out["sql_text"], out["rebilling_count"], len(out["warnings"]))
+    if out["rebilling_count"]:   # nothing generated -> nothing to keep
+        _record_script(user, script_history.KIND_HIGH_SANITARY_REBILLING,
+                       f"High Sanitary rebilling ({out['rebilling_count']} activity(ies), {out['bill_count']} bill(s))",
+                       program, out["sql_text"], out["rebilling_count"], len(out["warnings"]))
     if out.get("rollback_sql"):
         _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "ROLLBACK of High Sanitary rebilling",
                        program, out["rollback_sql"], out["rebilling_count"], 0)
@@ -4687,6 +4749,27 @@ def daily_digest_send_now(user: str = Depends(require_editor)):
     """RJ 2026-10-09: run the daily digest now (sends even if nothing is open,
     so the e-mail can be checked)."""
     return alerts.run_daily_digest(force=True)
+
+
+@app.get("/api/alerts/digest/preview")
+def daily_digest_preview(user: str = Depends(require_login)):
+    """RJ 2026-10-09: what the digest e-mail looks like, with SAMPLE numbers
+    (instant - the real digest counts every menu, which takes minutes).
+    Nothing is sent."""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(alerts.build_digest_html(_digest_sample(), datetime.now().date().isoformat()))
+
+
+def _digest_sample():
+    return [("unusualsanitary", "Wrong Bill Case 1 - High Sanitary", 2, ""),
+            ("doubleitb", "DOUBLE ITB (needs rebilling)", 59, ""),
+            ("billissuance_case2", "Bill Issuance Case 2", 109, ""),
+            ("billissuance_case1", "Bill Issuance Case 1", 12, ""),
+            ("wrongstuckhierarchy", "Wrong Stuck in Hierarchy ITB", 0, ""),
+            ("hierarchy", "Hierarchy - pending primaries", 34, ""),
+            ("disconnectiontnb", "Disconnection TNB", 7, ""),
+            ("rebillingmonitor", "Open ScriptGen rebillings", 0, ""),
+            ("wrongbill_case3", "Wrong Bill Case 3", None, "Query timeout")]
 
 
 @app.get("/api/alerts/digest/status")

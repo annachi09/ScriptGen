@@ -459,6 +459,11 @@ const OVERVIEW_CARDS = [
     group: "Bulk Checker",
   },
   {
+    key: "pendingsr", icon: "🎫", label: "Pending Service Request", color: "#ec4899",
+    desc: "Open SRs (employees 10000000620 / 10000008456) with a JIRA comment.",
+    page: "pendingsr", group: "Service Requests",
+  },
+  {
     key: "rebillingmonitor", icon: "🔁", label: "Rebilling Monitor", color: "#0ea5e9",
     desc: "ScriptGen rebilling activities still open (not Rebilled / Rejected).",
     page: "rebillingmonitor", group: "History",
@@ -9858,6 +9863,8 @@ const HX_REFRESH = {
   // Refresh bypasses the server cache (RJ 2026-10-07 cache).
   bulkchecker: () => ({ fn: () => bcRunSearch({ refresh: true }) }),
   rebillingmonitor: () => ({ btn: "#rbm-detect-btn" }),
+  pendingsr: () => ({ btn: "#psr-detect-btn" }),
+  tempdashboard: () => ({ btn: "#tmpd-detect-btn" }),
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
@@ -9868,7 +9875,7 @@ const HX_REFRESH = {
 // Reading Validation NISS, DIFF DATES single NISS / batch, Bulk Checker)
 // are left alone; Wrong Bill and Anomalies Statistics already auto-load.
 const HX_AUTO_PAGES = new Set(["hierarchy", "tnbcycledisc", "wrongstuckhierarchy", "doubleitb",
-  "wrongbilledconsumption", "disconnectiontnb", "billissuance", "incorrectbillingperiod", "dateanomaly", "rebillingmonitor"]);
+  "wrongbilledconsumption", "disconnectiontnb", "billissuance", "incorrectbillingperiod", "dateanomaly", "rebillingmonitor", "pendingsr"]);
 const hxAutoLoaded = new Set();
 let hxAutoTimer = null;
 
@@ -10005,6 +10012,287 @@ async function hxRefreshPage(pageId, refreshBtn) {
     refreshBtn.classList.remove("is-spinning");
   }
 }
+
+// ---------------- Temp Dashboard (RJ 2026-10-11) ----------------
+// See app/core/temp_dashboard.py. "I want to get all account where there is
+// reading for them" -> default view = accounts with a reading (Electricity or
+// Water); every KPI card filters, rows tinted green (reading) / red (none).
+let tmpdRows = [];
+let tmpdKpi = "anyreading";
+let tmpdSortKey = null, tmpdSortDir = 1;
+const tmpdYes = (v) => v === "YES";
+const tmpdAny = (r) => tmpdYes(r.with_reading_ele) || tmpdYes(r.with_reading_water);
+const TMPD_PRED = {
+  anyreading: tmpdAny,
+  noreading: (r) => !tmpdAny(r),
+  ele: (r) => tmpdYes(r.with_ele),
+  readele: (r) => tmpdYes(r.with_reading_ele),
+  water: (r) => tmpdYes(r.with_water),
+  readwater: (r) => tmpdYes(r.with_reading_water),
+  // RJ 2026-10-11: billed columns - "read but not billed" is the actionable set
+  elenotbilled: (r) => tmpdYes(r.with_reading_ele) && !tmpdYes(r.ele_billed),
+  waternotbilled: (r) => tmpdYes(r.with_reading_water) && !tmpdYes(r.water_billed),
+};
+const TMPD_COLUMNS = [
+  { key: "account", label: "Account" }, { key: "with_ele", label: "With Electricity" },
+  { key: "with_reading_ele", label: "Reading Electricity" }, { key: "with_water", label: "With Water" },
+  { key: "with_reading_water", label: "Reading Water" },
+  { key: "ele_billed", label: "Electricity Billed" }, { key: "water_billed", label: "Water Billed" },
+];
+// RJ 2026-10-11: "add filters, with reading ele, not billed ele, with reading
+// water, not billed water or both" - one dropdown per service + Both/Either.
+const TMPD_SVC_TEST = {
+  read: (rd, b) => rd,
+  notbilled: (rd, b) => rd && !b,
+  billed: (rd, b) => b,
+  noread: (rd, b) => !rd,
+};
+function tmpdSvcFilter() {
+  const fe = $("#tmpd-f-ele").value, fw = $("#tmpd-f-water").value, mode = $("#tmpd-f-mode").value;
+  const te = fe && ((r) => TMPD_SVC_TEST[fe](tmpdYes(r.with_reading_ele), tmpdYes(r.ele_billed)));
+  const tw = fw && ((r) => TMPD_SVC_TEST[fw](tmpdYes(r.with_reading_water), tmpdYes(r.water_billed)));
+  if (te && tw) return mode === "or" ? (r) => te(r) || tw(r) : (r) => te(r) && tw(r);
+  return te || tw || (() => true);
+}
+function tmpdVisible() {
+  // RJ 2026-10-11: one token = "contains" search; several pasted accounts
+  // (one per line / comma / space, "account" header ignored) = exact list filter.
+  const toks = [...new Set($("#tmpd-filter-search").value.toLowerCase().split(/[\s,;]+/).filter((t) => t && t !== "account"))];
+  const set = toks.length > 1 ? new Set(toks) : null;
+  const q = toks.length === 1 ? toks[0] : "";
+  const svc = tmpdSvcFilter();
+  let rows = tmpdRows.filter((r) => (!tmpdKpi || TMPD_PRED[tmpdKpi](r)) && svc(r) &&
+    (set ? set.has(String(r.account).toLowerCase()) : (!q || String(r.account).toLowerCase().includes(q))));
+  const cEl = $("#tmpd-filter-search-count");
+  if (cEl) {
+    const missing = set ? toks.filter((t) => !tmpdRows.some((r) => String(r.account).toLowerCase() === t)) : [];
+    cEl.textContent = set ? `${toks.length} accounts pasted${missing.length ? ` - ${missing.length} not in results` : ""}` : "";
+    cEl.title = missing.join("\n");
+  }
+  if (tmpdSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[tmpdSortKey], b[tmpdSortKey], tmpdSortDir));
+  return rows;
+}
+function tmpdRender() {
+  const n = (k) => tmpdRows.filter(TMPD_PRED[k]).length;
+  const cards = [
+    [null, "total", "📋", "All accounts", tmpdRows.length],
+    ["anyreading", "complete", "📖", "With a reading", n("anyreading")],
+    ["noreading", "missing", "🚫", "No reading", n("noreading")],
+    ["ele", "electricity", "⚡", "With Electricity", n("ele")],
+    ["readele", "pending", "⚡", "Electricity reading", n("readele")],
+    ["water", "water", "💧", "With Water", n("water")],
+    ["readwater", "services", "💧", "Water reading", n("readwater")],
+    ["elenotbilled", "missingbill", "⚡", "Electricity read, not billed", n("elenotbilled")],
+    ["waternotbilled", "missingsvc", "💧", "Water read, not billed", n("waternotbilled")],
+  ];
+  $("#tmpd-kpi-row").innerHTML = cards.map(([f, kpi, icon, label, v]) =>
+    `<div class="kpi-card kpi-card-clickable${(f === null ? !tmpdKpi : tmpdKpi === f) ? " is-active" : ""}" data-kpi="${kpi}" data-tmpd-filter="${f ?? ""}" title="Click to filter">` +
+    `<div class="kpi-value">${v.toLocaleString()}</div><div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div></div>`).join("");
+  const head = $("#tmpd-table thead tr");
+  head.innerHTML = TMPD_COLUMNS.map((c) => `<th class="stats-table-th-sortable" data-sort="${c.key}">${c.label}${tmpdSortKey === c.key ? `<span class="stats-table-sort-arrow">${tmpdSortDir === 1 ? "▲" : "▼"}</span>` : ""}</th>`).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    tmpdSortDir = tmpdSortKey === th.dataset.sort ? -tmpdSortDir : 1; tmpdSortKey = th.dataset.sort; tmpdRender();
+  }));
+  const rows = tmpdVisible();
+  const tbody = $("#tmpd-table tbody");
+  // big result sets: render the first 2,000 rows (filters / export cover all)
+  const shown = rows.slice(0, 2000);
+  // green = read and billed, amber = read but a service not billed, red = no reading
+  const tint = (r) => !tmpdAny(r) ? "missing" : (TMPD_PRED.elenotbilled(r) || TMPD_PRED.waternotbilled(r)) ? "pending" : "complete";
+  tbody.innerHTML = shown.map((r) => `<tr class="kpi-tint" data-kpi="${tint(r)}">` + TMPD_COLUMNS.map((c) => {
+    const v = r[c.key] ?? "";
+    if (c.key === "account") return `<td class="hx-mono"><strong>${escapeHtml(v)}</strong></td>`;
+    return `<td><span class="hx-pill ${v === "YES" ? "hx-pill-green" : "hx-pill-gray"}">${escapeHtml(v)}</span></td>`;
+  }).join("") + "</tr>").join("") || `<tr><td colspan="${TMPD_COLUMNS.length}" class="hint-text">${tmpdRows.length ? "No accounts match." : "No accounts."}</td></tr>`;
+  renderFilteredCount("#tmpd-filtered-count", rows.length, tmpdRows.length);
+  if (rows.length > shown.length) $("#tmpd-filtered-count").textContent += ` (table shows the first ${shown.length.toLocaleString()} - use Export / Copy for all)`;
+}
+$("#tmpd-kpi-row").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-tmpd-filter]");
+  if (!c) return;
+  const f = c.dataset.tmpdFilter || null;
+  tmpdKpi = tmpdKpi === f ? null : f;
+  tmpdRender();
+});
+$("#tmpd-filter-search").addEventListener("input", tmpdRender);
+["#tmpd-f-ele", "#tmpd-f-water", "#tmpd-f-mode"].forEach((s) => $(s).addEventListener("change", tmpdRender));
+$("#tmpd-f-clear").addEventListener("click", () => {
+  $("#tmpd-f-ele").value = $("#tmpd-f-water").value = ""; $("#tmpd-f-mode").value = "and";
+  $("#tmpd-filter-search").value = ""; tmpdRender();
+});
+// RJ 2026-10-11 "let's focus on this accounts for now": pasted account list,
+// count shown live, remembered per browser so the focus list survives a reload.
+function tmpdAccountCount() {
+  const n = new Set($("#tmpd-account").value.split(/[\s,;]+/).filter((t) => /^\w+$/.test(t) && t.toLowerCase() !== "account")).size;
+  $("#tmpd-account-count").textContent = n ? `${n} account(s)` : "";
+  try { localStorage.setItem("tmpd-accounts", $("#tmpd-account").value); } catch (e) { /* ignore */ }
+}
+try { $("#tmpd-account").value = localStorage.getItem("tmpd-accounts") || ""; } catch (e) { /* ignore */ }
+tmpdAccountCount();
+$("#tmpd-account").addEventListener("input", tmpdAccountCount);
+$("#tmpd-detect-btn").addEventListener("click", async () => {
+  const btn = $("#tmpd-detect-btn");
+  btn.disabled = true;
+  $("#tmpd-summary").textContent = "Loading… (can take a few minutes for all accounts)";
+  try {
+    const data = await api("/api/temp-dashboard/detect", {
+      method: "POST", body: { billing_period: Number($("#tmpd-bp").value) || 10000000237, account: $("#tmpd-account").value.trim() || null },
+    });
+    tmpdRows = data.rows || [];
+    if (data.requested_accounts > 1) tmpdKpi = null;   // focus list: show every pasted account
+    $("#tmpd-filter-row").hidden = false;
+    $("#tmpd-export-btn").disabled = $("#tmpd-copy-btn").disabled = tmpdRows.length === 0;
+    const nf = data.not_found || [];
+    $("#tmpd-summary").textContent = `${data.count.toLocaleString()} account(s)` +
+      (data.requested_accounts ? ` of ${data.requested_accounts.toLocaleString()} pasted` : "") +
+      `, ${data.with_any_reading.toLocaleString()} with a reading in period ${data.billing_period} - ${(data.elapsed_ms / 1000).toFixed(1)}s.` +
+      (nf.length ? ` Not found / September amount not 0 (${nf.length}): ${nf.slice(0, 20).join(", ")}${nf.length > 20 ? "…" : ""}` : "");
+    tmpdRender();
+  } catch (err) {
+    $("#tmpd-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#tmpd-copy-btn").addEventListener("click", async () => {
+  const rows = tmpdVisible();
+  try { await navigator.clipboard.writeText(rows.map((r) => r.account).join("\n")); showToast(`Copied ${rows.length.toLocaleString()} account(s).`); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#tmpd-export-btn").addEventListener("click", () => {
+  const rows = tmpdVisible();
+  if (!rows.length) return;
+  const keys = TMPD_COLUMNS.map((c) => c.key).concat(["id_payment_form"]);
+  const lines = [keys.map((k) => k.toUpperCase()).join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = `temp_dashboard_${$("#tmpd-bp").value}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------- Pending Service Request (RJ 2026-10-09) ----------------
+// See app/core/pending_service_request.py. One KPI card per status (each its
+// own colour, rows tinted the same); "Old" = older than the days box.
+let psrRows = [];
+let psrKpi = null;              // status text, "__old", or null
+let psrSortKey = null, psrSortDir = 1;
+const PSR_PALETTE = ["#6366f1", "#f59e0b", "#0ea5e9", "#8b5cf6", "#14b8a6", "#ec4899", "#10b981", "#64748b"];
+let psrStatusColor = {};
+const PSR_COLUMNS = [
+  { key: "sr_code", label: "SR Code", mono: true },
+  { key: "status", label: "Status" },
+  { key: "jira", label: "Jira", mono: true },
+  { key: "jira_comment", label: "JIRA comment" },
+  { key: "creation_sr_date", label: "Created", date: true },
+  { key: "age_days", label: "Age (days)", num: true },
+  { key: "servreq_type", label: "SR Type", mono: true },
+  { key: "responsible_employee", label: "Responsible", mono: true },
+];
+function psrOldDays() { const n = Number($("#psr-old-days").value); return Number.isFinite(n) ? n : 30; }
+function psrIsOld(r) { return Number(r.age_days) > psrOldDays(); }
+// "Jira 19097", "jira 18570", "CLEWAOUCEA-18781" -> the ticket number
+function psrJira(comment) {
+  const s = String(comment || "");
+  const m = s.match(/[A-Z]{2,}-\d{3,6}/) || s.match(/jira\s*[#:\-]?\s*(\d{3,6})/i) || s.match(/(\d{3,6})\s*jira/i);
+  return m ? (m[1] || m[0]) : "";
+}
+function psrVisible() {
+  const q = $("#psr-filter-search").value.trim().toLowerCase();
+  let rows = psrRows.filter((r) => {
+    if (psrKpi === "__old" && !psrIsOld(r)) return false;
+    if (psrKpi && psrKpi !== "__old" && r.status !== psrKpi) return false;
+    if (q && ![r.sr_code, r.jira, r.jira_comment, r.status].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    return true;
+  });
+  if (psrSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[psrSortKey], b[psrSortKey], psrSortDir));
+  return rows;
+}
+function psrRender() {
+  const statuses = Object.entries(psrRows.reduce((m, r) => { m[r.status] = (m[r.status] || 0) + 1; return m; }, {})).sort((a, b) => b[1] - a[1]);
+  const card = (key, icon, label, value, color) => {
+    const active = (key === null && !psrKpi) || (key !== null && psrKpi === key);
+    return `<div class="kpi-card kpi-card-clickable${active ? " is-active" : ""}" style="--kpi-c:${color}" data-psr-filter="${escapeHtml(key ?? "")}" title="Click to filter - click again to clear">` +
+      `<div class="kpi-value">${value}</div><div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${escapeHtml(label)}</div></div>`;
+  };
+  $("#psr-kpi-row").innerHTML =
+    card(null, "🎫", "Pending SRs", psrRows.length, "#ec4899") +
+    card("__old", "⏰", `Older than ${psrOldDays()} days`, psrRows.filter(psrIsOld).length, "#ef4444") +
+    statuses.map(([s, n]) => card(s, "•", s, n, psrStatusColor[s])).join("");
+  const head = $("#psr-table thead tr");
+  head.innerHTML = PSR_COLUMNS.map((c) => {
+    const arrow = psrSortKey === c.key ? `<span class="stats-table-sort-arrow">${psrSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    psrSortDir = psrSortKey === th.dataset.sort ? -psrSortDir : 1;
+    psrSortKey = th.dataset.sort;
+    psrRender();
+  }));
+  const rows = psrVisible();
+  const tbody = $("#psr-table tbody");
+  tbody.innerHTML = rows.length ? "" : `<tr><td colspan="${PSR_COLUMNS.length}" class="hint-text">${psrRows.length ? "No SRs match the current filters." : "No pending service requests."}</td></tr>`;
+  rows.forEach((r) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = PSR_COLUMNS.map((c) => {
+      let v = c.date ? hxDate(r[c.key]) : escapeHtml(r[c.key] ?? "");
+      if (c.key === "status") v = `<span class="hx-pill" style="background:color-mix(in srgb, ${psrStatusColor[r.status]} 16%, transparent);color:${psrStatusColor[r.status]};">${v}</span>`;
+      if (c.key === "age_days" && psrIsOld(r)) v = `<strong title="Older than ${psrOldDays()} days">⏰ ${v}</strong>`;
+      if (c.key === "jira_comment") v = `<span title="${escapeHtml(r.jira_comment ?? "")}">${escapeHtml(String(r.jira_comment ?? "").slice(0, 110))}${String(r.jira_comment ?? "").length > 110 ? "…" : ""}</span>`;
+      return `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${v}</td>`;
+    }).join("");
+    kpiRowTag(tr, "psr");
+    tr.style.setProperty("--kpi-c", psrIsOld(r) ? "#ef4444" : psrStatusColor[r.status]);
+    tbody.appendChild(tr);
+  });
+  renderFilteredCount("#psr-filtered-count", rows.length, psrRows.length);
+}
+$("#psr-kpi-row").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-psr-filter]");
+  if (!c) return;
+  const f = c.dataset.psrFilter || null;
+  psrKpi = psrKpi === f ? null : f;
+  psrRender();
+});
+$("#psr-filter-search").addEventListener("input", psrRender);
+$("#psr-old-days").addEventListener("input", psrRender);
+$("#psr-detect-btn").addEventListener("click", async () => {
+  const btn = $("#psr-detect-btn");
+  btn.disabled = true;
+  $("#psr-summary").textContent = "Loading…";
+  try {
+    const data = await api("/api/pending-sr/detect", { method: "POST" });
+    psrRows = (data.rows || []).map((r) => ({ ...r, jira: psrJira(r.jira_comment) }));
+    psrStatusColor = {};
+    Object.keys(data.by_status || {}).sort((a, b) => (data.by_status[b] - data.by_status[a])).forEach((s, i) => { psrStatusColor[s] = PSR_PALETTE[i % PSR_PALETTE.length]; });
+    $("#psr-filter-row").hidden = false;
+    $("#psr-export-btn").disabled = $("#psr-copy-btn").disabled = psrRows.length === 0;
+    $("#psr-summary").textContent = `${data.count} pending service request(s) with a JIRA comment, ${Object.keys(data.by_status || {}).length} status(es).`;
+    psrRender();
+  } catch (err) {
+    $("#psr-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#psr-copy-btn").addEventListener("click", async () => {
+  const codes = psrVisible().map((r) => r.sr_code).join("\n");
+  try { await navigator.clipboard.writeText(codes); showToast(`Copied ${psrVisible().length} SR code(s).`); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#psr-export-btn").addEventListener("click", () => {
+  const rows = psrVisible();
+  if (!rows.length) return;
+  const keys = PSR_COLUMNS.map((c) => c.key).concat(["servreq_status", "id_servreq"]);
+  const lines = [keys.join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = "pending_service_requests.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
 
 // ---------------- Rebilling Monitor (RJ 2026-10-09) ----------------
 // See app/core/rebilling_monitor.py. KPI cards filter the table; rows are
