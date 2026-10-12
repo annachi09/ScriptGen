@@ -9864,7 +9864,7 @@ const HX_REFRESH = {
   bulkchecker: () => ({ fn: () => bcRunSearch({ refresh: true }) }),
   rebillingmonitor: () => ({ btn: "#rbm-detect-btn" }),
   pendingsr: () => ({ btn: "#psr-detect-btn" }),
-  tempdashboard: () => ({ btn: "#tmpd-detect-btn" }),
+  tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", subsidy: "#tsub-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
@@ -10168,6 +10168,236 @@ $("#tmpd-export-btn").addEventListener("click", () => {
   const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
   const a = document.createElement("a");
   a.href = url; a.download = `temp_dashboard_${$("#tmpd-bp").value}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---- Temp Dashboard tabs + tab 2 "SANITARY not Match Water Status" (RJ 2026-10-12) ----
+// See temp_dashboard.build_sanitary_mismatch_query. One row per not-billed
+// Sanitary item; Mismatch = no Billed Sanitary item in its INI/END group.
+$$(".da-subnav-btn[data-tmpd-sub]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const sub = btn.dataset.tmpdSub;
+    $$(".da-subnav-btn[data-tmpd-sub]").forEach((b) => b.classList.toggle("is-active", b === btn));
+    $$(".da-subpage[data-tmpd-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.tmpdSub === sub));
+    if (sub === "sanitary" && !tsanLoaded) $("#tsan-detect-btn").click();
+    if (sub === "subsidy" && !tsubLoaded) $("#tsub-detect-btn").click();
+  });
+});
+let tsanRows = [], tsanKpi = null, tsanLoaded = false, tsanSortKey = null, tsanSortDir = 1;
+const TSAN_COLUMNS = [
+  { key: "mismatch", label: "Mismatch" },
+  { key: "san_niss", label: "Sanitary NISS" },
+  { key: "account", label: "Account" },
+  { key: "ini_date", label: "INI date" },
+  { key: "end_date", label: "END date" },
+  { key: "san_id_item_to_bill", label: "Sanitary ITB" },
+  { key: "san_status_name", label: "Sanitary status" },
+  { key: "group_count", label: "Items same dates" },
+  { key: "group_items", label: "Group items (ITB:status)" },
+  { key: "san_id_billing_service", label: "Sanitary billing svc" },
+  { key: "water_niss", label: "Water NISS" },
+  { key: "water_id_item_to_bill", label: "Water ITB (Billed)" },
+  { key: "water_id_bill", label: "Water bill" },
+  { key: "water_id_billing_service", label: "Water billing svc" },
+  { key: "readings", label: "Readings" },
+];
+const TSAN_PRED = {
+  mismatch: (r) => r.mismatch === "YES",
+  twin: (r) => r.mismatch !== "YES",
+};
+function tsanVisible() {
+  const toks = [...new Set($("#tsan-filter-search").value.toLowerCase().split(/[\s,;]+/).filter((t) => t && t !== "account" && t !== "niss"))];
+  const set = toks.length > 1 ? new Set(toks) : null;
+  const q = toks.length === 1 ? toks[0] : "";
+  const keysOf = (r) => [r.san_niss, r.account, r.water_niss, r.san_id_item_to_bill].map((v) => String(v ?? "").toLowerCase());
+  let rows = tsanRows.filter((r) => {
+    if (tsanKpi && TSAN_PRED[tsanKpi] && !TSAN_PRED[tsanKpi](r)) return false;
+    if (tsanKpi && tsanKpi.startsWith("st:") && r.san_status !== tsanKpi.slice(3)) return false;
+    if (set) return keysOf(r).some((k) => set.has(k));
+    return !q || keysOf(r).some((k) => k.includes(q)) || String(r.water_id_item_to_bill ?? "").includes(q);
+  });
+  $("#tsan-filter-search-count").textContent = set ? `${toks.length} values pasted` : "";
+  if (tsanSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[tsanSortKey], b[tsanSortKey], tsanSortDir));
+  return rows;
+}
+function tsanRender() {
+  const byStatus = {};
+  tsanRows.forEach((r) => { byStatus[r.san_status] = byStatus[r.san_status] || { n: 0, name: r.san_status_name }; byStatus[r.san_status].n++; });
+  const stKpi = { STTOBILL00: "stuck", STTOBILL01: "pending", STTOBILL04: "services", STTOBILL05: "electricity" };
+  const cards = [
+    [null, "total", "📋", "All Anomalous Sanitary items", tsanRows.length],
+    ["mismatch", "missing", "🚨", "Mismatch - Sanitary never billed", tsanRows.filter(TSAN_PRED.mismatch).length],
+    ["twin", "complete", "✅", "A Sanitary twin is billed", tsanRows.filter(TSAN_PRED.twin).length],
+  ].concat(Object.keys(byStatus).sort().map((s) => [`st:${s}`, stKpi[s] || "water", "🏷", `${byStatus[s].name} (${s})`, byStatus[s].n]));
+  $("#tsan-kpi-row").innerHTML = cards.map(([f, kpi, icon, label, v]) =>
+    `<div class="kpi-card kpi-card-clickable${(f === null ? !tsanKpi : tsanKpi === f) ? " is-active" : ""}" data-kpi="${kpi}" data-tsan-filter="${f ?? ""}" title="Click to filter">` +
+    `<div class="kpi-value">${v.toLocaleString()}</div><div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${escapeHtml(label)}</div></div>`).join("");
+  const head = $("#tsan-table thead tr");
+  head.innerHTML = TSAN_COLUMNS.map((c) => `<th class="stats-table-th-sortable" data-sort="${c.key}">${c.label}${tsanSortKey === c.key ? `<span class="stats-table-sort-arrow">${tsanSortDir === 1 ? "▲" : "▼"}</span>` : ""}</th>`).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    tsanSortDir = tsanSortKey === th.dataset.sort ? -tsanSortDir : 1; tsanSortKey = th.dataset.sort; tsanRender();
+  }));
+  const rows = tsanVisible();
+  const shown = rows.slice(0, 2000);
+  const cell = (r, k) => {
+    const v = r[k] ?? "";
+    if (k === "mismatch") return v === "YES" ? "<b>🚨 YES</b>" : "no";
+    if (k === "ini_date" || k === "end_date") return escapeHtml(String(v).slice(0, 10));
+    return escapeHtml(String(v));
+  };
+  $("#tsan-table tbody").innerHTML = shown.map((r) => `<tr class="kpi-tint" data-kpi="${r.mismatch === "YES" ? "missing" : "complete"}">` +
+    TSAN_COLUMNS.map((c) => `<td>${cell(r, c.key)}</td>`).join("") + "</tr>").join("") ||
+    `<tr><td colspan="${TSAN_COLUMNS.length}" class="hint-text">${tsanRows.length ? "No items match." : "No items."}</td></tr>`;
+  renderFilteredCount("#tsan-filtered-count", rows.length, tsanRows.length);
+  if (rows.length > shown.length) $("#tsan-filtered-count").textContent += ` (table shows the first ${shown.length.toLocaleString()} - use Export / Copy for all)`;
+}
+$("#tsan-kpi-row").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-tsan-filter]");
+  if (!c) return;
+  const f = c.dataset.tsanFilter || null;
+  tsanKpi = tsanKpi === f ? null : f;
+  tsanRender();
+});
+$("#tsan-filter-search").addEventListener("input", tsanRender);
+$("#tsan-detect-btn").addEventListener("click", async () => {
+  const btn = $("#tsan-detect-btn");
+  btn.disabled = true; tsanLoaded = true;
+  $("#tsan-summary").textContent = "Loading…";
+  try {
+    const data = await api("/api/temp-dashboard/sanitary-mismatch", {
+      method: "POST", body: { billing_period: Number($("#tsan-bp").value) || 10000000237 },
+    });
+    tsanRows = data.rows || [];
+    $("#tsan-filter-row").hidden = false;
+    $("#tsan-export-btn").disabled = $("#tsan-copy-btn").disabled = tsanRows.length === 0;
+    $("#tsan-summary").textContent = `${data.count.toLocaleString()} Anomalous Sanitary item(s) with a Billed Water twin in period ${data.billing_period}: ` +
+      `${data.mismatch.toLocaleString()} mismatch (Sanitary never billed), ${data.twin_billed.toLocaleString()} with a billed Sanitary twin - ${(data.elapsed_ms / 1000).toFixed(1)}s.`;
+    tsanRender();
+  } catch (err) {
+    $("#tsan-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#tsan-copy-btn").addEventListener("click", async () => {
+  const rows = tsanVisible();
+  const niss = [...new Set(rows.map((r) => r.san_niss))];
+  try { await navigator.clipboard.writeText(niss.join("\n")); showToast(`Copied ${niss.length.toLocaleString()} NISS.`); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#tsan-export-btn").addEventListener("click", () => {
+  const rows = tsanVisible();
+  if (!rows.length) return;
+  const keys = TSAN_COLUMNS.map((c) => c.key).concat(["san_status", "san_billed_in_group", "id_billing_period"]);
+  const lines = [keys.map((k) => k.toUpperCase()).join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = `sanitary_not_match_water_${$("#tsan-bp").value}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---- Temp Dashboard tab 3 "Subsidized, bill not generated" (RJ 2026-10-12) ----
+// See temp_dashboard.build_subsidy_missing_bill_query. One row per account
+// with a subsidized (Bahraini First Account) service with >= 6 cycle bills,
+// where at least one active service has no bill in the period.
+let tsubRows = [], tsubKpi = "NONE", tsubLoaded = false, tsubSortKey = null, tsubSortDir = 1, tsubTotal = null;
+const TSUB_COLUMNS = [
+  { key: "period_bill_status", label: "Period bill" },
+  { key: "account", label: "Account" },
+  { key: "services", label: "Active services" },
+  { key: "services_billed", label: "Services billed" },
+  { key: "last_invoiced_period", label: "Latest invoiced period" },
+  { key: "last_invoiced_from", label: "Invoiced from" },
+  { key: "missing_services", label: "Missing bill" },
+  { key: "billed_services", label: "Billed" },
+  { key: "subsidized_tariffs", label: "Subsidized tariff (cycle bills)" },
+  { key: "pending_readings", label: "Not-yet-billed readings" },
+  { key: "min_cycle_bills", label: "Min cycle bills" },
+  { key: "last_cycle_period", label: "Last cycle period" },
+  { key: "id_payment_form", label: "Payment form" },
+];
+function tsubVisible() {
+  const toks = [...new Set($("#tsub-filter-search").value.toLowerCase().split(/[\s,;]+/).filter((t) => t && t !== "account"))];
+  const set = toks.length > 1 ? new Set(toks) : null;
+  const q = toks.length === 1 ? toks[0] : "";
+  let rows = tsubRows.filter((r) => (!tsubKpi || r.period_bill_status === tsubKpi) &&
+    (set ? set.has(String(r.account).toLowerCase()) : (!q || String(r.account).toLowerCase().includes(q))));
+  const missing = set ? toks.filter((t) => !tsubRows.some((r) => String(r.account).toLowerCase() === t)) : [];
+  $("#tsub-filter-search-count").textContent = set ? `${toks.length} accounts pasted${missing.length ? ` - ${missing.length} not in results` : ""}` : "";
+  $("#tsub-filter-search-count").title = missing.join("\n");
+  if (tsubSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[tsubSortKey], b[tsubSortKey], tsubSortDir));
+  return rows;
+}
+function tsubRender() {
+  const n = (s) => tsubRows.filter((r) => r.period_bill_status === s).length;
+  const cards = [
+    [null, "total", "📋", "Accounts missing a bill", tsubRows.length],
+    ["NONE", "missing", "🚫", "No service billed (main)", n("NONE")],
+    ["PARTIAL", "pending", "◐", "Some services billed", n("PARTIAL")],
+  ];
+  $("#tsub-kpi-row").innerHTML = cards.map(([f, kpi, icon, label, v]) =>
+    `<div class="kpi-card kpi-card-clickable${(f === null ? !tsubKpi : tsubKpi === f) ? " is-active" : ""}" data-kpi="${kpi}" data-tsub-filter="${f ?? ""}" title="Click to filter">` +
+    `<div class="kpi-value">${v.toLocaleString()}</div><div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div></div>`).join("") +
+    (tsubTotal != null ? `<div class="kpi-card" data-kpi="services" title="Accounts missing a bill before requiring a not-yet-billed reading"><div class="kpi-value">${tsubTotal.toLocaleString()}</div><div class="kpi-label"><span class="kpi-card-icon">🔎</span>Missing a bill (any reading)</div></div>` : "");
+  const head = $("#tsub-table thead tr");
+  head.innerHTML = TSUB_COLUMNS.map((c) => `<th class="stats-table-th-sortable" data-sort="${c.key}">${c.label}${tsubSortKey === c.key ? `<span class="stats-table-sort-arrow">${tsubSortDir === 1 ? "▲" : "▼"}</span>` : ""}</th>`).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    tsubSortDir = tsubSortKey === th.dataset.sort ? -tsubSortDir : 1; tsubSortKey = th.dataset.sort; tsubRender();
+  }));
+  const rows = tsubVisible();
+  $("#tsub-table tbody").innerHTML = rows.slice(0, 2000).map((r) => `<tr class="kpi-tint" data-kpi="${r.period_bill_status === "NONE" ? "missing" : "pending"}">` +
+    TSUB_COLUMNS.map((c) => `<td>${escapeHtml(String(r[c.key] ?? ""))}</td>`).join("") + "</tr>").join("") ||
+    `<tr><td colspan="${TSUB_COLUMNS.length}" class="hint-text">${tsubRows.length ? "No accounts match." : "No accounts."}</td></tr>`;
+  renderFilteredCount("#tsub-filtered-count", rows.length, tsubRows.length);
+}
+$("#tsub-kpi-row").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-tsub-filter]");
+  if (!c) return;
+  const f = c.dataset.tsubFilter || null;
+  tsubKpi = tsubKpi === f ? null : f;
+  tsubRender();
+});
+$("#tsub-filter-search").addEventListener("input", tsubRender);
+$("#tsub-detect-btn").addEventListener("click", async () => {
+  const btn = $("#tsub-detect-btn");
+  btn.disabled = true; tsubLoaded = true;
+  $("#tsub-summary").textContent = "Loading… (about 30 seconds)";
+  try {
+    const data = await api("/api/temp-dashboard/subsidy-missing-bill", {
+      method: "POST", body: { billing_period: Number($("#tsub-bp").value) || 10000000237 },
+    });
+    tsubRows = data.rows || [];
+    tsubTotal = data.missing_before_reading_check;
+    $("#tsub-filter-row").hidden = false;
+    $("#tsub-export-btn").disabled = $("#tsub-copy-btn").disabled = tsubRows.length === 0;
+    $("#tsub-summary").textContent = `Period ${data.billing_period}: ${data.count.toLocaleString()} subsidized account(s) missing a bill - ` +
+      `${data.none.toLocaleString()} with no service billed, ${data.partial.toLocaleString()} partial - all with a not-yet-billed reading` +
+      (data.missing_before_reading_check != null ? ` (${data.missing_before_reading_check.toLocaleString()} missing a bill before the reading check)` : "") +
+      ` - ${(data.elapsed_ms / 1000).toFixed(1)}s.`;
+    tsubRender();
+  } catch (err) {
+    $("#tsub-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#tsub-copy-btn").addEventListener("click", async () => {
+  const rows = tsubVisible();
+  try { await navigator.clipboard.writeText(rows.map((r) => r.account).join("\n")); showToast(`Copied ${rows.length.toLocaleString()} account(s).`); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#tsub-export-btn").addEventListener("click", () => {
+  const rows = tsubVisible();
+  if (!rows.length) return;
+  const keys = TSUB_COLUMNS.map((c) => c.key);
+  const lines = [keys.map((k) => k.toUpperCase()).join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = `subsidized_bill_not_generated_${$("#tsub-bp").value}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 });

@@ -1760,8 +1760,17 @@
       <section class="page" id="page-tempdashboard">
         <header class="page-header">
           <h1>Temp Dashboard</h1>
-          <p class="page-subtitle">Accounts of EWA_DDI_ELIGIBILITY with no September bill amount (BILL_AMOUNT_SET): active Electricity / Water services and whether they have a reading (Cycle types TIPTL00003 / TIPTL00005, status 5000 / 6000 / 7000STSRED) in the billing period.</p>
         </header>
+
+        <!-- RJ 2026-10-12: second tab "SANITARY not Match Water Status" -->
+        <nav class="da-subnav" aria-label="Temp Dashboard tabs">
+          <button type="button" class="da-subnav-btn is-active" data-tmpd-sub="accounts">Accounts &amp; readings</button>
+          <button type="button" class="da-subnav-btn" data-tmpd-sub="sanitary">SANITARY not Match Water Status</button>
+          <button type="button" class="da-subnav-btn" data-tmpd-sub="subsidy">Subsidized, bill not generated</button>
+        </nav>
+
+        <div class="da-subpage is-active" data-tmpd-sub="accounts">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Accounts of EWA_DDI_ELIGIBILITY with no September bill amount (BILL_AMOUNT_SET): active Electricity / Water services and whether they have a reading (Cycle types TIPTL00003 / TIPTL00005, status 5000 / 6000 / 7000STSRED) in the billing period.</p>
         <div class="card">
           <div class="card-header">
             <h2>Accounts &amp; readings</h2>
@@ -1815,6 +1824,68 @@
               <tbody></tbody>
             </table>
           </div>
+        </div>
+        </div>
+
+        <div class="da-subpage" data-tmpd-sub="sanitary">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Sanitary (service 190) items to bill in status <b>Anomalous (STTOBILL00)</b> whose billing service has 2 or more non-cancelled items with the same INI / END date, while the Water (service 19) item sharing the same reading (GCCOM_READINGS_ITEMSTOBILL) is already <b>Billed</b> (STTOBILL07) for the same billing period, INI and END date. <b>Mismatch</b> = no Sanitary item of that group is Billed.</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>SANITARY not Match Water Status</h2>
+            <div class="card-header-actions">
+              <label class="field-label">Billing period</label>
+              <input id="tsan-bp" class="text-input text-input-sm" value="10000000237" title="10000000237 = September 2026" style="width:130px;" />
+              <button type="button" class="btn btn-pill" id="tsan-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="tsan-copy-btn" disabled title="Copy the visible Sanitary NISS (one per line)">📋 Copy NISS</button>
+              <button type="button" class="btn btn-pill" id="tsan-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="tsan-summary">Click Scan to load.</div>
+          <div class="kpi-row" id="tsan-kpi-row" style="margin:14px 0 4px;"></div>
+          <div class="key-panel-row" id="tsan-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <textarea id="tsan-filter-search" class="text-input text-input-sm" rows="2" placeholder="NISS / account / item… or paste many, one per line" style="width:220px;resize:vertical;"></textarea>
+            <span class="hint-text" id="tsan-filter-search-count"></span>
+          </div>
+          <div class="hint-text" id="tsan-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="tsan-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        </div>
+
+        <!-- RJ 2026-10-12: third tab - subsidized accounts whose period bill is not generated -->
+        <div class="da-subpage" data-tmpd-sub="subsidy">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Accounts with a subsidized service - tariff <b>Domestic - Bahraini First Account</b> (E-D2 10000000003, W-D2 10000000004, E-D2-NM 10000000006) - that already has <b>at least 6 cycle bills</b> (TFGEN00001, not Rebilled / Cancelled, not Credit Note), where the billing period's bill is <b>not generated for every active service</b> of the account, and the account has a <b>not-yet-billed reading</b> in the period (Anomalous 5000 / Available 1000 / Sent to bill 6000; Cycle, Distribution or Direct Connection). <b>None</b> = no service billed in the period (main focus); <b>Partial</b> = some services billed.</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Subsidized, bill not generated</h2>
+            <div class="card-header-actions">
+              <label class="field-label">Billing period</label>
+              <input id="tsub-bp" class="text-input text-input-sm" value="10000000237" title="10000000237 = September 2026" style="width:130px;" />
+              <button type="button" class="btn btn-pill" id="tsub-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="tsub-copy-btn" disabled title="Copy the visible accounts (one per line)">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="tsub-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="tsub-summary">Click Scan to load (about 30 seconds).</div>
+          <div class="kpi-row" id="tsub-kpi-row" style="margin:14px 0 4px;"></div>
+          <div class="key-panel-row" id="tsub-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <textarea id="tsub-filter-search" class="text-input text-input-sm" rows="2" placeholder="Account… or paste many, one per line" style="width:220px;resize:vertical;"></textarea>
+            <span class="hint-text" id="tsub-filter-search-count"></span>
+          </div>
+          <div class="hint-text" id="tsub-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="tsub-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
         </div>
       </section>
 

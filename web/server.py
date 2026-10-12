@@ -4440,6 +4440,58 @@ def temp_dashboard_detect(body: TempDashboardRequest, user: str = Depends(requir
     }
 
 
+class TempDashboardSanitaryRequest(BaseModel):
+    billing_period: int = temp_dashboard.DEFAULT_BILLING_PERIOD
+
+
+# RJ 2026-10-12: Temp Dashboard tab 2 "SANITARY not Match Water Status"
+# (temp_dashboard.build_sanitary_mismatch_query).
+@app.post("/api/temp-dashboard/sanitary-mismatch")
+def temp_dashboard_sanitary_mismatch(body: TempDashboardSanitaryRequest, user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, temp_dashboard.build_sanitary_mismatch_query(body.billing_period),
+                              timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    by_status: dict[str, int] = {}
+    for r in rows:
+        r["san_status_name"] = temp_dashboard.ITB_STATUS_NAMES.get(r.get("san_status"), r.get("san_status"))
+        r["mismatch"] = "YES" if str(r.get("san_billed_in_group") or "0") in ("0", "") else "NO"
+        by_status[r["san_status"]] = by_status.get(r["san_status"], 0) + 1
+    mismatch = sum(1 for r in rows if r["mismatch"] == "YES")
+    return {"rows": rows, "count": len(rows), "mismatch": mismatch, "twin_billed": len(rows) - mismatch,
+            "by_status": by_status, "status_names": temp_dashboard.ITB_STATUS_NAMES,
+            "billing_period": body.billing_period, "elapsed_ms": res.elapsed_ms}
+
+
+# RJ 2026-10-12: Temp Dashboard tab 3 "Subsidized, September not generated"
+# (temp_dashboard.build_subsidy_missing_bill_query) - ~90s live, 5-min timeout.
+@app.post("/api/temp-dashboard/subsidy-missing-bill")
+def temp_dashboard_subsidy_missing_bill(body: TempDashboardSanitaryRequest, user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, temp_dashboard.build_subsidy_missing_bill_query(body.billing_period),
+                              timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    # RJ 2026-10-12: only accounts with a not-yet-billed reading are returned;
+    # missing_before_reading_check = accounts missing a bill before that check.
+    before = int(rows[0].get("missing_before_reading_check") or 0) if rows else None
+    none = sum(1 for r in rows if r.get("period_bill_status") == "NONE")
+    return {"rows": rows, "count": len(rows), "none": none, "partial": len(rows) - none,
+            "missing_before_reading_check": before, "billing_period": body.billing_period,
+            "elapsed_ms": res.elapsed_ms}
+
+
 # ---------------------------------------------------------------------
 # Pending Service Request (RJ 2026-10-09) - app/core/pending_service_request.py
 # ---------------------------------------------------------------------

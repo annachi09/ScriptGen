@@ -2977,6 +2977,85 @@ filter-row Search is a textarea too: one value = contains search, several pasted
 accounts (line / comma / space, "account" header ignored) = exact list filter on the
 loaded rows; shows "N accounts pasted - M not in results" (hover lists the missing).
 Clear also empties it. Combines with the KPI card and the Electricity / Water filters.
+
+### Temp Dashboard tab 2: "SANITARY not Match Water Status" (2026-10-12)
+
+RJ: "in ITEMS_TO_BILL it has 2 or more record with the same END DATE AND INI DATE, and
+the status of our target is not billed, and then using the same reading item to bill get
+the water item to bill, using the billing service and id offered service from gccom
+contracted service, the water should be billed already for that billing period and ini
+date and end date".
+- The page now has a sub-nav: "Accounts & readings" (tab 1, unchanged) and this tab.
+- Query `temp_dashboard.build_sanitary_mismatch_query(bp)`, route
+  `POST /api/temp-dashboard/sanitary-mismatch` (default period 10000000237, September):
+  - target: Sanitary item (offered service 190 via GCCOM_BILLING_SERVICE ->
+    GCCOM_CONTRACTED_SERVICE), STATUS <> STTOBILL07, whose billing service has >= 2
+    items with the same INI_DATE + END_DATE (GROUP_COUNT; GROUP_ITEMS lists them);
+  - water: item sharing a reading with it (OUC_ADMIN.GCCOM_READINGS_ITEMSTOBILL), offered
+    service 19, STTOBILL07, same ID_BILLING_PERIOD, INI_DATE, END_DATE;
+  - Mismatch = no Billed Sanitary item in the group (SAN_BILLED_IN_GROUP = 0).
+- ITB statuses (live GCCOM_ITEMS_TO_BILL_STATUS): 00 Anomalous, 01 Pending, 04 Cancelled,
+  05 Modified consumption, 06 Resolved without billing, 07 Billed, 08 Sent to curve
+  aggregation, 09 Hierarchy in calculation.
+- Page: KPI cards All / Mismatch (default) / Sanitary twin billed / one per status; rows red
+  for mismatch, green otherwise; search accepts a pasted NISS / account / ITB list; Copy
+  NISS + CSV export follow the filters. Auto-runs the first time the tab is opened.
+- Live September: 1,070 not-billed Sanitary items with a Billed Water twin, 3.5s; 1,064
+  already have a Billed Sanitary twin (939 Cancelled + 123 Modified consumption + 2
+  Anomalous); **6 items / 3 NISS mismatch**: 10393601-701 and 10429834-701 (both items
+  Cancelled, Water billed), 10519469-701 (both items Anomalous, Water billed).
+- Same day, RJ "forget about cancelled, only status 0000": target = STTOBILL00 (Anomalous)
+  only (`ITB_TARGET_STATUS`), and Cancelled (STTOBILL04) items are left out of the
+  same-INI/END group count (`ITB_CANCELLED`). Default view = All. Live September: 4 items /
+  3 NISS, 1.2s - 10519469-701 (2 Anomalous, no Billed Sanitary = mismatch, Water bill
+  1074848753); 10555477-701 and 10651672-701 (1 Anomalous + 1 Billed Sanitary twin).
+
+### Temp Dashboard tab 3: "Subsidized, bill not generated" (2026-10-12)
+
+RJ: "show all account which are subsized, (the tariff is bahraini first account for water
+or electricity), where they have already atleast 6 bill which is cycle and not rebilled,
+and credit note for the service. mainly those where the September bill is still not
+generated for all the services of the account".
+- Subsidized tariffs (live GCCOM_FARE, IND_SUBSIDY = 1, "Domestic - Bahraini First
+  Account"): 10000000003 E-D2, 10000000004 W-D2, 10000000006 E-D2-NM (net-metering).
+  Read from the service's current GCCOM_BILLING_SERVICE.ID_FARE.
+- Qualifying service: active (STATUS not ESTSC00001/4/5), >= 6 GCCOM_BILL rows with
+  BILL_TYPE TFGEN00001 (cycle), BILLING_STATUS not ESTFAC0042 Rebilled / ESTFAC0007
+  Cancelled, BILLING_TYPE not TIPFAC0011 Credit Note.
+- Per account: every active service; "billed" = a bill in the period with the same
+  status / credit-note exclusions. Only accounts with at least one unbilled service are
+  returned: NONE (no service billed, main focus, default view) or PARTIAL.
+- `temp_dashboard.build_subsidy_missing_bill_query`, route
+  `POST /api/temp-dashboard/subsidy-missing-bill` (5-min timeout). Columns: missing /
+  billed services, subsidized tariff with its cycle-bill count, last cycle period.
+- Live September (10000000237): 161,381 qualifying accounts; 116 missing a bill - **25
+  with no service billed**, 91 partial (55 of them only Electricity missing); ~110s.
+- Same day, RJ "we need to consider that there is a reading that is either anomalous or
+  available or sent to bill (cycle, distribution or direct connection) ... that is not
+  yet billed": the account must also have a reading of the period on one of its active
+  services with READ_STATUS 5000STSRED Anomalous / 1000STSRED Available / 6000STSRED Sent
+  to bill and READING_TYPE TIPTL00003 Cycle / TIPTL00017 Distribution / TIPTL00005 Direct
+  Connection. New column "Not-yet-billed readings" (service: reading id status / type).
+- Speed-up: the CTEs were re-evaluated per reference (timed out at 120s). Now a temp-table
+  batch (#sub, #svc, #miss, #cyc, #rdp - session-local tempdb, nothing written to OUC):
+  accounts missing a bill first, then cycle bills + readings only for them. ~22s.
+  The "all qualifying accounts" total is replaced by "Missing a bill (any reading)".
+- Live September after the change: 103 accounts missing a bill, **43 with a not-yet-billed
+  reading - 17 no service billed, 26 partial**. Every reading found is on a service that
+  has no bill. Readings: Anomalous/Cycle 28, Available/Cycle 20, Anomalous/Direct
+  Connection 7, Sent to bill/Cycle 5, Sent to bill/Direct Connection 3, Sent to
+  bill/Distribution 2.
+- Same day, RJ "add a column, telling me which is the latest invoiced period for the
+  account, initially check electricity, if no ele, check water, if no water check rate":
+  OUTER APPLY over the account's active Electricity (1) / Water (19) / Rate (176)
+  services - latest ID_BILLING_PERIOD of an Invoiced (ESTFAC0005), non-credit-note bill,
+  taking the first service in that order that has one. Columns "Latest invoiced period"
+  (GCCOM_BILLING_PERIOD.DESCRIPTION) + "Invoiced from" (which service). Live: of the 40
+  accounts, latest invoiced ranges April -> August 2026; 2 come from Water (no invoiced
+  Electricity bill).
+- Same day, RJ "i need to show description of the period not the id": "Last cycle period"
+  now shows GCCOM_BILLING_PERIOD.DESCRIPTION (e.g. "7-July 2026") instead of the id;
+  "Latest invoiced period" already showed the description.
 Equivalence proven on 300 real payment forms (GCCOM_PAYMENT_FORM sample, same
 logic): original 28.8s vs optimized 6.0s, 0 flag differences in 1,200 flags; the
 Water-reading fix changes 110 of 300 rows (as given: 266 YES = same as Electricity;
