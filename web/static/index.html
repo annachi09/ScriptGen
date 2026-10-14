@@ -150,6 +150,9 @@
         <button class="nav-item" data-page="tempdashboard" title="Temp Dashboard">
           <span class="nav-icon">🧪</span><span class="nav-label">Temp Dashboard</span>
         </button>
+        <button class="nav-item" data-page="readingdiscrepancies" title="Reading Discrepancies">
+          <span class="nav-icon">🔍</span><span class="nav-label">Reading Discrepancies</span>
+        </button>
         <button class="nav-item" data-page="pendingsr" title="Pending Service Request">
           <span class="nav-icon">🎫</span><span class="nav-label">Pending Service Request</span>
         </button>
@@ -1885,6 +1888,71 @@
               <tbody></tbody>
             </table>
           </div>
+        </div>
+        </div>
+      </section>
+
+      <!-- ===== Reading Discrepancies (RJ 2026-10-13) ===== -->
+      <section class="page" id="page-readingdiscrepancies">
+        <header class="page-header">
+          <h1>Reading Discrepancies</h1>
+        </header>
+        <nav class="da-subnav" aria-label="Reading Discrepancies tabs">
+          <button type="button" class="da-subnav-btn is-active" data-rdisc-sub="pending">Pending validation &gt; 3 days</button>
+        </nav>
+        <div class="da-subpage is-active" data-rdisc-sub="pending">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Readings still in <b>Pending validation</b> (9000STSRED) whose reading date is more than <b>3 days</b> ago, reading date within the <b>last 6 months</b>.</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Pending validation readings</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="rdisc-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="rdisc-copy-btn" disabled title="Copy the visible accounts (one per line)">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="rdisc-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="rdisc-summary">Click Scan to load.</div>
+          <div class="kpi-row" id="rdisc-kpi-row" style="margin:14px 0 4px;"></div>
+          <div class="key-panel-row" id="rdisc-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <textarea id="rdisc-filter-search" class="text-input text-input-sm" rows="2" placeholder="Account / supply / reading… or paste many, one per line" style="width:240px;resize:vertical;"></textarea>
+            <span class="hint-text" id="rdisc-filter-search-count"></span>
+          </div>
+          <div class="hint-text" id="rdisc-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="rdisc-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>Generate Update Script</h2></div>
+          <p class="hint-text">For every <strong>checked</strong> reading: <code>GCGT_RE_READING.READ_STATUS</code> Pending validation <code>9000STSRED → 1000STSRED</code> (Available) and <code>IND_USAGE_TO_CAL = 1</code>, with UPDATE_USER / UPDATE_PROGRAM / UPDATE_DATE. Only readings still in Pending validation are touched (the scan is re-run right before generating). A rollback script is produced too.</p>
+          <div class="hint-text" id="rdisc-selection-hint">☝️ Check one or more rows above (or the header box for every row shown) to enable Generate.</div>
+          <div class="key-panel-row" style="margin:10px 0;flex-wrap:wrap;">
+            <label class="field-label">User</label>
+            <input id="rdisc-user" class="text-input text-input-sm" value="RMA" style="width:90px;" />
+            <label class="field-label">Program</label>
+            <input id="rdisc-program" class="text-input text-input-sm" value="READING DISCREPANCIES PENDING VALIDATION" style="width:280px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="rdisc-clean" /> Clean script (no comments)</label>
+            <button type="button" class="btn btn-primary" id="rdisc-generate-btn" disabled>📝 Generate Update Script</button>
+          </div>
+          <div class="hint-text" id="rdisc-gen-summary"></div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" id="rdisc-script-copy-btn">📋 Copy</button>
+            <button type="button" class="btn btn-pill" id="rdisc-script-download-btn">⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" id="rdisc-output">No script generated yet — Scan, check the rows, then Generate.</pre>
+          <details class="hx-hint" id="rdisc-rollback-wrap" hidden style="margin-top:10px;">
+            <summary>↩ Rollback script (undo of the update above)</summary>
+            <div class="card-header-actions" style="margin:6px 0;">
+              <button type="button" class="btn btn-pill" data-rb-copy="#rdisc-rollback">📋 Copy rollback</button>
+              <button type="button" class="btn btn-pill" data-rb-download="#rdisc-rollback" data-rb-name="reading_pending_validation_ROLLBACK.sql">⬇ Download rollback</button>
+            </div>
+            <pre class="script-output" id="rdisc-rollback"></pre>
+          </details>
         </div>
         </div>
       </section>

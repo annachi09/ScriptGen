@@ -56,6 +56,8 @@ KIND_DOUBLE_ITB = "double_itb_fix"
 KIND_HIGH_SANITARY_REBILLING = "high_sanitary_rebilling"
 KIND_RELEASE = "bill_issuance_release"
 KIND_GENERATED_ROLLBACK = "generated_rollback"
+# RJ 2026-10-13: Reading Discrepancies - pending validation -> available
+KIND_READING_RELEASE = "reading_pending_validation_release"
 
 
 @dataclass

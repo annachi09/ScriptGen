@@ -3010,6 +3010,56 @@ date and end date".
   3 NISS, 1.2s - 10519469-701 (2 Anomalous, no Billed Sanitary = mismatch, Water bill
   1074848753); 10555477-701 and 10651672-701 (1 Anomalous + 1 Billed Sanitary twin).
 
+### Wrong Bill Case 1 rebilling: only Invoiced bills, Water first (2026-10-14)
+
+RJ: "double itb is working in my system but the one from high bill sanitary cannot be
+processed by my system if i insert it". Both use the same insert
+(`double_itb.rebilling_insert_lines`); the live comparison of the tagged activities
+showed the difference is the data:
+- Every processed DOUBLE ITB activity held **Invoiced** bills (real BILL_NUMBER,
+  EXPIRATION_DATE, COLLECTION_STATUS). The High Sanitary ones held freshly **Generated**
+  bills (BILL_NUMBER = ID_BILL, no expiry / collection status); the 2026-10-09 ones
+  were rejected (ESTREF0003) and their bills ended Cancelled.
+- DOUBLE ITB inserts the Water bill first and the Sanitary second; High Sanitary
+  inserted the Sanitary first.
+Fix in `unusual_sanitary.build_rebilling_script`: `REBILLABLE_STATUSES` = Invoiced
+(ESTFAC0005) only - an activity with any non-invoiced bill (Generated ESTFAC0008 etc.)
+is skipped with a warning ("rebill after invoicing"; reverses the 2026-10-09 "even
+generated" rule); info rows now Water bill(s) first, Sanitary last.
+Activities 21296002-21296011 (inserted 2026-10-14 17:12, In process, 20 Generated
+bills set to Disputed) were given a by-hand rollback (bills back to ESTFAC0008).
+
+### Reading Discrepancies menu (2026-10-13)
+
+RJ: "create another menu, Reading Discrepancies, first tab show all reading which is
+still pending validation yet the reading date is already past 3 days from today. Show
+Account, Supply, Read_status, Billing period, reading_type, prev_value, value,
+reading_usage, ready_usage. Show for the past 6 months only add the usual export, then
+create update to change the status of RE_READING from pending validation to available,
+and set ind_usage_to_cal = 1".
+- Menu id `readingdiscrepancies` (🔍), auto-scans on open; module
+  `app/core/reading_discrepancies.py`; routes `POST /api/reading-discrepancies/
+  pending-validation` and `POST /api/reading-discrepancies/generate` (editor).
+- Codes (live GCGT_RE_READ_STATUS): 9000STSRED "Pending validation", 1000STSRED
+  "Disponible" (Available). Column `GCGT_RE_READING.IND_USAGE_TO_CAL`.
+- Filter: READ_STATUS 9000STSRED, READING_DATE < today - 3 days and >= today - 6 months.
+  Speed: a READ_STATUS / GETDATE() filter on GCGT_RE_READING scanned the table (43s ->
+  120s timeout); now Python computes the window, a first query lists the billing periods
+  overlapping it, and the main query uses literal period ids + dates into a #temp table
+  (~3s). Account = REFERENCE of the supply's contracted service (active first).
+- Columns: Account, Supply (NISS), Reading, Read status, Billing period, Reading type,
+  Prev date, Reading date, Days, Prev value, Value, Reading usage, Ready usage, Usage to
+  cal. KPIs: All / Older than 7 days / one per billing period. Search accepts a pasted
+  list; Copy accounts + CSV export follow the filters.
+- Script (checked rows; scan re-run server-side, only still-pending readings kept):
+  `UPDATE GCGT_RE_READING SET READ_STATUS = '1000STSRED', IND_USAGE_TO_CAL = 1,
+  UPDATE_USER/PROGRAM/DATE ... WHERE ID_READING IN (...) AND READ_STATUS = '9000STSRED'`
+  in chunks of 1,000; rollback puts 9000STSRED + each reading's previous IND_USAGE_TO_CAL
+  back (only where still 1000STSRED). Both recorded in Script History (new kind
+  `reading_pending_validation_release`).
+- Live 2026-10-13: 328 readings (6 in September 2026, 322 in October 2026), all Cycle,
+  all with IND_USAGE_TO_CAL already 1, every one with an account; ~3s.
+
 ### Temp Dashboard tab 3: "Subsidized, bill not generated" (2026-10-12)
 
 RJ: "show all account which are subsized, (the tariff is bahraini first account for water

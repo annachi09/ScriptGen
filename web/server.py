@@ -49,6 +49,7 @@ from app.core import unusual_sanitary
 from app.core import rebilling_monitor
 from app.core import pending_service_request
 from app.core import temp_dashboard
+from app.core import reading_discrepancies
 from app.core import wrong_bill_perc_dist
 from app.core import wrong_bill_sanitary_zero
 from app.core import wrong_bill_first_regularized
@@ -4490,6 +4491,79 @@ def temp_dashboard_subsidy_missing_bill(body: TempDashboardSanitaryRequest, user
     return {"rows": rows, "count": len(rows), "none": none, "partial": len(rows) - none,
             "missing_before_reading_check": before, "billing_period": body.billing_period,
             "elapsed_ms": res.elapsed_ms}
+
+
+# ---------------------------------------------------------------------
+# Reading Discrepancies (RJ 2026-10-13) - app/core/reading_discrepancies.py
+# ---------------------------------------------------------------------
+def _rdisc_scan(conn) -> tuple[list[dict], float, str, str]:
+    import datetime as _dt
+    today = _dt.date.today()
+    date_from, date_to = reading_discrepancies.date_window(today)
+    periods = mssql.run_query(conn, reading_discrepancies.build_period_ids_query(date_from, today))
+    period_ids = [r[0] for r in periods.rows]
+    res = mssql.run_query(conn, reading_discrepancies.build_pending_validation_query(period_ids, date_from, date_to),
+                          timeout_seconds=300)
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    return rows, res.elapsed_ms, f"{date_from:%Y-%m-%d}", f"{date_to:%Y-%m-%d}"
+
+
+@app.post("/api/reading-discrepancies/pending-validation")
+def reading_discrepancies_pending(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        rows, ms, dfrom, dto = _rdisc_scan(conn)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    by_period: dict[str, int] = {}
+    by_type: dict[str, int] = {}
+    for r in rows:
+        by_period[r.get("billing_period") or "?"] = by_period.get(r.get("billing_period") or "?", 0) + 1
+        by_type[r.get("reading_type_name") or "?"] = by_type.get(r.get("reading_type_name") or "?", 0) + 1
+    return {"rows": rows, "count": len(rows), "by_period": by_period, "by_type": by_type,
+            "date_from": dfrom, "date_to_exclusive": dto, "elapsed_ms": ms}
+
+
+class ReadingDiscrepanciesGenerateRequest(BaseModel):
+    reading_ids: list[str] = []
+    program: str = reading_discrepancies.SCRIPT_DEFAULT_PROGRAM
+    audit_user: str = reading_discrepancies.SCRIPT_DEFAULT_USER
+    clean: bool = False
+
+
+@app.post("/api/reading-discrepancies/generate")
+def reading_discrepancies_generate(body: ReadingDiscrepanciesGenerateRequest, user: str = Depends(require_editor)):
+    """Pending validation -> Available + IND_USAGE_TO_CAL = 1. The scan is re-run
+    server-side; only readings both selected AND still detected go in the script."""
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    scope = {str(x).strip() for x in body.reading_ids if str(x).strip()}
+    if not scope:
+        raise HTTPException(status_code=400, detail="Select at least one reading.")
+    try:
+        rows, _ms, _f, _t = _rdisc_scan(conn)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    selected = [r for r in rows if str(r.get("id_reading")) in scope]
+    if not selected:
+        raise HTTPException(status_code=400, detail="None of the selected readings are still pending validation - re-scan.")
+    program = body.program.strip() or reading_discrepancies.SCRIPT_DEFAULT_PROGRAM
+    audit_user = body.audit_user.strip() or reading_discrepancies.SCRIPT_DEFAULT_USER
+    ids = [r["id_reading"] for r in selected]
+    sql_text = reading_discrepancies.build_release_script(ids, user=audit_user, program=program, clean=body.clean)
+    rollback = reading_discrepancies.build_release_rollback(selected, user=audit_user, program=program)
+    _record_script(user, script_history.KIND_READING_RELEASE,
+                   f"Reading Discrepancies - pending validation -> available ({len(ids)} reading(s))",
+                   program, sql_text, statements=sql_text.count("UPDATE GCGT_RE_READING"))
+    _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "ROLLBACK of Reading Discrepancies release",
+                   program, rollback, statements=rollback.count("UPDATE GCGT_RE_READING"))
+    return {"sql": sql_text, "rollback_sql": rollback, "reading_count": len(ids),
+            "skipped": len(scope) - len(ids)}
 
 
 # ---------------------------------------------------------------------

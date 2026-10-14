@@ -1126,7 +1126,7 @@ const HISTORY_KIND_LABELS = {
   bill_issuance_correction: "Bill Issuance", incorrect_billing_period_correction: "Incorrect Billing Period",
   wrong_stuck_hierarchy_correction: "Wrong Stuck in Hierarchy", double_itb_fix: "DOUBLE ITB",
   high_sanitary_rebilling: "High Sanitary Rebilling", bill_issuance_release: "Bill Issuance Release",
-  generated_rollback: "Rollback (generated)",
+  generated_rollback: "Rollback (generated)", reading_pending_validation_release: "Reading Discrepancies",
 };
 
 async function viewHistoryEntry(id) {
@@ -9865,6 +9865,7 @@ const HX_REFRESH = {
   rebillingmonitor: () => ({ btn: "#rbm-detect-btn" }),
   pendingsr: () => ({ btn: "#psr-detect-btn" }),
   tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", subsidy: "#tsub-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
+  readingdiscrepancies: () => ({ btn: "#rdisc-detect-btn" }),
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
@@ -9875,7 +9876,8 @@ const HX_REFRESH = {
 // Reading Validation NISS, DIFF DATES single NISS / batch, Bulk Checker)
 // are left alone; Wrong Bill and Anomalies Statistics already auto-load.
 const HX_AUTO_PAGES = new Set(["hierarchy", "tnbcycledisc", "wrongstuckhierarchy", "doubleitb",
-  "wrongbilledconsumption", "disconnectiontnb", "billissuance", "incorrectbillingperiod", "dateanomaly", "rebillingmonitor", "pendingsr"]);
+  "wrongbilledconsumption", "disconnectiontnb", "billissuance", "incorrectbillingperiod", "dateanomaly", "rebillingmonitor", "pendingsr",
+  "readingdiscrepancies"]);
 const hxAutoLoaded = new Set();
 let hxAutoTimer = null;
 
@@ -10299,6 +10301,164 @@ $("#tsan-export-btn").addEventListener("click", () => {
   URL.revokeObjectURL(url);
 });
 
+// ---------------- Reading Discrepancies (RJ 2026-10-13) ----------------
+// See app/core/reading_discrepancies.py. Tab 1: readings still Pending
+// validation (9000STSRED) > 3 days after the reading date, last 6 months;
+// update script 9000 -> 1000STSRED (Available) + IND_USAGE_TO_CAL = 1.
+let rdiscRows = [], rdiscKpi = null, rdiscSortKey = null, rdiscSortDir = 1;
+const rdiscSelected = new Set();
+const RDISC_COLUMNS = [
+  { key: "account", label: "Account" },
+  { key: "supply", label: "Supply" },
+  { key: "id_reading", label: "Reading" },
+  { key: "read_status_name", label: "Read status" },
+  { key: "billing_period", label: "Billing period" },
+  { key: "reading_type_name", label: "Reading type" },
+  { key: "reading_prev_date", label: "Prev date" },
+  { key: "reading_date", label: "Reading date" },
+  { key: "days_pending", label: "Days" },
+  { key: "prev_value", label: "Prev value" },
+  { key: "value", label: "Value" },
+  { key: "reading_usage", label: "Reading usage" },
+  { key: "ready_usage", label: "Ready usage" },
+  { key: "ind_usage_to_cal", label: "Usage to cal" },
+];
+function rdiscVisible() {
+  const toks = [...new Set($("#rdisc-filter-search").value.toLowerCase().split(/[\s,;]+/).filter((t) => t && t !== "account"))];
+  const set = toks.length > 1 ? new Set(toks) : null;
+  const q = toks.length === 1 ? toks[0] : "";
+  const keysOf = (r) => [r.account, r.supply, r.id_reading].map((v) => String(v ?? "").toLowerCase());
+  let rows = rdiscRows.filter((r) => (!rdiscKpi || (rdiscKpi.startsWith("bp:") ? r.billing_period === rdiscKpi.slice(3)
+      : rdiscKpi === "old7" ? Number(r.days_pending) > 7 : true)) &&
+    (set ? keysOf(r).some((k) => set.has(k)) : (!q || keysOf(r).some((k) => k.includes(q)))));
+  $("#rdisc-filter-search-count").textContent = set ? `${toks.length} values pasted` : "";
+  if (rdiscSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[rdiscSortKey], b[rdiscSortKey], rdiscSortDir));
+  return rows;
+}
+function rdiscUpdateSelectionUI() {
+  const n = rdiscSelected.size;
+  $("#rdisc-generate-btn").disabled = n === 0;
+  $("#rdisc-selection-hint").textContent = n ? `${n.toLocaleString()} reading(s) selected.` : "☝️ Check one or more rows above (or the header box for every row shown) to enable Generate.";
+}
+function rdiscRender() {
+  const byBp = {};
+  rdiscRows.forEach((r) => { byBp[r.billing_period] = (byBp[r.billing_period] || 0) + 1; });
+  const bpKpis = ["pending", "stuck", "services", "electricity", "water"];
+  const cards = [
+    [null, "total", "📋", "Pending validation > 3 days", rdiscRows.length],
+    ["old7", "missing", "⏰", "Older than 7 days", rdiscRows.filter((r) => Number(r.days_pending) > 7).length],
+  ].concat(Object.keys(byBp).map((bp, i) => [`bp:${bp}`, bpKpis[i % bpKpis.length], "🗓", bp, byBp[bp]]));
+  $("#rdisc-kpi-row").innerHTML = cards.map(([f, kpi, icon, label, v]) =>
+    `<div class="kpi-card kpi-card-clickable${(f === null ? !rdiscKpi : rdiscKpi === f) ? " is-active" : ""}" data-kpi="${kpi}" data-rdisc-filter="${f ?? ""}" title="Click to filter">` +
+    `<div class="kpi-value">${v.toLocaleString()}</div><div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${escapeHtml(label)}</div></div>`).join("");
+  const rows = rdiscVisible();
+  const shown = rows.slice(0, 2000);
+  const allChecked = shown.length > 0 && shown.every((r) => rdiscSelected.has(String(r.id_reading)));
+  const head = $("#rdisc-table thead tr");
+  head.innerHTML = `<th><input type="checkbox" id="rdisc-check-all" ${allChecked ? "checked" : ""} title="Select every row shown" /></th>` +
+    RDISC_COLUMNS.map((c) => `<th class="stats-table-th-sortable" data-sort="${c.key}">${c.label}${rdiscSortKey === c.key ? `<span class="stats-table-sort-arrow">${rdiscSortDir === 1 ? "▲" : "▼"}</span>` : ""}</th>`).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    rdiscSortDir = rdiscSortKey === th.dataset.sort ? -rdiscSortDir : 1; rdiscSortKey = th.dataset.sort; rdiscRender();
+  }));
+  $("#rdisc-check-all").addEventListener("change", (e) => {
+    shown.forEach((r) => (e.target.checked ? rdiscSelected.add(String(r.id_reading)) : rdiscSelected.delete(String(r.id_reading))));
+    rdiscRender();
+  });
+  const cell = (r, k) => {
+    const v = r[k] ?? "";
+    return (k === "reading_date" || k === "reading_prev_date") ? escapeHtml(String(v).slice(0, 10)) : escapeHtml(String(v));
+  };
+  $("#rdisc-table tbody").innerHTML = shown.map((r) => `<tr class="kpi-tint" data-kpi="${Number(r.days_pending) > 7 ? "missing" : "pending"}">` +
+    `<td><input type="checkbox" data-rdisc-id="${escapeHtml(String(r.id_reading))}" ${rdiscSelected.has(String(r.id_reading)) ? "checked" : ""} /></td>` +
+    RDISC_COLUMNS.map((c) => `<td>${cell(r, c.key)}</td>`).join("") + "</tr>").join("") ||
+    `<tr><td colspan="${RDISC_COLUMNS.length + 1}" class="hint-text">${rdiscRows.length ? "No readings match." : "No readings."}</td></tr>`;
+  renderFilteredCount("#rdisc-filtered-count", rows.length, rdiscRows.length);
+  if (rows.length > shown.length) $("#rdisc-filtered-count").textContent += ` (table shows the first ${shown.length.toLocaleString()} - use Export for all)`;
+  rdiscUpdateSelectionUI();
+}
+$("#rdisc-table").addEventListener("change", (e) => {
+  const cb = e.target.closest("input[data-rdisc-id]");
+  if (!cb) return;
+  cb.checked ? rdiscSelected.add(cb.dataset.rdiscId) : rdiscSelected.delete(cb.dataset.rdiscId);
+  rdiscUpdateSelectionUI();
+});
+$("#rdisc-kpi-row").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-rdisc-filter]");
+  if (!c) return;
+  const f = c.dataset.rdiscFilter || null;
+  rdiscKpi = rdiscKpi === f ? null : f;
+  rdiscRender();
+});
+$("#rdisc-filter-search").addEventListener("input", rdiscRender);
+$("#rdisc-detect-btn").addEventListener("click", async () => {
+  const btn = $("#rdisc-detect-btn");
+  btn.disabled = true;
+  $("#rdisc-summary").textContent = "Loading…";
+  try {
+    const data = await api("/api/reading-discrepancies/pending-validation", { method: "POST", body: {} });
+    rdiscRows = data.rows || [];
+    const ids = new Set(rdiscRows.map((r) => String(r.id_reading)));
+    [...rdiscSelected].forEach((id) => { if (!ids.has(id)) rdiscSelected.delete(id); });
+    $("#rdisc-filter-row").hidden = false;
+    $("#rdisc-export-btn").disabled = $("#rdisc-copy-btn").disabled = rdiscRows.length === 0;
+    $("#rdisc-summary").textContent = `${data.count.toLocaleString()} reading(s) in Pending validation with a reading date from ${data.date_from} to before ${data.date_to_exclusive} - ${(data.elapsed_ms / 1000).toFixed(1)}s.`;
+    rdiscRender();
+  } catch (err) {
+    $("#rdisc-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#rdisc-copy-btn").addEventListener("click", async () => {
+  const acc = [...new Set(rdiscVisible().map((r) => r.account).filter(Boolean))];
+  try { await navigator.clipboard.writeText(acc.join("\n")); showToast(`Copied ${acc.length.toLocaleString()} account(s).`); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#rdisc-export-btn").addEventListener("click", () => {
+  const rows = rdiscVisible();
+  if (!rows.length) return;
+  const keys = RDISC_COLUMNS.map((c) => c.key).concat(["read_status", "id_billing_period", "reading_type"]);
+  const lines = [keys.map((k) => k.toUpperCase()).join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = "reading_pending_validation.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+$("#rdisc-generate-btn").addEventListener("click", async () => {
+  const ids = [...rdiscSelected];
+  if (!ids.length) { showToast("Check one or more rows first.", true); return; }
+  const btn = $("#rdisc-generate-btn");
+  btn.disabled = true;
+  try {
+    const res = await api("/api/reading-discrepancies/generate", {
+      method: "POST",
+      body: { reading_ids: ids, audit_user: $("#rdisc-user").value.trim(), program: $("#rdisc-program").value.trim(), clean: $("#rdisc-clean").checked },
+    });
+    $("#rdisc-output").textContent = res.sql;
+    sgShowRollback("rdisc", res.rollback_sql);
+    $("#rdisc-gen-summary").textContent = `${res.reading_count} reading(s) -> Available (1000STSRED), IND_USAGE_TO_CAL = 1.` +
+      (res.skipped ? ` ${res.skipped} selected reading(s) are no longer Pending validation and were left out.` : "");
+    showToast("Update script generated.");
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    rdiscUpdateSelectionUI();
+  }
+});
+$("#rdisc-script-copy-btn").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#rdisc-output").textContent); showToast("Script copied to clipboard."); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#rdisc-script-download-btn").addEventListener("click", () => {
+  const url = URL.createObjectURL(new Blob([$("#rdisc-output").textContent], { type: "text/plain" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = "reading_pending_validation_to_available.sql";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
 // ---- Temp Dashboard tab 3 "Subsidized, bill not generated" (RJ 2026-10-12) ----
 // See temp_dashboard.build_subsidy_missing_bill_query. One row per account
 // with a subsidized (Bahraini First Account) service with >= 6 cycle bills,
@@ -10674,6 +10834,7 @@ const SG_GEN_OUTPUTS = {
   "biss2-generate-btn": ["#biss2-output"],
   "ibp-generate-btn": ["#ibp-output"],
   "usan-generate-btn": ["#usan-output", "#usan-gen-summary"],
+  "rdisc-generate-btn": ["#rdisc-output", "#rdisc-gen-summary"],
 };
 const SG_GEN_CLEARED = "-- Previous script cleared (a new one appears here when Generate succeeds).";
 // RJ 2026-10-09: rollback generated together with the fix (DOUBLE ITB, Case 1)

@@ -110,8 +110,17 @@ REB_DESCRIPTION = "WRONG-SANITARY HIGH BILL"
 FIX_PROGRAM_DEFAULT = "WRONG_SANITARY_HIGH"
 BILL_STATUS_INVOICED = "ESTFAC0005"
 # RJ 2026-10-09: "yes rebill now, even generated" - Generated (ESTFAC0008)
-# bills are rebilled like Invoiced ones, no warning.
-REBILLABLE_STATUSES = (BILL_STATUS_INVOICED, "ESTFAC0008")
+# bills were rebilled like Invoiced ones.
+# RJ 2026-10-14: "double itb is working in my system but the one from high
+# bill sanitary cannot be processed by my system". Live comparison: every
+# processed DOUBLE ITB activity held INVOICED bills (real BILL_NUMBER,
+# EXPIRATION_DATE, COLLECTION_STATUS); the High Sanitary ones held freshly
+# GENERATED bills (BILL_NUMBER = ID_BILL, no expiry / collection status) and
+# the 2026-10-09 ones were rejected (bills ended Cancelled). So only Invoiced
+# bills are rebilled now; an activity with a Generated (or other) bill is
+# skipped with a warning - rebill it once the bill is invoiced.
+BILL_STATUS_GENERATED = "ESTFAC0008"
+REBILLABLE_STATUSES = (BILL_STATUS_INVOICED,)
 
 
 def build_rebilling_context_query(sanitary_bill_ids) -> str:
@@ -197,12 +206,17 @@ def build_rebilling_script(rows: list[dict], *, user: str = "RMA", program: str 
         elif len(water) > 1:
             warnings.append(f"Bill {san} (account {acct}): {len(water)} Water bills for that period/date - all included.")
             lines.append(f"-- NOTE: {len(water)} Water bills match - all included")
-        for st_ in ([r.get("san_status")] + wst):
-            if st_ and st_ not in REBILLABLE_STATUSES:
-                lines.append(f"-- WARNING: a bill is {st_}, not Invoiced/Generated ({', '.join(REBILLABLE_STATUSES)}) - check before running")
-                warnings.append(f"Bill {san} (account {acct}): a bill in the activity is {st_}, not Invoiced/Generated.")
-                break
-        bills = [int(san)] + water
+        # RJ 2026-10-14: every bill of the activity must be Invoiced, else skip
+        not_inv = [s for s in ([r.get("san_status")] + wst) if s and s not in REBILLABLE_STATUSES]
+        if not_inv:
+            what = ", ".join(sorted(set(not_inv)))
+            hint = " (Generated = not invoiced yet - rebill after invoicing)" if BILL_STATUS_GENERATED in not_inv else ""
+            warnings.append(f"Bill {san} (account {acct}): a bill in the activity is {what}, not Invoiced{hint} - skipped.")
+            blocks.append(head + f"\n-- SKIPPED: a bill is {what}, not Invoiced ({BILL_STATUS_INVOICED}){hint}")
+            continue
+        # RJ 2026-10-14: same order as DOUBLE ITB (processed fine): Water bill(s)
+        # first, the Sanitary bill (which follows the Water) last.
+        bills = water + [int(san)]
         n_reb += 1
         n_bills += len(bills)
         lines.append(f"-- rebilling of bill(s) {', '.join(map(str, bills))}" + (" (processed by batch)" if batch else ""))
