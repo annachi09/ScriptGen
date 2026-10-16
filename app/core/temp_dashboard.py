@@ -306,6 +306,49 @@ DROP TABLE #sub; DROP TABLE #svc; DROP TABLE #miss; DROP TABLE #cyc; DROP TABLE 
 """
 
 
+# ---------------------------------------------------------------------------
+# Tab 4 - "Water vs Sanitary status" (RJ 2026-10-14): "find me cases of
+# account where the water service is active but the sanitary is pending
+# termination, or another case where the water is cancelled, but the
+# sanitary is pending".
+# GCCOM_CONTRACT_SERV_STATUS (live): ESTSC00001 Pending, 00002 Active,
+# 00003 Pending termination, 00004 Terminated, 00005 Cancelled, 00007 Suspended.
+#   Case A = Water (19) Active   + Sanitary (190) Pending termination
+#   Case B = Water (19) Cancelled + Sanitary (190) Pending
+# RJ 2026-10-15 correction: "i want for same account and the supply of water
+# and sanitary is the same" - the first version paired by NISS base across
+# accounts (wrong). Now: SAME payment form AND the same supply - the Water and
+# Sanitary sector supplies share GCCOM_SECTOR_SUPPLY.ID_SUPPLY (live: Water
+# 10221619-301 / Sanitary 10221619-701 -> ID_SUPPLY 221619).
+#   Case A = Sanitary Pending termination (ESTSC00003) + Water Active (ESTSC00002)
+#   Case B = Water Cancelled (ESTSC00005) + Sanitary Pending (ESTSC00001)
+# ---------------------------------------------------------------------------
+CS_STATUS_NAMES = {"ESTSC00001": "Pending", "ESTSC00002": "Active", "ESTSC00003": "Pending termination",
+                   "ESTSC00004": "Terminated", "ESTSC00005": "Cancelled", "ESTSC00007": "Suspended"}
+
+
+def build_water_sanitary_status_query() -> str:
+    return f"""
+SELECT CASE WHEN s.STATUS = 'ESTSC00003' THEN 'A' ELSE 'B' END AS CASE_TYPE,
+       pf.REFERENCE AS ACCOUNT, s.ID_PAYMENT_FORM, sss.ID_SUPPLY,
+       sss.NISS AS SAN_NISS, s.ID_CONTRACTED_SERVICE AS SAN_CS, s.STATUS AS SAN_STATUS,
+       s.FROM_DATE AS SAN_FROM, s.DROP_DATE AS SAN_DROP,
+       wss.NISS AS WATER_NISS, w.ID_CONTRACTED_SERVICE AS WATER_CS, w.STATUS AS WATER_STATUS,
+       w.FROM_DATE AS WATER_FROM, w.DROP_DATE AS WATER_DROP
+FROM GCCOM_CONTRACTED_SERVICE s WITH (NOLOCK)
+JOIN GCCOM_SECTOR_SUPPLY sss WITH (NOLOCK) ON sss.ID_SECTOR_SUPPLY = s.ID_SECTOR_SUPPLY
+JOIN GCCOM_CONTRACTED_SERVICE w WITH (NOLOCK)
+     ON w.ID_PAYMENT_FORM = s.ID_PAYMENT_FORM AND w.ID_OFFERED_SERVICE = {OFFERED_WATER}
+JOIN GCCOM_SECTOR_SUPPLY wss WITH (NOLOCK)
+     ON wss.ID_SECTOR_SUPPLY = w.ID_SECTOR_SUPPLY AND wss.ID_SUPPLY = sss.ID_SUPPLY
+JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = s.ID_PAYMENT_FORM
+WHERE s.ID_OFFERED_SERVICE = {OFFERED_SANITARY}
+  AND ((s.STATUS = 'ESTSC00003' AND w.STATUS = 'ESTSC00002')
+    OR (s.STATUS = 'ESTSC00001' AND w.STATUS = 'ESTSC00005'))
+ORDER BY 1, pf.REFERENCE
+"""
+
+
 def parse_accounts(text: str | None) -> list[str]:
     """Accounts pasted as one per line / comma / space separated -> unique list
     (RJ 2026-10-11: "let's focus on this accounts for now" - 387 pasted)."""

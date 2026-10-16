@@ -4470,6 +4470,26 @@ def temp_dashboard_sanitary_mismatch(body: TempDashboardSanitaryRequest, user: s
             "billing_period": body.billing_period, "elapsed_ms": res.elapsed_ms}
 
 
+# RJ 2026-10-14: Temp Dashboard tab 4 "Water vs Sanitary status"
+@app.post("/api/temp-dashboard/water-sanitary-status")
+def temp_dashboard_water_sanitary_status(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, temp_dashboard.build_water_sanitary_status_query(), timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    for r in rows:
+        r["san_status_name"] = temp_dashboard.CS_STATUS_NAMES.get(r.get("san_status"), r.get("san_status"))
+        r["water_status_name"] = temp_dashboard.CS_STATUS_NAMES.get(r.get("water_status"), r.get("water_status"))
+    a = sum(1 for r in rows if r.get("case_type") == "A")
+    return {"rows": rows, "count": len(rows), "case_a": a, "case_b": len(rows) - a,
+            "elapsed_ms": res.elapsed_ms}
+
+
 # RJ 2026-10-12: Temp Dashboard tab 3 "Subsidized, September not generated"
 # (temp_dashboard.build_subsidy_missing_bill_query) - ~90s live, 5-min timeout.
 @app.post("/api/temp-dashboard/subsidy-missing-bill")
@@ -4525,6 +4545,62 @@ def reading_discrepancies_pending(user: str = Depends(require_login)):
         by_type[r.get("reading_type_name") or "?"] = by_type.get(r.get("reading_type_name") or "?", 0) + 1
     return {"rows": rows, "count": len(rows), "by_period": by_period, "by_type": by_type,
             "date_from": dfrom, "date_to_exclusive": dto, "elapsed_ms": ms}
+
+
+# RJ 2026-10-16: tab 2 "Unbilled readings" (reading_discrepancies.build_unbilled_*)
+@app.get("/api/reading-discrepancies/periods")
+def reading_discrepancies_periods(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, reading_discrepancies.build_recent_periods_query(12))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"periods": [{"id": int(r[0]), "name": r[1]} for r in res.rows],
+            "types": reading_discrepancies.UNBILLED_READING_TYPES,
+            "statuses": reading_discrepancies.UNBILLED_READ_STATUSES}
+
+
+class UnbilledReadingsRequest(BaseModel):
+    billing_period: Optional[int] = None      # None = all periods of the last 6 months
+    reading_types: list[str] = []
+    statuses: list[str] = []
+
+
+@app.post("/api/reading-discrepancies/unbilled")
+def reading_discrepancies_unbilled(body: UnbilledReadingsRequest, user: str = Depends(require_login)):
+    import datetime as _dt
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        if body.billing_period:
+            period_ids = [int(body.billing_period)]
+        else:
+            today = _dt.date.today()
+            date_from, _ = reading_discrepancies.date_window(today)
+            pres = mssql.run_query(conn, reading_discrepancies.build_period_ids_query(date_from, today))
+            period_ids = [int(r[0]) for r in pres.rows]
+        sres = mssql.run_query(conn, reading_discrepancies.build_unbilled_summary_query(
+            period_ids, body.reading_types, body.statuses), timeout_seconds=300)
+        dres = mssql.run_query(conn, reading_discrepancies.build_unbilled_detail_query(
+            period_ids, body.reading_types, body.statuses), timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    summary = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(sres.columns, r)} for r in sres.rows]
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(dres.columns, r)} for r in dres.rows]
+    tn, sn = reading_discrepancies.UNBILLED_READING_TYPES, reading_discrepancies.UNBILLED_READ_STATUSES
+    for r in rows:
+        r["reading_type_name"] = tn.get(r.get("reading_type"), r.get("reading_type"))
+        r["read_status_name"] = sn.get(r.get("read_status"), r.get("read_status"))
+    total = sum(int(s.get("n") or 0) for s in summary)
+    return {"summary": summary, "rows": rows, "total": total, "row_count": len(rows),
+            "truncated": total > len(rows), "cap": reading_discrepancies.UNBILLED_ROW_CAP,
+            "period_ids": period_ids, "types": tn, "statuses": sn,
+            "elapsed_ms": sres.elapsed_ms + dres.elapsed_ms}
 
 
 class ReadingDiscrepanciesGenerateRequest(BaseModel):
@@ -4634,14 +4710,26 @@ def unusual_sanitary_rebilling(body: UnusualSanitaryRebillRequest, user: str = D
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     rows = [{c.lower(): v for c, v in zip(res.columns, r)} for r in res.rows]
+    # RJ 2026-10-14: Generated Sanitary bills get a correction (reading rows +
+    # XML + cancel + item to bill Pending) instead of a rebilling.
+    gen_ids = [str(r.get("san_id_bill")) for r in rows if r.get("san_status") == unusual_sanitary.BILL_STATUS_GENERATED]
+    fix_rows: list[dict] = []
+    if gen_ids:
+        try:
+            fres = mssql.run_query(conn, unusual_sanitary.build_generated_fix_context_query(gen_ids))
+        except mssql.ConnectionError_ as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        fix_rows = [{c.lower(): v for c, v in zip(fres.columns, r)} for r in fres.rows]
     program = (body.program or "").strip() or unusual_sanitary.FIX_PROGRAM_DEFAULT
     out = unusual_sanitary.build_rebilling_script(
         rows, user=(body.user or "").strip() or double_itb.FIX_USER_DEFAULT,
-        program=program, creation_user=body.creation_user, batch=body.batch, clean=body.clean)
-    if out["rebilling_count"]:   # nothing generated -> nothing to keep
+        program=program, creation_user=body.creation_user, batch=body.batch, clean=body.clean,
+        fix_rows=fix_rows)
+    if out["rebilling_count"] or out.get("fix_count"):   # nothing generated -> nothing to keep
         _record_script(user, script_history.KIND_HIGH_SANITARY_REBILLING,
-                       f"High Sanitary rebilling ({out['rebilling_count']} activity(ies), {out['bill_count']} bill(s))",
-                       program, out["sql_text"], out["rebilling_count"], len(out["warnings"]))
+                       f"High Sanitary rebilling ({out['rebilling_count']} activity(ies), {out['bill_count']} bill(s))"
+                       f" + {out.get('fix_count', 0)} Generated-bill correction(s)",
+                       program, out["sql_text"], out["rebilling_count"] + out.get("fix_count", 0), len(out["warnings"]))
     if out.get("rollback_sql"):
         _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "ROLLBACK of High Sanitary rebilling",
                        program, out["rollback_sql"], out["rebilling_count"], 0)

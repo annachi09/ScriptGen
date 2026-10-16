@@ -1770,6 +1770,7 @@
           <button type="button" class="da-subnav-btn is-active" data-tmpd-sub="accounts">Accounts &amp; readings</button>
           <button type="button" class="da-subnav-btn" data-tmpd-sub="sanitary">SANITARY not Match Water Status</button>
           <button type="button" class="da-subnav-btn" data-tmpd-sub="subsidy">Subsidized, bill not generated</button>
+          <button type="button" class="da-subnav-btn" data-tmpd-sub="wsstatus">Water vs Sanitary status</button>
         </nav>
 
         <div class="da-subpage is-active" data-tmpd-sub="accounts">
@@ -1860,6 +1861,35 @@
         </div>
         </div>
 
+        <!-- RJ 2026-10-14: fourth tab - Water vs Sanitary contract status mismatch -->
+        <div class="da-subpage" data-tmpd-sub="wsstatus">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Water (19) and Sanitary (190) services on the <b>same account</b> and the <b>same supply</b> (GCCOM_SECTOR_SUPPLY.ID_SUPPLY, e.g. 10221619-301 / 10221619-701). <b>Case A</b>: Sanitary <b>Pending termination</b> while Water is <b>Active</b>. <b>Case B</b>: Water <b>Cancelled</b> while Sanitary is <b>Pending</b>.</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Water vs Sanitary status</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="tws-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="tws-copy-btn" disabled title="Copy the visible accounts (one per line)">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="tws-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="tws-summary">Click Scan to load.</div>
+          <div class="kpi-row" id="tws-kpi-row" style="margin:14px 0 4px;"></div>
+          <div class="key-panel-row" id="tws-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <textarea id="tws-filter-search" class="text-input text-input-sm" rows="2" placeholder="Account / NISS… or paste many, one per line" style="width:220px;resize:vertical;"></textarea>
+            <span class="hint-text" id="tws-filter-search-count"></span>
+          </div>
+          <div class="hint-text" id="tws-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="tws-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        </div>
+
         <!-- RJ 2026-10-12: third tab - subsidized accounts whose period bill is not generated -->
         <div class="da-subpage" data-tmpd-sub="subsidy">
         <p class="page-subtitle" style="margin:-6px 0 14px;">Accounts with a subsidized service - tariff <b>Domestic - Bahraini First Account</b> (E-D2 10000000003, W-D2 10000000004, E-D2-NM 10000000006) - that already has <b>at least 6 cycle bills</b> (TFGEN00001, not Rebilled / Cancelled, not Credit Note), where the billing period's bill is <b>not generated for every active service</b> of the account, and the account has a <b>not-yet-billed reading</b> in the period (Anomalous 5000 / Available 1000 / Sent to bill 6000; Cycle, Distribution or Direct Connection). <b>None</b> = no service billed in the period (main focus); <b>Partial</b> = some services billed.</p>
@@ -1899,7 +1929,50 @@
         </header>
         <nav class="da-subnav" aria-label="Reading Discrepancies tabs">
           <button type="button" class="da-subnav-btn is-active" data-rdisc-sub="pending">Pending validation &gt; 3 days</button>
+          <button type="button" class="da-subnav-btn" data-rdisc-sub="unbilled">Unbilled readings</button>
         </nav>
+
+        <!-- RJ 2026-10-16: tab 2 - unbilled readings per billing period (dashboard) -->
+        <div class="da-subpage" data-rdisc-sub="unbilled">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Readings of type <b>Cycle, Direct Connection, Distribution, Removal or Disconnection</b> that are still <b>not billed</b> - any status except Billed (7000), UAU - Billed (7001) and Terminated Not Billed (8000).</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Unbilled readings</h2>
+            <div class="card-header-actions">
+              <label class="field-label">Billing period</label>
+              <select id="rdu-bp" class="text-input text-input-sm" style="min-width:190px;"><option value="">All - last 6 months</option></select>
+              <button type="button" class="btn btn-pill" id="rdu-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="rdu-copy-btn" disabled title="Copy the checked readings' accounts (or all visible if none checked)">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="rdu-copy-ids-btn" disabled title="Copy the checked reading ids (or all visible if none checked)">📋 Copy reading ids</button>
+              <button type="button" class="btn btn-pill" id="rdu-export-btn" disabled title="Checked rows, or all visible if none checked">⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="key-panel-row" style="margin:6px 0 0;flex-wrap:wrap;">
+            <label class="field-label">Reading types</label>
+            <span id="rdu-types" class="hx-chips"></span>
+          </div>
+          <div class="hint-text" id="rdu-summary">Pick a billing period and click Scan.</div>
+          <div class="kpi-row" id="rdu-kpi-row" style="margin:14px 0 4px;"></div>
+          <div class="grid-wrap" id="rdu-matrix-wrap" hidden style="margin:10px 0;">
+            <table class="data-grid" id="rdu-matrix"><thead><tr></tr></thead><tbody></tbody></table>
+          </div>
+          <div id="rdu-periods" class="rdu-bars" hidden></div>
+          <div class="key-panel-row" id="rdu-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <textarea id="rdu-filter-search" class="text-input text-input-sm" rows="2" placeholder="Account / supply / reading… or paste many, one per line" style="width:240px;resize:vertical;"></textarea>
+            <span class="hint-text" id="rdu-filter-search-count"></span>
+            <span class="hint-text" id="rdu-selection" style="margin-left:auto;"></span>
+            <button type="button" class="btn btn-pill btn-sm" id="rdu-clear-btn">Clear filters</button>
+          </div>
+          <div class="hint-text" id="rdu-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="rdu-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        </div>
         <div class="da-subpage is-active" data-rdisc-sub="pending">
         <p class="page-subtitle" style="margin:-6px 0 14px;">Readings still in <b>Pending validation</b> (9000STSRED) whose reading date is more than <b>3 days</b> ago, reading date within the <b>last 6 months</b>.</p>
         <div class="card">

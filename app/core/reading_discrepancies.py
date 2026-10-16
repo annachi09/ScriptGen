@@ -100,6 +100,91 @@ DROP TABLE #r;
 """
 
 
+# ---------------------------------------------------------------------------
+# Tab 2 - "Unbilled readings" (RJ 2026-10-16): "add a new tab, unbilled
+# readings per billing period that i can check all. idea is direct connection/
+# distribution/removal/cycle/disconnection that are not billed or terminated
+# not billed or uau billed" + "make a good dashboard".
+# Reading types (GCGT_RE_READING_TYPE, live): TIPTL00003 Cycle, TIPTL00005
+# Direct Connection, TIPTL00017 Distribution, TIPTL00002 Removal, TIPTL00010
+# Disconnection. "Unbilled" = any status except the 3 billed/closed ones
+# (GCGT_RE_READ_STATUS, live): 7000STSRED Billed, 7001STSRED UAU - Billed,
+# 8000STSRED Terminated Not Billed. The status is filtered with an explicit IN
+# list (a NOT IN scanned the table and timed out live).
+# ---------------------------------------------------------------------------
+UNBILLED_READING_TYPES = {
+    "TIPTL00003": "Cycle", "TIPTL00005": "Direct Connection", "TIPTL00017": "Distribution",
+    "TIPTL00002": "Removal", "TIPTL00010": "Disconnection",
+}
+UNBILLED_READ_STATUSES = {
+    "0500STSRED": "Pending reading", "0600STSRED": "Pending reading (backup)", "1000STSRED": "Available",
+    "1500STSRED": "Pending curve treatment", "3000STSRED": "Processing", "4000STSRED": "Consumption calculated",
+    "5000STSRED": "Anomalous consumption", "6000STSRED": "Sent to bill", "9000STSRED": "Pending validation",
+}
+CLOSED_READ_STATUSES = {"7000STSRED": "Billed", "7001STSRED": "UAU - Billed", "8000STSRED": "Terminated Not Billed"}
+UNBILLED_ROW_CAP = 20000
+
+
+def build_recent_periods_query(months_back: int = 12) -> str:
+    """Billing periods for the picker: from N months ago up to the current one."""
+    return (f"SELECT ID_BILLING_PERIOD, DESCRIPTION, INITIAL_DATE, END_DATE FROM GCCOM_BILLING_PERIOD WITH (NOLOCK) "
+            f"WHERE END_DATE >= DATEADD(month, -{int(months_back)}, CAST(GETDATE() AS date)) AND INITIAL_DATE <= GETDATE() "
+            f"ORDER BY ID_BILLING_PERIOD DESC")
+
+
+def _unbilled_where(period_ids, reading_types, statuses) -> str:
+    ids = [int(p) for p in period_ids or []] or [-1]
+    types = [t for t in (reading_types or UNBILLED_READING_TYPES) if t in UNBILLED_READING_TYPES] or list(UNBILLED_READING_TYPES)
+    sts = [s for s in (statuses or UNBILLED_READ_STATUSES) if s in UNBILLED_READ_STATUSES] or list(UNBILLED_READ_STATUSES)
+    return (f"r.ID_BILLING_PERIOD IN ({', '.join(str(i) for i in ids)})\n"
+            f"  AND r.READ_STATUS IN ({', '.join(chr(39) + s + chr(39) for s in sts)})\n"
+            f"  AND r.READING_TYPE IN ({', '.join(chr(39) + t + chr(39) for t in types)})")
+
+
+def build_unbilled_summary_query(period_ids, reading_types=None, statuses=None) -> str:
+    """Counts per billing period x reading type x status (the dashboard numbers)."""
+    return f"""
+SELECT r.ID_BILLING_PERIOD, bp.DESCRIPTION AS BILLING_PERIOD, r.READING_TYPE, r.READ_STATUS, COUNT(*) AS N,
+       SUM(CASE WHEN r.READING_DATE < DATEADD(day, -7, CAST(GETDATE() AS date)) THEN 1 ELSE 0 END) AS OLDER_7D
+FROM GCGT_RE_READING r WITH (NOLOCK)
+LEFT JOIN GCCOM_BILLING_PERIOD bp WITH (NOLOCK) ON bp.ID_BILLING_PERIOD = r.ID_BILLING_PERIOD
+WHERE {_unbilled_where(period_ids, reading_types, statuses)}
+GROUP BY r.ID_BILLING_PERIOD, bp.DESCRIPTION, r.READING_TYPE, r.READ_STATUS
+ORDER BY r.ID_BILLING_PERIOD DESC, r.READING_TYPE, r.READ_STATUS
+"""
+
+
+def build_unbilled_detail_query(period_ids, reading_types=None, statuses=None, cap: int = UNBILLED_ROW_CAP) -> str:
+    inactive = ", ".join(f"'{s}'" for s in INACTIVE_CS_STATUSES)
+    return f"""
+SET NOCOUNT ON;
+IF OBJECT_ID('tempdb..#u') IS NOT NULL DROP TABLE #u;
+
+SELECT TOP ({int(cap)}) r.ID_READING, r.ID_SECTOR_SUPPLY, r.READ_STATUS, r.ID_BILLING_PERIOD, r.READING_TYPE,
+       r.READING_PREV_DATE, r.READING_DATE, r.PREV_VALUE, r.VALUE, r.READING_USAGE, r.READY_USAGE, r.IND_USAGE_TO_CAL
+INTO #u
+FROM GCGT_RE_READING r WITH (NOLOCK)
+WHERE {_unbilled_where(period_ids, reading_types, statuses)}
+ORDER BY r.READING_DATE;
+
+SELECT acc.ACCOUNT, ss.NISS AS SUPPLY, r.ID_READING, r.READ_STATUS, r.ID_BILLING_PERIOD,
+       bp.DESCRIPTION AS BILLING_PERIOD, r.READING_TYPE, r.READING_PREV_DATE, r.READING_DATE,
+       DATEDIFF(day, r.READING_DATE, GETDATE()) AS DAYS_OPEN,
+       r.PREV_VALUE, r.VALUE, r.READING_USAGE, r.READY_USAGE, r.IND_USAGE_TO_CAL
+FROM #u r
+LEFT JOIN GCCOM_SECTOR_SUPPLY ss WITH (NOLOCK) ON ss.ID_SECTOR_SUPPLY = r.ID_SECTOR_SUPPLY
+OUTER APPLY (SELECT TOP 1 pf.REFERENCE AS ACCOUNT
+               FROM GCCOM_CONTRACTED_SERVICE cs WITH (NOLOCK)
+               JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = cs.ID_PAYMENT_FORM
+              WHERE cs.ID_SECTOR_SUPPLY = r.ID_SECTOR_SUPPLY
+              ORDER BY CASE WHEN cs.STATUS IN ({inactive}) THEN 1 ELSE 0 END, cs.ID_CONTRACTED_SERVICE DESC) acc
+LEFT JOIN GCCOM_BILLING_PERIOD bp WITH (NOLOCK) ON bp.ID_BILLING_PERIOD = r.ID_BILLING_PERIOD
+ORDER BY r.READING_DATE, ss.NISS;
+
+DROP TABLE #u;
+"""
+
+
 def _clean_ids(reading_ids) -> list[int]:
     out: list[int] = []
     seen: set[int] = set()

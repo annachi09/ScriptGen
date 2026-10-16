@@ -499,6 +499,26 @@ button.is-busy::after { content: ""; display: inline-block; width: 12px; height:
 /* Row tinted with its KPI card's colour (class kpi-tint - "kpi-row" is the card grid) */
 table tbody tr.kpi-tint > td { background: color-mix(in srgb, var(--kpi-c) 11%, var(--card-bg)) !important; }
 table tbody tr.kpi-tint > td:first-child { box-shadow: inset 4px 0 0 var(--kpi-c); }
+
+/* RJ 2026-10-16: Reading Discrepancies "Unbilled readings" dashboard -
+   type x status heat matrix + per-period bars (both click-to-filter). */
+#rdu-matrix th, #rdu-matrix td { text-align: right; white-space: nowrap; }
+#rdu-matrix th:first-child, #rdu-matrix td:first-child, .rdu-mx-row { text-align: left; }
+.rdu-mx-head, .rdu-mx-row, .rdu-mx-cell { cursor: pointer; }
+.rdu-mx-cell { font-variant-numeric: tabular-nums;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 22%, transparent) var(--rdu-w, 0%), transparent var(--rdu-w, 0%)); }
+.rdu-mx-cell:hover, .rdu-mx-head:hover, .rdu-mx-row:hover { outline: 1px solid var(--accent); outline-offset: -1px; }
+.rdu-mx-cell.is-active, .rdu-mx-head.is-active, .rdu-mx-row.is-active { outline: 2px solid var(--accent); outline-offset: -2px; font-weight: 600; }
+.rdu-bars { display: grid; gap: 6px; margin: 8px 0 12px; max-width: 760px; }
+.rdu-bar { display: grid; grid-template-columns: 170px 1fr 90px; align-items: center; gap: 10px; cursor: pointer;
+  padding: 3px 6px; border-radius: 6px; }
+.rdu-bar:hover { background: var(--surface-hover); }
+.rdu-bar.is-active { background: var(--accent-bg-soft); font-weight: 600; }
+.rdu-bar-label { color: var(--text-secondary); font-size: 13px; }
+.rdu-bar-track { height: 10px; background: var(--surface-2); border-radius: 5px; overflow: hidden; border: 1px solid var(--card-border); }
+.rdu-bar-fill { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
+.rdu-bar-n { text-align: right; font-variant-numeric: tabular-nums; }
+.rdu-type-chip:not(.is-active) { opacity: .45; }
 table tbody tr.kpi-tint:hover > td { background: color-mix(in srgb, var(--kpi-c) 20%, var(--card-bg)) !important; }
 table tbody tr.kpi-tint.is-selected > td { background: color-mix(in srgb, var(--kpi-c) 26%, var(--card-bg)) !important; }
 :root[data-theme="dark"] table tbody tr.kpi-tint > td { background: color-mix(in srgb, var(--kpi-c) 18%, var(--card-bg)) !important; }

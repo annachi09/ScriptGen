@@ -3029,6 +3029,90 @@ generated" rule); info rows now Water bill(s) first, Sanitary last.
 Activities 21296002-21296011 (inserted 2026-10-14 17:12, In process, 20 Generated
 bills set to Disputed) were given a by-hand rollback (bills back to ESTFAC0008).
 
+### Reading Discrepancies tab 2: "Unbilled readings" dashboard (2026-10-16)
+
+RJ: "add a new tab, unbilled readings per billing period that i can check all. idea is
+direct connection/distribution/removal/cycle/disconnection that are not billed or
+terminated not billed or uau billed" + "make a good dashboard".
+- Reading types: TIPTL00003 Cycle, TIPTL00005 Direct Connection, TIPTL00017 Distribution,
+  TIPTL00002 Removal, TIPTL00010 Disconnection. Unbilled = status NOT Billed 7000STSRED /
+  UAU - Billed 7001STSRED / Terminated Not Billed 8000STSRED, written as an explicit IN list
+  of the other 9 statuses (0500/0600/1000/1500/3000/4000/5000/6000/9000STSRED) - the NOT IN
+  version scanned GCGT_RE_READING and did not finish live.
+- `reading_discrepancies.build_recent_periods_query`, `build_unbilled_summary_query` (counts
+  per period x type x status + older than 7 days) and `build_unbilled_detail_query` (#temp,
+  TOP 20,000 oldest first, account + supply). Routes `GET /api/reading-discrepancies/periods`,
+  `POST /api/reading-discrepancies/unbilled` {billing_period | null = last 6 months,
+  reading_types}.
+- Dashboard: billing-period picker (latest period selected, or "All - last 6 months"),
+  reading-type toggle chips, KPI cards (All / > 7 days / one per type), a type x status
+  heat matrix and per-period bars - every card / matrix cell / header / bar filters the
+  table. Table: check-all + per-row checkboxes, sortable, search takes a pasted list;
+  Copy accounts / Copy reading ids / Export CSV use the checked rows (or all visible).
+  Cards and matrix count ALL unbilled readings even when the table hits the 20,000 cap.
+- Not live-verified yet: the DB tunnel stopped answering on 2026-10-16 while testing
+  ("Could not reach localhost:1433").
+
+### Temp Dashboard tab 4: "Water vs Sanitary status" (2026-10-14)
+
+RJ: "find me cases of account where the water service is active but the sanitary is
+pending termination, or another case where the water is cancelled, but the sanitary is
+pending".
+- GCCOM_CONTRACT_SERV_STATUS (live): ESTSC00001 Pending, 00002 Active, 00003 Pending
+  termination, 00004 Terminated, 00005 Cancelled, 00007 Suspended.
+- Case A = Water (19) Active + Sanitary (190) Pending termination; Case B = Water
+  Cancelled + Sanitary Pending.
+- Pairing: by payment form only 1 pair existed (all Case B), so Water and Sanitary are
+  paired by premise - same NISS base (part before '-', e.g. 10058403-301 / -701).
+  Columns SAME_ACCOUNT and SAN_ACCOUNT_ACTIVE_WATER separate real mismatches from tenant
+  changes. `temp_dashboard.build_water_sanitary_status_query` (#temp batch), route
+  `POST /api/temp-dashboard/water-sanitary-status`.
+- Page: KPIs All / A / B / Same account / Sanitary account without active Water; search
+  takes pasted accounts / NISS; Copy accounts + CSV; auto-scans on first open.
+- Live 2026-10-14 (~30s): 157 pairs - Case A 6 (all on different accounts, none of the
+  Sanitary accounts has an active Water), Case B 151 (1 on the same account: 1103003701,
+  NISS 10058403; 144 Sanitary accounts without active Water).
+- **2026-10-15 correction** - RJ: "this last one that we did is wrong. Look i want for same
+  account and the supply of water and sanitary is the same. I want to get Case A =
+  Sanitary is Pending Termination, but water is active, Case B = Water is cancelled and
+  Sanitary is Pending". The NISS-base pairing across accounts is dropped: Water and
+  Sanitary must be on the SAME payment form AND their sector supplies must share
+  GCCOM_SECTOR_SUPPLY.ID_SUPPLY (live: 10221619-301 / 10221619-701 -> ID_SUPPLY 221619).
+  Columns: Case, Account, Supply (ID_SUPPLY), Sanitary NISS / status / from / drop, Water
+  NISS / status / from / drop, contract ids. KPIs All / A / B. Plain query, ~4s.
+  Live 2026-10-15: Case A 0, Case B 1 (account 1103003701: Sanitary 10058403-701 Pending
+  from 2026-09-20, Water 10058403-301 Cancelled, from 2026-08-11).
+
+### Wrong Bill Case 1: Generated bills get a correction, Invoiced bills a rebilling (2026-10-14)
+
+RJ: "for high bill case, if the bill is still in generated status, the correction is to
+update the XML of both water and sanitary, cancel the SANITARY bill and change the ITB
+status to pending for it to be billed again, only when the bill is in generated state, no
+rebilling needed. Rebilling is only when it is invoiced".
+- `unusual_sanitary.build_rebilling_script(rows, fix_rows=...)`: Sanitary bill
+  ESTFAC0008 Generated -> correction block; Invoiced (all bills ESTFAC0005) -> rebilling as
+  before (Water first); anything else skipped with a warning.
+- Correction (`build_generated_fix_blocks`, data from
+  `build_generated_fix_context_query`: Sanitary item -> reading rows -> Water item on the
+  same reading on the Water bill of the same payment form / period / billing date, plus
+  both XMLs' current `<consumption>` and node count):
+  1. Sanitary GCCOM_READINGS_ITEMSTOBILL row = Water row of the same reading (PREV_VALUE,
+     VALUE, READY_USAGE, IND_ESTIMATE, READING_DATE) - the cause in every case seen
+     (Sanitary PREV_VALUE > VALUE -> rollover ~99,999);
+  2. Sanitary AND Water XML `<consumption>` = Water reading rows' READY_USAGE (REPLACE of
+     the single node; the XMLs' own sectorSupplyId / idContractedService /
+     idBillingService untouched; skipped with a warning if not exactly 1 node);
+  3. Sanitary bill ESTFAC0008 -> ESTFAC0007 Cancelled (Water bill untouched);
+  4. Sanitary item to bill STTOBILL07 -> STTOBILL01 Pending.
+  Every statement guarded by the value it expects; rollback generated too.
+- Route `/api/unusual-sanitary/rebilling` and the 7 AM alert e-mail both pass the
+  correction rows. Script History records rebilling + correction counts.
+- Live: the 10 activities 21296002-21296011 were rejected in the application and the
+  by-hand revert script was run; all 10 Sanitary items were re-billed today with the right
+  usage (new bills 1076909315-1076909324, amounts 0-0.31 instead of ~15,500). Their Water
+  XMLs still show the rollover `<consumption>` (e.g. 99999.0); the Water bills were not
+  affected. The new context query returns the expected rows on them (~1s).
+
 ### Reading Discrepancies menu (2026-10-13)
 
 RJ: "create another menu, Reading Discrepancies, first tab show all reading which is

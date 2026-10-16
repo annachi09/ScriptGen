@@ -167,13 +167,21 @@ def run_unusual_sanitary(force: bool = False) -> dict:
         ids = sorted({str(r.get("id_bill")) for r in rows if str(r.get("id_bill") or "").isdigit()})
         ctx = mssql.run_query(conn, unusual_sanitary.build_rebilling_context_query(ids))
         ctx_rows = [{c.lower(): v for c, v in zip(ctx.columns, r)} for r in ctx.rows]
-        script = unusual_sanitary.build_rebilling_script(ctx_rows)
+        # RJ 2026-10-14: Generated Sanitary bills -> correction, not rebilling
+        gen_ids = [str(r.get("san_id_bill")) for r in ctx_rows
+                   if r.get("san_status") == unusual_sanitary.BILL_STATUS_GENERATED]
+        fix_rows = []
+        if gen_ids:
+            fx = mssql.run_query(conn, unusual_sanitary.build_generated_fix_context_query(gen_ids))
+            fix_rows = [{c.lower(): v for c, v in zip(fx.columns, r)} for r in fx.rows]
+        script = unusual_sanitary.build_rebilling_script(ctx_rows, fix_rows=fix_rows)
         attachments.append((f"wrong_sanitary_high_rebilling_{today}.sql", script["sql_text"].encode("utf-8"), "text/plain"))
         if script.get("rollback_sql"):
             attachments.append((f"wrong_sanitary_high_rebilling_{today}_ROLLBACK.sql",
                                 script["rollback_sql"].encode("utf-8"), "text/plain"))
         body += (f"\n\n==== REBILLING SCRIPT ({script['rebilling_count']} activit"
-                 f"{'y' if script['rebilling_count'] == 1 else 'ies'}, {script['bill_count']} bill row(s)) - "
+                 f"{'y' if script['rebilling_count'] == 1 else 'ies'}, {script['bill_count']} bill row(s); "
+                 f"{script.get('fix_count', 0)} Generated-bill correction(s)) - "
                  f"also attached as .sql. Review before running. ====\n\n" + script["sql_text"])
     except Exception as exc:  # noqa: BLE001
         body += f"\n\n(Rebilling script could not be generated: {exc} - use ScriptGen > Wrong Bill > Case 1 > Generate Rebilling Script.)"

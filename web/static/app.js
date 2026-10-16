@@ -9864,8 +9864,8 @@ const HX_REFRESH = {
   bulkchecker: () => ({ fn: () => bcRunSearch({ refresh: true }) }),
   rebillingmonitor: () => ({ btn: "#rbm-detect-btn" }),
   pendingsr: () => ({ btn: "#psr-detect-btn" }),
-  tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", subsidy: "#tsub-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
-  readingdiscrepancies: () => ({ btn: "#rdisc-detect-btn" }),
+  tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", subsidy: "#tsub-detect-btn", wsstatus: "#tws-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
+  readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
@@ -10184,6 +10184,7 @@ $$(".da-subnav-btn[data-tmpd-sub]").forEach((btn) => {
     $$(".da-subpage[data-tmpd-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.tmpdSub === sub));
     if (sub === "sanitary" && !tsanLoaded) $("#tsan-detect-btn").click();
     if (sub === "subsidy" && !tsubLoaded) $("#tsub-detect-btn").click();
+    if (sub === "wsstatus" && !twsLoaded) $("#tws-detect-btn").click();
   });
 });
 let tsanRows = [], tsanKpi = null, tsanLoaded = false, tsanSortKey = null, tsanSortDir = 1;
@@ -10455,6 +10456,311 @@ $("#rdisc-script-download-btn").addEventListener("click", () => {
   const url = URL.createObjectURL(new Blob([$("#rdisc-output").textContent], { type: "text/plain" }));
   const a = document.createElement("a");
   a.href = url; a.download = "reading_pending_validation_to_available.sql";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---- Temp Dashboard tab 4 "Water vs Sanitary status" (RJ 2026-10-14) ----
+// See temp_dashboard.build_water_sanitary_status_query. Case A = Water Active +
+// Sanitary Pending termination; Case B = Water Cancelled + Sanitary Pending.
+let twsRows = [], twsKpi = null, twsLoaded = false, twsSortKey = null, twsSortDir = 1;
+const TWS_COLUMNS = [
+  { key: "case_label", label: "Case" },
+  { key: "account", label: "Account" },
+  { key: "id_supply", label: "Supply" },
+  { key: "san_niss", label: "Sanitary NISS" },
+  { key: "san_status_name", label: "Sanitary status" },
+  { key: "san_from", label: "Sanitary from" },
+  { key: "san_drop", label: "Sanitary drop" },
+  { key: "water_niss", label: "Water NISS" },
+  { key: "water_status_name", label: "Water status" },
+  { key: "water_from", label: "Water from" },
+  { key: "water_drop", label: "Water drop" },
+  { key: "san_cs", label: "Sanitary CS" },
+  { key: "water_cs", label: "Water CS" },
+];
+const TWS_PRED = {
+  A: (r) => r.case_type === "A", B: (r) => r.case_type === "B",
+};
+function twsVisible() {
+  const toks = [...new Set($("#tws-filter-search").value.toLowerCase().split(/[\s,;]+/).filter((t) => t && t !== "account"))];
+  const set = toks.length > 1 ? new Set(toks) : null;
+  const q = toks.length === 1 ? toks[0] : "";
+  const keysOf = (r) => [r.account, r.san_niss, r.water_niss].map((v) => String(v ?? "").toLowerCase());
+  let rows = twsRows.filter((r) => (!twsKpi || TWS_PRED[twsKpi](r)) &&
+    (set ? keysOf(r).some((k) => set.has(k)) : (!q || keysOf(r).some((k) => k.includes(q)))));
+  $("#tws-filter-search-count").textContent = set ? `${toks.length} values pasted` : "";
+  if (twsSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[twsSortKey], b[twsSortKey], twsSortDir));
+  return rows;
+}
+function twsRender() {
+  const n = (k) => twsRows.filter(TWS_PRED[k]).length;
+  const cards = [
+    [null, "total", "📋", "All mismatches", twsRows.length],
+    ["A", "pending", "💧", "A: Sanitary Pending termination / Water Active", n("A")],
+    ["B", "missing", "🚫", "B: Water Cancelled / Sanitary Pending", n("B")],
+  ];
+  $("#tws-kpi-row").innerHTML = cards.map(([f, kpi, icon, label, v]) =>
+    `<div class="kpi-card kpi-card-clickable${(f === null ? !twsKpi : twsKpi === f) ? " is-active" : ""}" data-kpi="${kpi}" data-tws-filter="${f ?? ""}" title="Click to filter">` +
+    `<div class="kpi-value">${v.toLocaleString()}</div><div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${escapeHtml(label)}</div></div>`).join("");
+  const head = $("#tws-table thead tr");
+  head.innerHTML = TWS_COLUMNS.map((c) => `<th class="stats-table-th-sortable" data-sort="${c.key}">${c.label}${twsSortKey === c.key ? `<span class="stats-table-sort-arrow">${twsSortDir === 1 ? "▲" : "▼"}</span>` : ""}</th>`).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    twsSortDir = twsSortKey === th.dataset.sort ? -twsSortDir : 1; twsSortKey = th.dataset.sort; twsRender();
+  }));
+  const rows = twsVisible();
+  const cell = (r, k) => /_from$|_drop$/.test(k) ? escapeHtml(String(r[k] ?? "").slice(0, 10)) : escapeHtml(String(r[k] ?? ""));
+  $("#tws-table tbody").innerHTML = rows.slice(0, 2000).map((r) => `<tr class="kpi-tint" data-kpi="${r.case_type === "A" ? "pending" : "missing"}">` +
+    TWS_COLUMNS.map((c) => `<td>${cell(r, c.key)}</td>`).join("") + "</tr>").join("") ||
+    `<tr><td colspan="${TWS_COLUMNS.length}" class="hint-text">${twsRows.length ? "No rows match." : "No mismatches."}</td></tr>`;
+  renderFilteredCount("#tws-filtered-count", rows.length, twsRows.length);
+}
+$("#tws-kpi-row").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-tws-filter]");
+  if (!c) return;
+  const f = c.dataset.twsFilter || null;
+  twsKpi = twsKpi === f ? null : f;
+  twsRender();
+});
+$("#tws-filter-search").addEventListener("input", twsRender);
+$("#tws-detect-btn").addEventListener("click", async () => {
+  const btn = $("#tws-detect-btn");
+  btn.disabled = true; twsLoaded = true;
+  $("#tws-summary").textContent = "Loading…";
+  try {
+    const data = await api("/api/temp-dashboard/water-sanitary-status", { method: "POST", body: {} });
+    twsRows = (data.rows || []).map((r) => ({ ...r, case_label: r.case_type === "A" ? "A - San. Pending termination / Water Active" : "B - Water Cancelled / San. Pending" }));
+    $("#tws-filter-row").hidden = false;
+    $("#tws-export-btn").disabled = $("#tws-copy-btn").disabled = twsRows.length === 0;
+    $("#tws-summary").textContent = `${data.count.toLocaleString()} account(s) with Water and Sanitary on the same account and supply: ${data.case_a} Case A, ${data.case_b} Case B - ${(data.elapsed_ms / 1000).toFixed(1)}s.`;
+    twsRender();
+  } catch (err) {
+    $("#tws-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#tws-copy-btn").addEventListener("click", async () => {
+  const acc = [...new Set(twsVisible().map((r) => r.account).filter(Boolean))];
+  try { await navigator.clipboard.writeText(acc.join("\n")); showToast(`Copied ${acc.length.toLocaleString()} account(s).`); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#tws-export-btn").addEventListener("click", () => {
+  const rows = twsVisible();
+  if (!rows.length) return;
+  const keys = TWS_COLUMNS.map((c) => c.key).concat(["san_status", "water_status"]);
+  const lines = [keys.map((k) => k.toUpperCase()).join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = "water_vs_sanitary_status.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---- Reading Discrepancies tab 2 "Unbilled readings" dashboard (RJ 2026-10-16) ----
+// See reading_discrepancies.build_unbilled_*. Cycle / Direct Connection /
+// Distribution / Removal / Disconnection readings not Billed (7000), not UAU
+// Billed (7001), not Terminated Not Billed (8000). KPI cards + type x status
+// matrix + per-period bars all filter the checkable table.
+$$(".da-subnav-btn[data-rdisc-sub]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const sub = btn.dataset.rdiscSub;
+    $$(".da-subnav-btn[data-rdisc-sub]").forEach((b) => b.classList.toggle("is-active", b === btn));
+    $$(".da-subpage[data-rdisc-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.rdiscSub === sub));
+    if (sub === "unbilled") rduInit();
+  });
+});
+const RDU_TYPES = { TIPTL00003: "Cycle", TIPTL00005: "Direct Connection", TIPTL00017: "Distribution", TIPTL00002: "Removal", TIPTL00010: "Disconnection" };
+const RDU_TYPE_ICON = { TIPTL00003: "🔄", TIPTL00005: "🔌", TIPTL00017: "🏢", TIPTL00002: "📤", TIPTL00010: "⛔" };
+const RDU_TYPE_KPI = { TIPTL00003: "electricity", TIPTL00005: "water", TIPTL00017: "services", TIPTL00002: "pending", TIPTL00010: "missing" };
+let rduRows = [], rduSummary = [], rduStatusNames = {}, rduInitDone = false, rduLoaded = false;
+let rduFilter = { type: null, status: null, period: null, old7: false };
+let rduSortKey = null, rduSortDir = 1;
+const rduSelected = new Set();
+const rduTypesOn = new Set(Object.keys(RDU_TYPES));
+const RDU_COLUMNS = [
+  { key: "account", label: "Account" }, { key: "supply", label: "Supply" }, { key: "id_reading", label: "Reading" },
+  { key: "reading_type_name", label: "Type" }, { key: "read_status_name", label: "Status" },
+  { key: "billing_period", label: "Billing period" }, { key: "reading_prev_date", label: "Prev date" },
+  { key: "reading_date", label: "Reading date" }, { key: "days_open", label: "Days" },
+  { key: "prev_value", label: "Prev value" }, { key: "value", label: "Value" },
+  { key: "reading_usage", label: "Reading usage" }, { key: "ready_usage", label: "Ready usage" },
+];
+async function rduInit() {
+  if (rduInitDone) return;
+  rduInitDone = true;
+  $("#rdu-types").innerHTML = Object.entries(RDU_TYPES).map(([k, v]) =>
+    `<button type="button" class="btn btn-pill btn-sm is-active rdu-type-chip" data-rdu-type="${k}">${RDU_TYPE_ICON[k]} ${v}</button>`).join(" ");
+  try {
+    const p = await api("/api/reading-discrepancies/periods", { quiet: true });
+    $("#rdu-bp").innerHTML = `<option value="">All - last 6 months</option>` +
+      (p.periods || []).map((x, i) => `<option value="${x.id}"${i === 0 ? " selected" : ""}>${escapeHtml(x.name || String(x.id))}</option>`).join("");
+  } catch (_) { /* picker keeps "All" */ }
+  if (!rduLoaded) $("#rdu-detect-btn").click();
+}
+$("#rdu-types").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-rdu-type]");
+  if (!b) return;
+  const t = b.dataset.rduType;
+  if (rduTypesOn.has(t) && rduTypesOn.size > 1) rduTypesOn.delete(t); else rduTypesOn.add(t);
+  b.classList.toggle("is-active", rduTypesOn.has(t));
+});
+function rduMatch(r) {
+  return (!rduFilter.type || r.reading_type === rduFilter.type) && (!rduFilter.status || r.read_status === rduFilter.status) &&
+    (!rduFilter.period || String(r.id_billing_period) === String(rduFilter.period)) && (!rduFilter.old7 || Number(r.days_open) > 7);
+}
+function rduVisible() {
+  const toks = [...new Set($("#rdu-filter-search").value.toLowerCase().split(/[\s,;]+/).filter((t) => t && t !== "account"))];
+  const set = toks.length > 1 ? new Set(toks) : null;
+  const q = toks.length === 1 ? toks[0] : "";
+  const keysOf = (r) => [r.account, r.supply, r.id_reading].map((v) => String(v ?? "").toLowerCase());
+  let rows = rduRows.filter((r) => rduMatch(r) && (set ? keysOf(r).some((k) => set.has(k)) : (!q || keysOf(r).some((k) => k.includes(q)))));
+  $("#rdu-filter-search-count").textContent = set ? `${toks.length} values pasted` : "";
+  if (rduSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[rduSortKey], b[rduSortKey], rduSortDir));
+  return rows;
+}
+// Summary rows (counts for ALL unbilled readings, not only the loaded detail rows)
+function rduSum(pred) { return rduSummary.filter(pred).reduce((a, s) => a + Number(s.n || 0), 0); }
+function rduSummaryMatch(s, skip) {
+  return (skip === "type" || !rduFilter.type || s.reading_type === rduFilter.type) &&
+    (skip === "status" || !rduFilter.status || s.read_status === rduFilter.status) &&
+    (skip === "period" || !rduFilter.period || String(s.id_billing_period) === String(rduFilter.period));
+}
+function rduRender() {
+  const total = rduSum(() => true);
+  const old7 = rduSummary.reduce((a, s) => a + Number(s.older_7d || 0), 0);
+  const cards = [[null, "total", "📋", "All unbilled readings", total], ["old7", "missing", "⏰", "Reading date > 7 days ago", old7]]
+    .concat(Object.keys(RDU_TYPES).filter((t) => rduTypesOn.has(t)).map((t) =>
+      [`t:${t}`, RDU_TYPE_KPI[t], RDU_TYPE_ICON[t], RDU_TYPES[t], rduSum((s) => s.reading_type === t && rduSummaryMatch(s, "type"))]));
+  const active = (f) => f === null ? !rduFilter.type && !rduFilter.old7 && !rduFilter.status && !rduFilter.period
+    : f === "old7" ? rduFilter.old7 : rduFilter.type === f.slice(2);
+  $("#rdu-kpi-row").innerHTML = cards.map(([f, kpi, icon, label, v]) =>
+    `<div class="kpi-card kpi-card-clickable${active(f) ? " is-active" : ""}" data-kpi="${kpi}" data-rdu-kpi="${f ?? ""}" title="Click to filter">` +
+    `<div class="kpi-value">${Number(v).toLocaleString()}</div><div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${escapeHtml(label)}</div></div>`).join("");
+  // type x status matrix (counts from the summary)
+  const statuses = [...new Set(rduSummary.map((s) => s.read_status))].sort();
+  const types = Object.keys(RDU_TYPES).filter((t) => rduSummary.some((s) => s.reading_type === t));
+  $("#rdu-matrix-wrap").hidden = !rduSummary.length;
+  $("#rdu-matrix thead tr").innerHTML = `<th>Type \\ Status</th>` + statuses.map((s) =>
+    `<th class="rdu-mx-head${rduFilter.status === s ? " is-active" : ""}" data-rdu-status="${s}" title="${s}">${escapeHtml(rduStatusNames[s] || s)}</th>`).join("") + "<th>Total</th>";
+  const cellN = (t, s) => rduSum((x) => x.reading_type === t && x.read_status === s && (!rduFilter.period || String(x.id_billing_period) === String(rduFilter.period)));
+  const maxN = Math.max(1, ...types.flatMap((t) => statuses.map((s) => cellN(t, s))));
+  $("#rdu-matrix tbody").innerHTML = types.map((t) => `<tr><th class="rdu-mx-row${rduFilter.type === t ? " is-active" : ""}" data-rdu-type-row="${t}">${RDU_TYPE_ICON[t]} ${RDU_TYPES[t]}</th>` +
+    statuses.map((s) => { const n = cellN(t, s); const on = rduFilter.type === t && rduFilter.status === s;
+      return `<td class="rdu-mx-cell${on ? " is-active" : ""}" data-rdu-cell="${t}|${s}" style="--rdu-w:${n ? Math.max(6, Math.round(100 * n / maxN)) : 0}%">${n ? n.toLocaleString() : "·"}</td>`; }).join("") +
+    `<td><b>${statuses.reduce((a, s) => a + cellN(t, s), 0).toLocaleString()}</b></td></tr>`).join("");
+  // per-period bars (useful with "All")
+  const periods = [...new Map(rduSummary.map((s) => [String(s.id_billing_period), s.billing_period])).entries()];
+  const pn = (p) => rduSum((s) => String(s.id_billing_period) === p && rduSummaryMatch(s, "period"));
+  const pmax = Math.max(1, ...periods.map(([p]) => pn(p)));
+  $("#rdu-periods").hidden = periods.length < 2;
+  $("#rdu-periods").innerHTML = periods.map(([p, name]) => `<div class="rdu-bar${String(rduFilter.period) === p ? " is-active" : ""}" data-rdu-period="${p}" title="Click to filter">` +
+    `<span class="rdu-bar-label">${escapeHtml(name || p)}</span><span class="rdu-bar-track"><span class="rdu-bar-fill" style="width:${Math.round(100 * pn(p) / pmax)}%"></span></span>` +
+    `<span class="rdu-bar-n">${pn(p).toLocaleString()}</span></div>`).join("");
+  // table
+  const rows = rduVisible();
+  const shown = rows.slice(0, 2000);
+  const allChecked = shown.length > 0 && shown.every((r) => rduSelected.has(String(r.id_reading)));
+  const head = $("#rdu-table thead tr");
+  head.innerHTML = `<th><input type="checkbox" id="rdu-check-all" ${allChecked ? "checked" : ""} title="Check every row shown" /></th>` +
+    RDU_COLUMNS.map((c) => `<th class="stats-table-th-sortable" data-sort="${c.key}">${c.label}${rduSortKey === c.key ? `<span class="stats-table-sort-arrow">${rduSortDir === 1 ? "▲" : "▼"}</span>` : ""}</th>`).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    rduSortDir = rduSortKey === th.dataset.sort ? -rduSortDir : 1; rduSortKey = th.dataset.sort; rduRender();
+  }));
+  $("#rdu-check-all").addEventListener("change", (e) => {
+    rows.forEach((r) => (e.target.checked ? rduSelected.add(String(r.id_reading)) : rduSelected.delete(String(r.id_reading))));
+    rduRender();
+  });
+  const cell = (r, k) => /date$/.test(k) ? escapeHtml(String(r[k] ?? "").slice(0, 10)) : escapeHtml(String(r[k] ?? ""));
+  $("#rdu-table tbody").innerHTML = shown.map((r) => `<tr class="kpi-tint" data-kpi="${RDU_TYPE_KPI[r.reading_type] || "pending"}">` +
+    `<td><input type="checkbox" data-rdu-id="${escapeHtml(String(r.id_reading))}" ${rduSelected.has(String(r.id_reading)) ? "checked" : ""} /></td>` +
+    RDU_COLUMNS.map((c) => `<td>${cell(r, c.key)}</td>`).join("") + "</tr>").join("") ||
+    `<tr><td colspan="${RDU_COLUMNS.length + 1}" class="hint-text">${rduRows.length ? "No readings match." : "No unbilled readings."}</td></tr>`;
+  renderFilteredCount("#rdu-filtered-count", rows.length, rduRows.length);
+  if (rows.length > shown.length) $("#rdu-filtered-count").textContent += ` (table shows the first ${shown.length.toLocaleString()} - Copy / Export cover all)`;
+  $("#rdu-selection").textContent = rduSelected.size ? `${rduSelected.size.toLocaleString()} reading(s) checked` : "";
+}
+$("#rdu-kpi-row").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-rdu-kpi]");
+  if (!c) return;
+  const f = c.dataset.rduKpi;
+  if (!f) rduFilter = { type: null, status: null, period: null, old7: false };
+  else if (f === "old7") rduFilter.old7 = !rduFilter.old7;
+  else { const t = f.slice(2); rduFilter.type = rduFilter.type === t ? null : t; }
+  rduRender();
+});
+$("#rdu-matrix").addEventListener("click", (e) => {
+  const cl = e.target.closest("[data-rdu-cell]"), hd = e.target.closest("[data-rdu-status]"), rw = e.target.closest("[data-rdu-type-row]");
+  if (cl) { const [t, s] = cl.dataset.rduCell.split("|"); const same = rduFilter.type === t && rduFilter.status === s; rduFilter.type = same ? null : t; rduFilter.status = same ? null : s; }
+  else if (hd) rduFilter.status = rduFilter.status === hd.dataset.rduStatus ? null : hd.dataset.rduStatus;
+  else if (rw) rduFilter.type = rduFilter.type === rw.dataset.rduTypeRow ? null : rw.dataset.rduTypeRow;
+  else return;
+  rduRender();
+});
+$("#rdu-periods").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-rdu-period]");
+  if (!b) return;
+  rduFilter.period = String(rduFilter.period) === b.dataset.rduPeriod ? null : b.dataset.rduPeriod;
+  rduRender();
+});
+$("#rdu-table").addEventListener("change", (e) => {
+  const cb = e.target.closest("input[data-rdu-id]");
+  if (!cb) return;
+  cb.checked ? rduSelected.add(cb.dataset.rduId) : rduSelected.delete(cb.dataset.rduId);
+  $("#rdu-selection").textContent = rduSelected.size ? `${rduSelected.size.toLocaleString()} reading(s) checked` : "";
+});
+$("#rdu-filter-search").addEventListener("input", rduRender);
+$("#rdu-clear-btn").addEventListener("click", () => {
+  rduFilter = { type: null, status: null, period: null, old7: false };
+  $("#rdu-filter-search").value = ""; rduSelected.clear(); rduRender();
+});
+$("#rdu-detect-btn").addEventListener("click", async () => {
+  const btn = $("#rdu-detect-btn");
+  btn.disabled = true; rduLoaded = true;
+  $("#rdu-summary").textContent = "Loading…";
+  try {
+    const bp = $("#rdu-bp").value;
+    const data = await api("/api/reading-discrepancies/unbilled", {
+      method: "POST", body: { billing_period: bp ? Number(bp) : null, reading_types: [...rduTypesOn] },
+    });
+    rduRows = data.rows || []; rduSummary = data.summary || []; rduStatusNames = data.statuses || {};
+    rduSelected.clear(); rduFilter = { type: null, status: null, period: null, old7: false };
+    $("#rdu-filter-row").hidden = false;
+    $("#rdu-export-btn").disabled = $("#rdu-copy-btn").disabled = $("#rdu-copy-ids-btn").disabled = rduRows.length === 0;
+    $("#rdu-summary").textContent = `${data.total.toLocaleString()} unbilled reading(s) in ${bp ? $("#rdu-bp").selectedOptions[0].textContent : "the last 6 months"}` +
+      (data.truncated ? ` - table holds the oldest ${data.row_count.toLocaleString()} (cap ${data.cap.toLocaleString()}); the cards and matrix count all of them` : "") +
+      ` - ${(data.elapsed_ms / 1000).toFixed(1)}s.`;
+    rduRender();
+  } catch (err) {
+    $("#rdu-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+function rduPicked() {
+  const rows = rduVisible();
+  return rduSelected.size ? rduRows.filter((r) => rduSelected.has(String(r.id_reading))) : rows;
+}
+$("#rdu-copy-btn").addEventListener("click", async () => {
+  const acc = [...new Set(rduPicked().map((r) => r.account).filter(Boolean))];
+  try { await navigator.clipboard.writeText(acc.join("\n")); showToast(`Copied ${acc.length.toLocaleString()} account(s).`); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#rdu-copy-ids-btn").addEventListener("click", async () => {
+  const ids = rduPicked().map((r) => r.id_reading);
+  try { await navigator.clipboard.writeText(ids.join("\n")); showToast(`Copied ${ids.length.toLocaleString()} reading id(s).`); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#rdu-export-btn").addEventListener("click", () => {
+  const rows = rduPicked();
+  if (!rows.length) return;
+  const keys = RDU_COLUMNS.map((c) => c.key).concat(["reading_type", "read_status", "id_billing_period", "ind_usage_to_cal"]);
+  const lines = [keys.map((k) => k.toUpperCase()).join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = `unbilled_readings_${$("#rdu-bp").value || "last6m"}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 });
