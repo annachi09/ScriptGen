@@ -153,6 +153,9 @@
         <button class="nav-item" data-page="readingdiscrepancies" title="Reading Discrepancies">
           <span class="nav-icon">🔍</span><span class="nav-label">Reading Discrepancies</span>
         </button>
+        <button class="nav-item" data-page="fixbillingcampaign" title="FIX BILLING CAMPAIGN 2026">
+          <span class="nav-icon">💳</span><span class="nav-label">FIX BILLING CAMPAIGN 2026</span>
+        </button>
         <button class="nav-item" data-page="pendingsr" title="Pending Service Request">
           <span class="nav-icon">🎫</span><span class="nav-label">Pending Service Request</span>
         </button>
@@ -1771,6 +1774,7 @@
           <button type="button" class="da-subnav-btn" data-tmpd-sub="sanitary">SANITARY not Match Water Status</button>
           <button type="button" class="da-subnav-btn" data-tmpd-sub="subsidy">Subsidized, bill not generated</button>
           <button type="button" class="da-subnav-btn" data-tmpd-sub="wsstatus">Water vs Sanitary status</button>
+          <button type="button" class="da-subnav-btn" data-tmpd-sub="ddi">DDI eligibility × complaints</button>
         </nav>
 
         <div class="da-subpage is-active" data-tmpd-sub="accounts">
@@ -1890,6 +1894,45 @@
         </div>
         </div>
 
+        <!-- RJ 2026-10-18: fifth tab - EWA_DDI_ELIGIBILITY customers x GCCC_COMPLAINT (4102COMTYP / 4103COMTYP) -->
+        <div class="da-subpage" data-tmpd-sub="ddi">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Every customer in <b>OUC_COMMON_ADMIN.EWA_DDI_ELIGIBILITY</b> (all its columns) linked to <b>GCCC_COMPLAINT</b> (ID_ACCOUNT = id_payment_form) of type <b>4102COMTYP</b> Direct Debit Set Up and <b>4103COMTYP</b> Internal - Direct Debit Request: complaint counts, the latest complaint and the latest status per type. Cards and bars filter the table.</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>DDI eligibility × complaints</h2>
+            <div class="card-header-actions">
+              <label class="field-label" for="tddi-scope">Customers</label>
+              <select id="tddi-scope" class="text-input text-input-sm">
+                <option value="with">With a 4102/4103 complaint</option>
+                <option value="without">Without (first 50,000)</option>
+                <option value="all">All (first 50,000)</option>
+              </select>
+              <button type="button" class="btn btn-pill" id="tddi-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="tddi-copy-btn" disabled title="Copy the visible accounts (one per line)">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="tddi-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="tddi-summary">Click Scan to load.</div>
+          <div class="kpi-row" id="tddi-kpi-row" style="margin:14px 0 4px;"></div>
+          <div class="rbo-panels" id="tddi-panels" hidden>
+            <div class="rbo-panel"><h3>Latest complaint status</h3><div class="rdu-bars" id="tddi-last"></div></div>
+            <div class="rbo-panel"><h3>4102 Direct Debit Set Up - latest status</h3><div class="rdu-bars" id="tddi-s4102"></div></div>
+            <div class="rbo-panel"><h3>4103 Internal DD Request - latest status</h3><div class="rdu-bars" id="tddi-s4103"></div></div>
+          </div>
+          <div class="key-panel-row" id="tddi-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <textarea id="tddi-filter-search" class="text-input text-input-sm" rows="2" placeholder="Account / payment form / complaint ref… or paste many" style="width:240px;resize:vertical;"></textarea>
+            <span class="hint-text" id="tddi-filter-search-count"></span>
+            <span class="hint-text" id="tddi-active-filters" style="margin-left:auto;"></span>
+            <button type="button" class="btn btn-pill btn-sm" id="tddi-clear-btn">Clear filters</button>
+          </div>
+          <div class="hint-text" id="tddi-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="tddi-table"><thead><tr></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+        </div>
+
         <!-- RJ 2026-10-12: third tab - subsidized accounts whose period bill is not generated -->
         <div class="da-subpage" data-tmpd-sub="subsidy">
         <p class="page-subtitle" style="margin:-6px 0 14px;">Accounts with a subsidized service - tariff <b>Domestic - Bahraini First Account</b> (E-D2 10000000003, W-D2 10000000004, E-D2-NM 10000000006) - that already has <b>at least 6 cycle bills</b> (TFGEN00001, not Rebilled / Cancelled, not Credit Note), where the billing period's bill is <b>not generated for every active service</b> of the account, and the account has a <b>not-yet-billed reading</b> in the period (Anomalous 5000 / Available 1000 / Sent to bill 6000; Cycle, Distribution or Direct Connection). <b>None</b> = no service billed in the period (main focus); <b>Partial</b> = some services billed.</p>
@@ -1919,6 +1962,76 @@
             </table>
           </div>
         </div>
+        </div>
+      </section>
+
+      <!-- ===== FIX BILLING CAMPAIGN 2026 (RJ 2026-10-18) ===== -->
+      <section class="page" id="page-fixbillingcampaign">
+        <header class="page-header">
+          <h1>FIX BILLING CAMPAIGN 2026</h1>
+        </header>
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Customers in <b>EWA_DDI_ELIGIBILITY</b> linked to their <b>subsidy wallet</b> (EWA_GCCOM_SUBSIDY_WALLET, by payment form) - credit balance and behaviour - to the <b>/mobileapp/complaint</b> request (GCGE_EXTERNAL_MESSAGES_IN, latest per account since the date) and to the <b>RCCS</b> it created (GCCC_COMPLAINT.COD_REF_COMPLAINT) with its attributes Credit Amount, No Bank Amount, Credit Usage and Deduction (Fixed) Amount.</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Campaign customers</h2>
+            <div class="card-header-actions">
+              <label class="field-label" for="fbc-scope">Customers</label>
+              <select id="fbc-scope" class="text-input text-input-sm">
+                <option value="campaign">In campaign (wallet or request)</option>
+                <option value="wallet">With a wallet</option>
+                <option value="request">With a request</option>
+                <option value="all">All eligible (first 60,000)</option>
+              </select>
+              <span class="hint-text" title="RJ 2026-10-18: customers whose request has no creditAmount are excluded">only requests with a CreditAmount</span>
+              <label class="field-label" for="fbc-since">Requests after</label>
+              <input id="fbc-since" class="text-input text-input-sm" type="date" value="2026-10-16" />
+              <button type="button" class="btn btn-pill" id="fbc-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="fbc-copy-btn" disabled title="Copy the visible accounts (one per line)">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="fbc-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="fbc-summary">Click Scan to load (about 15s).</div>
+          <div class="rbo-dash" id="fbc-dash" hidden>
+            <!-- RJ 2026-10-18 v2: "I am more focused on the Type and number of customer. wallet credit can be one widget" -->
+            <div class="rbo-section-title"><span>1</span>Customers by type</div>
+            <div class="fbc-top">
+              <div class="fbc-types" id="fbc-types"></div>
+              <div class="fbc-wallet" id="fbc-wallet"></div>
+            </div>
+            <div class="rbo-kpis fbc-kpis" id="fbc-kpi-row"></div>
+
+            <div class="rbo-section-title"><span>2</span>Type × RCCS status <small>number of customers - click a status to filter</small></div>
+            <section class="rbo-panel fbc-status-panel">
+              <div id="fbc-status-bars"></div>
+              <div class="fbc-matrix-wrap"><table class="fbc-matrix" id="fbc-matrix"><colgroup id="fbc-matrix-cols"></colgroup><thead></thead><tbody></tbody></table></div>
+            </section>
+            <section class="rbo-panel rbo-panel-alert">
+              <header><h3>⚠ Consistency checks</h3><span class="rbo-sub" id="fbc-issue-sub"></span></header>
+              <div class="fbc-issues" id="fbc-issues"></div>
+            </section>
+          </div>
+          <div class="rbo-section-title" id="fbc-acts-title" style="margin:14px 0 12px;" hidden><span>3</span>Customers</div>
+          <div class="key-panel-row" id="fbc-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <textarea id="fbc-filter-search" class="text-input text-input-sm" rows="2" placeholder="Account / payment form / RCCS… or paste many" style="width:240px;resize:vertical;"></textarea>
+            <span class="hint-text" id="fbc-filter-search-count"></span>
+            <label class="field-label" style="margin-left:12px;"><input type="checkbox" id="fbc-ewa-cols" /> Show all EWA columns</label>
+            <span class="hint-text" id="fbc-active-filters" style="margin-left:auto;"></span>
+            <button type="button" class="btn btn-pill btn-sm" id="fbc-clear-btn">Clear filters</button>
+          </div>
+          <div class="hint-text" id="fbc-filtered-count"></div>
+          <div class="grid-wrap fbc-grid" style="margin-top:10px;">
+            <table class="data-grid" id="fbc-table"><thead></thead><tbody></tbody></table>
+          </div>
+        </div>
+        <!-- request JSON viewer -->
+        <div class="fbc-json-modal" id="fbc-json-modal" hidden>
+          <div class="fbc-json-box">
+            <header><h3 id="fbc-json-title">Request</h3>
+              <div><button type="button" class="btn btn-pill btn-sm" id="fbc-json-copy">📋 Copy</button>
+              <button type="button" class="btn btn-pill btn-sm" id="fbc-json-close">✕ Close</button></div></header>
+            <pre id="fbc-json-body">Loading…</pre>
+          </div>
         </div>
       </section>
 
@@ -2067,8 +2180,91 @@
       <section class="page" id="page-rebillingmonitor">
         <header class="page-header">
           <h1>Rebilling Monitor</h1>
-          <p class="page-subtitle">Every rebilling activity inserted by a ScriptGen script (DESCRIPTION 'AUTO REBILLING DOUBLE ITB' or 'WRONG-SANITARY HIGH BILL'), with the status in English, the bills inside and how long it has been open.</p>
         </header>
+
+        <!-- RJ 2026-10-18: main tab = all open rebillings; the tagged list moved to tab 2 -->
+        <nav class="da-subnav" aria-label="Rebilling Monitor tabs">
+          <button type="button" class="da-subnav-btn is-active" data-rbm-sub="open">Open rebillings</button>
+          <button type="button" class="da-subnav-btn" data-rbm-sub="tagged">ScriptGen-tagged</button>
+        </nav>
+
+        <div class="da-subpage is-active" data-rbm-sub="open">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Every rebilling activity that is <b>not closed</b> - status Pending (ESTREF0001) or In process (ESTREF0002); Rejected and Rebilled are closed. Cards, bars and the matrix filter the table.</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Open rebillings</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="rbo-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="rbo-copy-btn" disabled title="Copy the visible activity ids (one per line)">📋 Copy activity ids</button>
+              <button type="button" class="btn btn-pill" id="rbo-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="rbo-summary">Click Scan to load.</div>
+          <!-- RJ 2026-10-18 layout v2 ("the layout of the pending rebilling is not good, you can do better") -->
+          <div class="rbo-dash" id="rbo-panels" hidden>
+            <div class="rbo-section-title"><span>1</span>Overview</div>
+            <div class="rbo-hero" id="rbo-hero"></div>
+            <div class="rbo-kpis" id="rbo-kpi-row"></div>
+
+            <!-- RJ 2026-10-18: "i want to see the state of the rebilling, or if there is anomalous on the reb activity information" -->
+            <div class="rbo-section-title"><span>2</span>Rebilling state &amp; anomalies <small>from the bill lines (GCCOM_REB_ACTIVITY_INFORMATION.REB_DN_STATUS)</small></div>
+            <div class="rbo-grid3">
+              <section class="rbo-panel">
+                <header><h3>Rebilling state</h3><span class="rbo-sub">per activity, worst line wins</span></header>
+                <div class="rbo-reasons rbo-one" id="rbo-states"></div>
+              </section>
+              <section class="rbo-panel rbo-panel-alert">
+                <header><h3>⚠ Anomaly reasons</h3><span class="rbo-sub" id="rbo-anom-sub"></span></header>
+                <div id="rbo-anoms"></div>
+              </section>
+              <section class="rbo-panel">
+                <header><h3>Bill lines by status</h3><span class="rbo-sub">line count</span></header>
+                <div class="rbo-reasons rbo-one" id="rbo-dn"></div>
+              </section>
+            </div>
+
+            <div class="rbo-section-title"><span>3</span>Distribution</div>
+            <div class="rbo-grid2">
+              <section class="rbo-panel">
+                <header><h3>Type × status</h3><span class="rbo-legend" id="rbo-legend-types"></span></header>
+                <div id="rbo-types"></div>
+              </section>
+              <section class="rbo-panel">
+                <header><h3>Aging</h3><span class="rbo-sub">days since the activity was created</span></header>
+                <div class="rbo-agecols" id="rbo-aging"></div>
+              </section>
+            </div>
+            <section class="rbo-panel">
+              <header><h3>Open activities by period <span class="rbo-sub" style="font-weight:400;margin-left:6px;">bar height on a square-root scale so small months stay visible</span></h3>
+                <div class="rbo-seg" id="rbo-period-seg">
+                  <button type="button" data-mode="created" class="is-active">Created month</button>
+                  <button type="button" data-mode="billing">Bills' billing period</button>
+                </div>
+              </header>
+              <div class="rbo-cols" id="rbo-periods"></div>
+            </section>
+            <section class="rbo-panel">
+              <header><h3>Reason</h3><span class="rbo-sub">click a reason to filter</span></header>
+              <div class="rbo-reasons" id="rbo-reasons"></div>
+            </section>
+          </div>
+          <div class="rbo-section-title" id="rbo-acts-title" style="margin:6px 0 12px;" hidden><span>4</span>Activities</div>
+          <div class="key-panel-row" id="rbo-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <textarea id="rbo-filter-search" class="text-input text-input-sm" rows="2" placeholder="Activity / account / bill / user… or paste many" style="width:240px;resize:vertical;"></textarea>
+            <span class="hint-text" id="rbo-filter-search-count"></span>
+            <span class="hint-text" id="rbo-active-filters" style="margin-left:auto;"></span>
+            <button type="button" class="btn btn-pill btn-sm" id="rbo-clear-btn">Clear filters</button>
+          </div>
+          <div class="hint-text" id="rbo-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="rbo-table"><thead><tr></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+        </div>
+
+        <div class="da-subpage" data-rbm-sub="tagged">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Every rebilling activity inserted by a ScriptGen script (DESCRIPTION 'AUTO REBILLING DOUBLE ITB' or 'WRONG-SANITARY HIGH BILL'), with the status in English, the bills inside and how long it has been open.</p>
         <div class="card">
           <div class="card-header">
             <h2>Tagged rebilling activities</h2>
@@ -2094,6 +2290,7 @@
               <tbody></tbody>
             </table>
           </div>
+        </div>
         </div>
       </section>
 

@@ -50,6 +50,7 @@ from app.core import rebilling_monitor
 from app.core import pending_service_request
 from app.core import temp_dashboard
 from app.core import reading_discrepancies
+from app.core import fix_billing_campaign  # RJ 2026-10-18
 from app.core import wrong_bill_perc_dist
 from app.core import wrong_bill_sanitary_zero
 from app.core import wrong_bill_first_regularized
@@ -4490,6 +4491,32 @@ def temp_dashboard_water_sanitary_status(user: str = Depends(require_login)):
             "elapsed_ms": res.elapsed_ms}
 
 
+# RJ 2026-10-18: Temp Dashboard tab 5 "DDI eligibility x complaints"
+class TempDashboardDdiRequest(BaseModel):
+    scope: str = "with"
+
+
+@app.post("/api/temp-dashboard/ddi-complaints")
+def temp_dashboard_ddi_complaints(body: TempDashboardDdiRequest, user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, temp_dashboard.build_ddi_complaint_query(body.scope), timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    total = with_c = None
+    for r in rows:
+        total = r.pop("ewa_total", total)
+        with_c = r.pop("ewa_with_complaint", with_c)
+    columns = [c.lower() for c in res.columns if c.upper() not in ("EWA_TOTAL", "EWA_WITH_COMPLAINT")]
+    return {"rows": rows, "columns": columns, "count": len(rows), "scope": body.scope,
+            "ewa_total": total, "ewa_with_complaint": with_c, "row_cap": temp_dashboard.DDI_ROW_CAP,
+            "complaint_types": temp_dashboard.DDI_COMPLAINT_TYPES, "elapsed_ms": res.elapsed_ms}
+
+
 # RJ 2026-10-12: Temp Dashboard tab 3 "Subsidized, September not generated"
 # (temp_dashboard.build_subsidy_missing_bill_query) - ~90s live, 5-min timeout.
 @app.post("/api/temp-dashboard/subsidy-missing-bill")
@@ -4643,6 +4670,57 @@ def reading_discrepancies_generate(body: ReadingDiscrepanciesGenerateRequest, us
 
 
 # ---------------------------------------------------------------------
+# FIX BILLING CAMPAIGN 2026 (RJ 2026-10-18) - app/core/fix_billing_campaign.py
+# EWA_DDI_ELIGIBILITY + subsidy wallet + /mobileapp/complaint requests + RCCS attributes
+# ---------------------------------------------------------------------
+class FixBillingCampaignRequest(BaseModel):
+    scope: str = "campaign"
+    since: str = fix_billing_campaign.DEFAULT_SINCE
+
+
+@app.post("/api/fix-billing-campaign/detect")
+def fix_billing_campaign_detect(body: FixBillingCampaignRequest, user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        sql_text = fix_billing_campaign.build_query(body.scope, body.since)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        res = mssql.run_query(conn, sql_text, timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [fix_billing_campaign.shape_row({c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)})
+            for r in res.rows]
+    ewa_cols = []
+    for c in res.columns:
+        if c.upper() == "ID_WALLET":
+            break
+        ewa_cols.append(c.lower())
+    return {"rows": rows, "count": len(rows), "ewa_columns": ewa_cols, "scope": body.scope, "since": body.since,
+            "row_cap": fix_billing_campaign.ROW_CAP, "attrs": fix_billing_campaign.ATTRS,
+            "elapsed_ms": res.elapsed_ms}
+
+
+# RJ 2026-10-18: raw request JSON for one message (table "JSON" column, on demand)
+@app.get("/api/fix-billing-campaign/request/{id_seq}")
+def fix_billing_campaign_request(id_seq: int, user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, fix_billing_campaign.build_request_json_query(id_seq))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if not res.rows:
+        raise HTTPException(status_code=404, detail="Request not found.")
+    return {c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, res.rows[0])}
+
+
+# ---------------------------------------------------------------------
 # Pending Service Request (RJ 2026-10-09) - app/core/pending_service_request.py
 # ---------------------------------------------------------------------
 @app.post("/api/pending-sr/detect")
@@ -4667,6 +4745,30 @@ def pending_service_request_detect(user: str = Depends(require_login)):
 # script inserted (DESCRIPTION tag), status in English. See
 # app/core/rebilling_monitor.py.
 # ---------------------------------------------------------------------
+# RJ 2026-10-18: main tab "Open rebillings" - every activity not Rejected / Rebilled
+@app.post("/api/rebilling-monitor/open")
+def rebilling_monitor_open(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, rebilling_monitor.build_open_query(), timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    tags = rebilling_monitor.TAGS
+    for r in rows:
+        r["aging"] = rebilling_monitor.aging_bucket(r.get("age_days"))
+        r["source"] = tags.get(r.get("description") or "", "")
+        rebilling_monitor.shape_open_row(r)   # RJ 2026-10-18: rebilling state from bill lines
+    return {"rows": rows, "count": len(rows),
+            "states": [s[0] for s in rebilling_monitor.REB_STATES] + [rebilling_monitor.STATE_NO_LINES, "Other"],
+            "dn_status_names": rebilling_monitor.DN_STATUS_NAMES,
+            "aging_buckets": [b[1] for b in rebilling_monitor.AGING_BUCKETS],
+            "elapsed_ms": res.elapsed_ms}
+
+
 @app.post("/api/rebilling-monitor/detect")
 def rebilling_monitor_detect(user: str = Depends(require_login)):
     config = load_config()

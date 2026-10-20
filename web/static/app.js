@@ -9862,10 +9862,11 @@ const HX_REFRESH = {
   incorrectbillingperiod: () => ({ btn: "#ibp-detect-btn" }),
   // Refresh bypasses the server cache (RJ 2026-10-07 cache).
   bulkchecker: () => ({ fn: () => bcRunSearch({ refresh: true }) }),
-  rebillingmonitor: () => ({ btn: "#rbm-detect-btn" }),
+  rebillingmonitor: () => ({ btn: hxActiveSub("data-rbm-sub") === "tagged" ? "#rbm-detect-btn" : "#rbo-detect-btn" }),
   pendingsr: () => ({ btn: "#psr-detect-btn" }),
-  tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", subsidy: "#tsub-detect-btn", wsstatus: "#tws-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
+  tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", subsidy: "#tsub-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
+  fixbillingcampaign: () => ({ btn: "#fbc-detect-btn" }),
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
@@ -9877,12 +9878,12 @@ const HX_REFRESH = {
 // are left alone; Wrong Bill and Anomalies Statistics already auto-load.
 const HX_AUTO_PAGES = new Set(["hierarchy", "tnbcycledisc", "wrongstuckhierarchy", "doubleitb",
   "wrongbilledconsumption", "disconnectiontnb", "billissuance", "incorrectbillingperiod", "dateanomaly", "rebillingmonitor", "pendingsr",
-  "readingdiscrepancies"]);
+  "readingdiscrepancies", "fixbillingcampaign"]);
 const hxAutoLoaded = new Set();
 let hxAutoTimer = null;
 
 function hxAutoKey(page) {
-  const sub = { dateanomaly: "data-da-sub", wrongstuckhierarchy: "data-wsh-sub", billissuance: "data-biss-sub" }[page];
+  const sub = { dateanomaly: "data-da-sub", wrongstuckhierarchy: "data-wsh-sub", billissuance: "data-biss-sub", rebillingmonitor: "data-rbm-sub" }[page];
   return sub ? `${page}:${hxActiveSub(sub) || ""}` : page;
 }
 
@@ -10185,6 +10186,7 @@ $$(".da-subnav-btn[data-tmpd-sub]").forEach((btn) => {
     if (sub === "sanitary" && !tsanLoaded) $("#tsan-detect-btn").click();
     if (sub === "subsidy" && !tsubLoaded) $("#tsub-detect-btn").click();
     if (sub === "wsstatus" && !twsLoaded) $("#tws-detect-btn").click();
+    if (sub === "ddi" && !tddiLoaded) $("#tddi-detect-btn").click();
   });
 });
 let tsanRows = [], tsanKpi = null, tsanLoaded = false, tsanSortKey = null, tsanSortDir = 1;
@@ -10595,7 +10597,8 @@ async function rduInit() {
   try {
     const p = await api("/api/reading-discrepancies/periods", { quiet: true });
     $("#rdu-bp").innerHTML = `<option value="">All - last 6 months</option>` +
-      (p.periods || []).map((x, i) => `<option value="${x.id}"${i === 0 ? " selected" : ""}>${escapeHtml(x.name || String(x.id))}</option>`).join("");
+      // open on the latest CLOSED period (index 1) - the current one is mostly work in progress
+      (p.periods || []).map((x, i) => `<option value="${x.id}"${i === Math.min(1, (p.periods || []).length - 1) ? " selected" : ""}>${escapeHtml(x.name || String(x.id))}</option>`).join("");
   } catch (_) { /* picker keeps "All" */ }
   if (!rduLoaded) $("#rdu-detect-btn").click();
 }
@@ -11119,6 +11122,928 @@ $("#rbm-export-btn").addEventListener("click", () => {
   const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
   const a = document.createElement("a");
   a.href = url; a.download = "rebilling_monitor.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---- Rebilling Monitor main tab "Open rebillings" (RJ 2026-10-18) ----
+// "in the rebilling monitor, the existing will be moved to 2nd tab, add a main
+// tab to show all rebilling that are not closed, i want it to have KPI, type
+// and status. and aging and by period". Every activity not Rejected/Rebilled
+// (rebilling_monitor.build_open_query). KPI cards, type x status matrix, aging
+// bars, reason bars and per-period columns all filter the table.
+$$(".da-subnav-btn[data-rbm-sub]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const sub = btn.dataset.rbmSub;
+    $$(".da-subnav-btn[data-rbm-sub]").forEach((b) => b.classList.toggle("is-active", b === btn));
+    $$(".da-subpage[data-rbm-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.rbmSub === sub));
+    if (typeof hxAutoSchedule === "function") hxAutoSchedule();
+  });
+});
+const RBO_STATUS_KPI = { ESTREF0001: "pending", ESTREF0002: "invoicing" };
+const RBO_STATUS_COLOR = { ESTREF0001: "#f59e0b", ESTREF0002: "#0ea5e9" };
+const RBO_AGING_KPI = { "0-7 days": "complete", "8-30 days": "services", "31-90 days": "pending", "91-180 days": "stuck", "181-365 days": "missing", "Over 1 year": "outstanding" };
+let rboRows = [], rboBuckets = [], rboSortKey = null, rboSortDir = 1;
+let rboF = { kpi: null, type: null, status: null, aging: null, reason: null, period: null, state: null, anom: null };
+// RJ 2026-10-18 (2): rebilling state from the bill lines (rebilling_monitor.REB_STATES)
+const RBO_STATE_KPI = { "Anomalous": "missing", "Batch recalculation": "outstanding", "Substitutive rebilling": "invoicing",
+  "Partly rebilled": "complete", "Disputed - waiting": "pending", "Compliant": "active", "Cancelled lines": "case0",
+  "No bill lines": "case0", "Other": "total" };   // case* = neutral slate
+let rboStates = [], rboDnNames = {};
+const rboAnomList = (r) => String(r.anomaly_reason || "").split(/\s*(?:\||;)\s*/).map((s) => s.trim()).filter(Boolean);
+const RBO_COLUMNS = [
+  { key: "id_rebilling_activity", label: "Activity", mono: true },
+  { key: "status_en", label: "Status" },
+  { key: "rebilling_state", label: "Rebilling state" },
+  { key: "lines_status", label: "Bill lines" },
+  { key: "anomaly_reason", label: "Anomaly reason" },
+  { key: "type_en", label: "Type" },
+  { key: "reason_en", label: "Reason" },
+  { key: "create_date", label: "Created", date: true },
+  { key: "age_days", label: "Age (days)", num: true },
+  { key: "aging", label: "Aging" },
+  { key: "bill_count", label: "Bills", num: true },
+  { key: "account", label: "Account", mono: true },
+  { key: "total_amount", label: "Bills amount", num: true },
+  { key: "billing_period", label: "Bills' billing period" },
+  { key: "description", label: "Description" },
+  { key: "creation_user", label: "Created by" },
+  { key: "update_date", label: "Last update", date: true },
+  { key: "update_user", label: "Updated by" },
+  { key: "processing_info", label: "Processing info" },
+];
+const RBO_KPI_PRED = {
+  anom: (r) => Number(r.anomalous_lines) > 0,
+  pending: (r) => r.reb_activity_status === "ESTREF0001",
+  inproc: (r) => r.reb_activity_status === "ESTREF0002",
+  d30: (r) => Number(r.age_days) > 30,
+  d90: (r) => Number(r.age_days) > 90,
+  d365: (r) => Number(r.age_days) > 365,
+  nobills: (r) => !Number(r.bill_count),
+  sg: (r) => !!r.source,
+};
+let rboPeriodMode = "created";
+const rboPeriodKey = (r) => (rboPeriodMode === "billing" ? (r.billing_period || "(no bills)") : (r.created_month || "?"));
+const rboTypeKey = (r) => r.type_en || r.reb_activity_type || "?";
+const rboReasonKey = (r) => r.reason_en || r.reason_type || "(no reason)";
+function rboSearchTerms() {
+  return $("#rbo-filter-search").value.split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+// skip = one filter left out, so each chart shows its own breakdown under the others
+function rboMatch(r, skip) {
+  if (skip !== "kpi" && rboF.kpi && !RBO_KPI_PRED[rboF.kpi](r)) return false;
+  if (skip !== "type" && rboF.type && rboTypeKey(r) !== rboF.type) return false;
+  if (skip !== "status" && rboF.status && r.reb_activity_status !== rboF.status) return false;
+  if (skip !== "aging" && rboF.aging && r.aging !== rboF.aging) return false;
+  if (skip !== "reason" && rboF.reason && rboReasonKey(r) !== rboF.reason) return false;
+  if (skip !== "period" && rboF.period && rboPeriodKey(r) !== rboF.period) return false;
+  if (skip !== "state" && rboF.state && r.rebilling_state !== rboF.state) return false;
+  if (skip !== "anom" && rboF.anom && !rboAnomList(r).includes(rboF.anom)) return false;
+  const terms = rboSearchTerms();
+  if (terms.length) {
+    const hay = [r.id_rebilling_activity, r.account, r.bill_ids, r.id_customer, r.description, r.creation_user, r.update_user, r.anomaly_reason]
+      .map((v) => String(v ?? "").toLowerCase()).join(" | ");
+    if (!terms.some((t) => hay.includes(t))) return false;
+  }
+  return true;
+}
+function rboVisibleRows() {
+  let rows = rboRows.filter((r) => rboMatch(r));
+  if (rboSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[rboSortKey], b[rboSortKey], rboSortDir));
+  return rows;
+}
+function rboCount(rows, keyFn) {
+  const m = new Map();
+  rows.forEach((r) => { const k = keyFn(r); m.set(k, (m.get(k) || 0) + 1); });
+  return m;
+}
+function rboBarsHtml(entries, attr, active, kpiOf) {
+  const max = Math.max(1, ...entries.map(([, n]) => n));
+  return entries.map(([k, n]) => {
+    const kpi = kpiOf ? kpiOf(k) : null;
+    const w = `width:${Math.round(100 * n / max)}%`;
+    const fill = kpi ? ` data-kpi="${kpi}" style="${w};background:var(--kpi-c)"` : ` style="${w}"`;
+    return `<div class="rdu-bar${active === k ? " is-active" : ""}" ${attr}="${escapeHtml(k)}" title="Click to filter">` +
+      `<span class="rdu-bar-label">${escapeHtml(k)}</span><span class="rdu-bar-track"><span class="rdu-bar-fill"${fill}></span></span>` +
+      `<span class="rdu-bar-n">${n.toLocaleString()}</span></div>`;
+  }).join("") || `<div class="hint-text">Nothing to show.</div>`;
+}
+function rboRender() {
+  const all = rboRows;
+  const base = all.filter((r) => rboMatch(r, "kpi"));
+  const cnt = (k) => base.filter(RBO_KPI_PRED[k]).length;
+  // hero: total, Pending / In process split, age stats
+  const pN = cnt("pending"), iN = cnt("inproc"), tN = Math.max(1, base.length);
+  const ages = base.map((r) => Number(r.age_days)).filter(Number.isFinite).sort((a, b) => a - b);
+  const median = ages.length ? ages[Math.floor(ages.length / 2)] : 0;
+  const oldest = ages.length ? ages[ages.length - 1] : 0;
+  const last30 = ages.filter((a) => a <= 30).length;
+  const fmtAge = (d) => (d >= 365 ? `${(d / 365).toFixed(1)} yrs` : `${d} days`);
+  $("#rbo-hero").innerHTML =
+    `<div class="rbo-hero-total" data-rbo-kpi="" title="Show all"><b>${base.length.toLocaleString()}</b><span>open rebilling activities</span></div>` +
+    `<div><div class="rbo-split-bar">` +
+      `<span data-rbo-kpi="pending" style="width:${100 * pN / tN}%;background:var(--rbo-pend)" title="Pending: ${pN}"></span>` +
+      `<span data-rbo-kpi="inproc" style="width:${100 * iN / tN}%;background:var(--rbo-proc)" title="In process: ${iN}"></span></div>` +
+      `<div class="rbo-split-legend"><span><i style="background:var(--rbo-pend)"></i>Pending <b>${pN.toLocaleString()}</b> (${Math.round(100 * pN / tN)}%)</span>` +
+      `<span><i style="background:var(--rbo-proc)"></i>In process <b>${iN.toLocaleString()}</b> (${Math.round(100 * iN / tN)}%)</span></div></div>` +
+    `<div class="rbo-hero-stats"><div>Median age<b>${fmtAge(median)}</b></div><div>Oldest<b>${fmtAge(oldest)}</b></div><div>Created ≤ 30 days<b>${last30.toLocaleString()}</b></div></div>`;
+
+  const cards = [
+    ["missing", "⚠️", "Anomalous bill lines", cnt("anom"), "anom"],
+    ["pending", "🕓", "Pending", cnt("pending"), "pending"],
+    ["invoicing", "⚙️", "In process", cnt("inproc"), "inproc"],
+    ["stuck", "⏳", "Older than 30 days", cnt("d30"), "d30"],
+    ["missing", "🚨", "Older than 90 days", cnt("d90"), "d90"],
+    ["outstanding", "🧊", "Older than 1 year", cnt("d365"), "d365"],
+    ["nofilemaj", "📭", "No bills attached", cnt("nobills"), "nobills"],
+    ["services", "🧩", "Created by ScriptGen", cnt("sg"), "sg"],
+  ];
+  $("#rbo-kpi-row").innerHTML = cards.map(([kpi, icon, label, value, f]) => {
+    const active = f ? rboF.kpi === f : !rboF.kpi;
+    const pct = base.length ? Math.round(100 * value / base.length) : 0;
+    return `<div class="rbo-kpi${active && f ? " is-active" : ""}" data-kpi="${kpi}" data-rbo-kpi="${f ?? ""}" title="${escapeHtml(label)} - click to filter, click again to clear">` +
+      `<span class="rbo-kpi-label"><span>${icon}</span>${escapeHtml(label)}</span>` +
+      `<span class="rbo-kpi-value">${value.toLocaleString()}<small>${pct}%</small></span>` +
+      `<span class="rbo-kpi-meter"><span style="width:${pct}%"></span></span></div>`;
+  }).join("");
+
+  // section 2: rebilling state / anomaly reasons / bill lines by status
+  const stRows = all.filter((r) => rboMatch(r, "state"));
+  const stc = rboCount(stRows, (r) => r.rebilling_state || "Other");
+  const stEntries = rboStates.filter((s) => stc.get(s)).map((s) => [s, stc.get(s)]);
+  const stMax = Math.max(1, ...stEntries.map(([, n]) => n));
+  $("#rbo-states").innerHTML = stEntries.map(([k, n]) =>
+    `<div class="rbo-reason${rboF.state === k ? " is-active" : ""}" data-rbo-state="${escapeHtml(k)}" title="${escapeHtml(k)}: ${n.toLocaleString()} - click to filter">` +
+    `<span class="rbo-reason-name"><span class="rbo-pill" data-kpi="${RBO_STATE_KPI[k] || "total"}">${escapeHtml(k)}</span></span>` +
+    `<span class="rbo-reason-track"><span data-kpi="${RBO_STATE_KPI[k] || "total"}" style="width:${100 * n / stMax}%"></span></span>` +
+    `<span class="rbo-reason-n">${n.toLocaleString()}</span></div>`).join("") || `<div class="hint-text">Nothing to show.</div>`;
+
+  const anRows = all.filter((r) => rboMatch(r, "anom"));
+  const anc = new Map();
+  anRows.forEach((r) => rboAnomList(r).forEach((a) => anc.set(a, (anc.get(a) || 0) + 1)));
+  const anEntries = [...anc.entries()].sort((a, b) => b[1] - a[1]);
+  const anActs = anRows.filter(RBO_KPI_PRED.anom).length;
+  $("#rbo-anom-sub").textContent = anActs ? `${anActs.toLocaleString()} activit${anActs === 1 ? "y" : "ies"} with anomalous lines` : "";
+  $("#rbo-anoms").innerHTML = anEntries.map(([k, n]) => {
+    const m = k.match(/^(\S+)\s+-\s+(.*)$/);
+    return `<div class="rbo-anom${rboF.anom === k ? " is-active" : ""}" data-rbo-anom="${escapeHtml(k)}" title="Click to filter">` +
+      `<code>${escapeHtml(m ? m[1] : "?")}</code><span class="rbo-anom-text">${escapeHtml(m ? m[2] : k)}</span><span class="rbo-anom-n">${n.toLocaleString()}</span></div>`;
+  }).join("") || `<div class="rbo-anom-none">✓ No anomalous bill lines in the current selection</div>`;
+
+  const dnc = new Map();
+  base.forEach((r) => Object.entries(r.dn_lines || {}).forEach(([k, n]) => dnc.set(k, (dnc.get(k) || 0) + Number(n))));
+  const dnEntries = Object.values(rboDnNames).filter((k) => dnc.get(k)).map((k) => [k, dnc.get(k)]).sort((a, b) => b[1] - a[1]);
+  const dnMax = Math.max(1, ...dnEntries.map(([, n]) => n));
+  $("#rbo-dn").innerHTML = dnEntries.map(([k, n]) =>
+    `<div class="rbo-reason" style="cursor:default" title="${escapeHtml(k)}: ${n.toLocaleString()} line(s)"><span class="rbo-reason-name">${escapeHtml(k)}</span>` +
+    `<span class="rbo-reason-track"><span${k.startsWith("Anomalous") ? ' data-kpi="missing"' : ""} style="width:${100 * n / dnMax}%"></span></span>` +
+    `<span class="rbo-reason-n">${n.toLocaleString()}</span></div>`).join("") || `<div class="hint-text">No bill lines.</div>`;
+
+  // type x status: one stacked bar per type (segment = status), scaled to the largest type
+  const mxRows = all.filter((r) => rboMatch(r, "type") && rboMatch(r, "status"));
+  const statuses = [...new Map(all.map((r) => [r.reb_activity_status, r.status_en || r.reb_activity_status])).entries()].sort();
+  const tcount = [...rboCount(mxRows, rboTypeKey).entries()].sort((a, b) => b[1] - a[1]);
+  const cell = new Map();
+  mxRows.forEach((r) => { const k = rboTypeKey(r) + "|" + r.reb_activity_status; cell.set(k, (cell.get(k) || 0) + 1); });
+  const tmax = Math.max(1, ...tcount.map(([, n]) => n));
+  const stColor = (c) => (c === "ESTREF0001" ? "var(--rbo-pend)" : c === "ESTREF0002" ? "var(--rbo-proc)" : "var(--accent)");
+  $("#rbo-legend-types").innerHTML = statuses.map(([c, n]) =>
+    `<span data-rbo-st="${c}" style="cursor:pointer${rboF.status === c && !rboF.type ? ";font-weight:600" : ""}"><i style="background:${stColor(c)}"></i>${escapeHtml(n)}</span>`).join("");
+  $("#rbo-types").innerHTML = tcount.map(([t, tot]) => {
+    const segs = statuses.map(([c, n]) => {
+      const v = cell.get(t + "|" + c) || 0;
+      if (!v) return "";
+      const w = 100 * v / tot;
+      return `<span class="${rboF.type === t && rboF.status === c ? "is-active" : ""}" data-rbo-ty="${escapeHtml(t)}" data-rbo-st="${c}" ` +
+        `style="width:${w}%;background:${stColor(c)}" title="${escapeHtml(t)} - ${escapeHtml(n)}: ${v.toLocaleString()}">${100 * v / tmax >= 10 ? v.toLocaleString() : ""}</span>`;
+    }).join("");
+    return `<div class="rbo-trow${rboF.type === t && !rboF.status ? " is-active" : ""}">` +
+      `<span class="rbo-trow-name" data-rbo-ty="${escapeHtml(t)}" title="${escapeHtml(t)} - click to filter">${escapeHtml(t)}</span>` +
+      `<div><div class="rbo-tbar" style="width:${Math.max(4, 100 * tot / tmax)}%">${segs}</div></div>` +
+      `<span class="rbo-trow-n">${tot.toLocaleString()}</span></div>`;
+  }).join("") || `<div class="hint-text">Nothing to show.</div>`;
+
+  // aging: vertical columns, green -> red
+  const ag = rboCount(all.filter((r) => rboMatch(r, "aging")), (r) => r.aging);
+  const amax = Math.max(1, ...rboBuckets.map((b) => ag.get(b) || 0));
+  $("#rbo-aging").innerHTML = rboBuckets.map((b) => {
+    const n = ag.get(b) || 0;
+    return `<div class="rbo-agecol${rboF.aging === b ? " is-active" : ""}" data-rbo-ag="${escapeHtml(b)}" title="${escapeHtml(b)}: ${n.toLocaleString()} - click to filter">` +
+      `<span class="rbo-agecol-n">${n.toLocaleString()}</span>` +
+      `<span class="rbo-agecol-bar" data-kpi="${RBO_AGING_KPI[b] || "total"}" style="height:${Math.max(2, Math.round(130 * n / amax))}px"></span>` +
+      `<span class="rbo-agecol-label">${escapeHtml(b.replace(" days", "")).replace("Over 1 year", "&gt; 1 year")}${b.endsWith("days") ? "<br>days" : ""}</span></div>`;
+  }).join("");
+
+  // reasons: all of them, two-column list
+  const rs = [...rboCount(all.filter((r) => rboMatch(r, "reason")), rboReasonKey).entries()].sort((a, b) => b[1] - a[1]);
+  const rmax = Math.max(1, ...rs.map(([, n]) => n));
+  $("#rbo-reasons").innerHTML = rs.map(([k, n]) =>
+    `<div class="rbo-reason${rboF.reason === k ? " is-active" : ""}" data-rbo-rs="${escapeHtml(k)}" title="${escapeHtml(k)}: ${n.toLocaleString()}">` +
+    `<span class="rbo-reason-name">${escapeHtml(k)}</span><span class="rbo-reason-track"><span style="width:${100 * n / rmax}%"></span></span>` +
+    `<span class="rbo-reason-n">${n.toLocaleString()}</span></div>`).join("") || `<div class="hint-text">Nothing to show.</div>`;
+
+  // by period: columns stacked by status
+  const pr = all.filter((r) => rboMatch(r, "period"));
+  const per = new Map();
+  pr.forEach((r) => {
+    const k = rboPeriodKey(r);
+    const o = per.get(k) || { n: 0, s: {} };
+    o.n++; o.s[r.reb_activity_status] = (o.s[r.reb_activity_status] || 0) + 1;
+    per.set(k, o);
+  });
+  const billing = rboPeriodMode === "billing";
+  const keys = [...per.keys()].sort((a, b) => {
+    if (billing) { // billing period descriptions: order by the period id of any row
+      const id = (k) => Number((pr.find((r) => rboPeriodKey(r) === k) || {}).id_billing_period || 0);
+      return id(a) - id(b);
+    }
+    return a.localeCompare(b);
+  });
+  const pmax = Math.max(1, ...[...per.values()].map((o) => o.n));
+  let prevYear = null;
+  $("#rbo-periods").innerHTML = keys.map((k) => {
+    const o = per.get(k);
+    const yr = billing ? null : k.slice(0, 4);
+    const newYear = yr && prevYear && yr !== prevYear;
+    prevYear = yr;
+    const segs = statuses.map(([c]) => o.s[c] ? `<span style="height:${100 * o.s[c] / o.n}%;background:${stColor(c)}" title="${escapeHtml(k)} - ${escapeHtml((statuses.find((s) => s[0] === c) || [])[1] || c)}: ${o.s[c]}"></span>` : "").join("");
+    return `<div class="rbo-col${rboF.period === k ? " is-active" : ""}${newYear ? " rbo-yr" : ""}" data-rbo-pe="${escapeHtml(k)}" title="${escapeHtml(k)}: ${o.n.toLocaleString()} - click to filter">` +
+      `<span class="rbo-col-n">${o.n.toLocaleString()}</span><span class="rbo-col-bar" style="height:${Math.max(2, Math.round(150 * Math.sqrt(o.n / pmax)))}px">${segs}</span>` +
+      `<span class="rbo-col-label">${escapeHtml(k)}</span></div>`;
+  }).join("") || `<div class="hint-text">Nothing to show.</div>`;
+  $$("#rbo-period-seg button").forEach((b) => b.classList.toggle("is-active", b.dataset.mode === rboPeriodMode));
+
+  // active filter chips text
+  const labels = [];
+  if (rboF.type) labels.push(`Type: ${rboF.type}`);
+  if (rboF.status) labels.push(`Status: ${(statuses.find((s) => s[0] === rboF.status) || [, rboF.status])[1]}`);
+  if (rboF.aging) labels.push(`Aging: ${rboF.aging}`);
+  if (rboF.reason) labels.push(`Reason: ${rboF.reason}`);
+  if (rboF.state) labels.push(`State: ${rboF.state}`);
+  if (rboF.anom) labels.push(`Anomaly: ${rboF.anom}`);
+  if (rboF.period) labels.push(`${billing ? "Billing period" : "Created"}: ${rboF.period}`);
+  $("#rbo-active-filters").textContent = labels.join(" · ");
+
+  // table
+  const head = $("#rbo-table thead tr");
+  head.innerHTML = RBO_COLUMNS.map((c) => {
+    const arrow = rboSortKey === c.key ? `<span class="stats-table-sort-arrow">${rboSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    rboSortDir = rboSortKey === th.dataset.sort ? -rboSortDir : 1;
+    rboSortKey = th.dataset.sort;
+    rboRender();
+  }));
+  const rows = rboVisibleRows();
+  const RBO_MAX = 3000;
+  const tbody = $("#rbo-table tbody");
+  const html = rows.slice(0, RBO_MAX).map((r) => {
+    // v2: no full-row tint (most rows are > 90 days, the table went all red) - status + aging pills instead;
+    // only activities with anomalous bill lines are tinted red.
+    return `<tr${Number(r.anomalous_lines) > 0 ? ' class="kpi-tint" data-kpi="missing"' : ""}>` + RBO_COLUMNS.map((c) => {
+      let v = c.date ? hxDate(String(r[c.key] ?? "").replace(/(\d{2}:\d{2}):\d{2}\.\d+$/, "$1")) : escapeHtml(r[c.key] ?? "");
+      if (c.key === "status_en") v = `<span class="rbo-pill" data-kpi="${RBO_STATUS_KPI[r.reb_activity_status] || "total"}">${v}</span>`;
+      if (c.key === "aging") v = `<span class="rbo-pill" data-kpi="${RBO_AGING_KPI[r.aging] || "total"}">${v}</span>`;
+      if (c.key === "rebilling_state") v = `<span class="rbo-pill" data-kpi="${RBO_STATE_KPI[r.rebilling_state] || "total"}">${v}</span>`;
+      if (c.key === "anomaly_reason" && r.anomaly_reason) v = `<span style="color:#dc2626;font-weight:600">⚠ ${v}</span>`;
+      if (c.key === "create_date") v = v.replace(/ \d{2}:\d{2}$/, "");
+      if (c.key === "bill_count" && r.bill_ids) v = `<span title="${escapeHtml(r.bill_ids)}">${v}</span>`;
+      if (c.key === "description" && r.source) v = `<span title="ScriptGen: ${escapeHtml(r.source)}">🧩 ${v}</span>`;
+      return `<td class="${c.num ? "hx-num" : ""}${c.mono ? " hx-mono" : ""}">${v}</td>`;
+    }).join("") + `</tr>`;
+  }).join("");
+  tbody.innerHTML = html || `<tr><td colspan="${RBO_COLUMNS.length}" class="hint-text">${rboRows.length ? "No activities match the current filters." : "No open rebilling activities."}</td></tr>`;
+  if (rows.length > RBO_MAX) tbody.insertAdjacentHTML("beforeend", `<tr><td colspan="${RBO_COLUMNS.length}" class="hint-text">Showing the first ${RBO_MAX.toLocaleString()} of ${rows.length.toLocaleString()} - narrow the filters or use Export CSV for all.</td></tr>`);
+  renderFilteredCount("#rbo-filtered-count", rows.length, rboRows.length);
+  $("#rbo-export-btn").disabled = rows.length === 0;
+  $("#rbo-copy-btn").disabled = rows.length === 0;
+}
+$("#rbo-kpi-row").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-rbo-kpi]");
+  if (!c) return;
+  const f = c.dataset.rboKpi || null;
+  rboF.kpi = rboF.kpi === f ? null : f;
+  rboRender();
+});
+$("#rbo-panels").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-rbo-ty],[data-rbo-st],[data-rbo-ag],[data-rbo-rs],[data-rbo-pe],[data-rbo-state],[data-rbo-anom]");
+  if (!t) return;
+  const d = t.dataset;
+  const toggle = (k, v) => { rboF[k] = rboF[k] === v ? null : v; };
+  if (d.rboState !== undefined) toggle("state", d.rboState);
+  else if (d.rboAnom !== undefined) toggle("anom", d.rboAnom);
+  else if (d.rboAg !== undefined) toggle("aging", d.rboAg);
+  else if (d.rboRs !== undefined) toggle("reason", d.rboRs);
+  else if (d.rboPe !== undefined) toggle("period", d.rboPe);
+  else if (d.rboTy !== undefined && d.rboSt !== undefined) {
+    const same = rboF.type === d.rboTy && rboF.status === d.rboSt;
+    rboF.type = same ? null : d.rboTy; rboF.status = same ? null : d.rboSt;
+  } else if (d.rboTy !== undefined) { const same = rboF.type === d.rboTy && !rboF.status; rboF.type = same ? null : d.rboTy; rboF.status = null; }
+  else if (d.rboSt !== undefined) { const same = rboF.status === d.rboSt && !rboF.type; rboF.status = same ? null : d.rboSt; rboF.type = null; }
+  rboRender();
+});
+$("#rbo-period-seg").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-mode]");
+  if (!b || b.dataset.mode === rboPeriodMode) return;
+  rboPeriodMode = b.dataset.mode; rboF.period = null; rboRender();
+});
+// hero total / split-bar segments act like the KPI cards
+$("#rbo-hero").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-rbo-kpi]");
+  if (!c) return;
+  const f = c.dataset.rboKpi || null;
+  rboF.kpi = f && rboF.kpi === f ? null : f;
+  rboRender();
+});
+$("#rbo-filter-search").addEventListener("input", () => {
+  const n = rboSearchTerms().length;
+  $("#rbo-filter-search-count").textContent = n > 1 ? `${n} values` : "";
+  rboRender();
+});
+$("#rbo-clear-btn").addEventListener("click", () => {
+  rboF = { kpi: null, type: null, status: null, aging: null, reason: null, period: null, state: null, anom: null };
+  $("#rbo-filter-search").value = "";
+  $("#rbo-filter-search-count").textContent = "";
+  rboRender();
+});
+$("#rbo-detect-btn").addEventListener("click", async () => {
+  const btn = $("#rbo-detect-btn");
+  btn.disabled = true;
+  $("#rbo-summary").textContent = "Loading open rebilling activities…";
+  try {
+    const data = await api("/api/rebilling-monitor/open", { method: "POST" });
+    rboRows = data.rows || [];
+    rboBuckets = data.aging_buckets || [];
+    rboStates = data.states || [];
+    rboDnNames = data.dn_status_names || {};
+    $("#rbo-acts-title").hidden = false;
+    $("#rbo-panels").hidden = false;
+    $("#rbo-filter-row").hidden = false;
+    const pend = rboRows.filter(RBO_KPI_PRED.pending).length;
+    $("#rbo-summary").textContent = `${data.count.toLocaleString()} open rebilling activit${data.count === 1 ? "y" : "ies"} (${pend.toLocaleString()} Pending, ${(data.count - pend).toLocaleString()} In process) - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
+    rboRender();
+  } catch (err) {
+    $("#rbo-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#rbo-copy-btn").addEventListener("click", async () => {
+  const ids = rboVisibleRows().map((r) => r.id_rebilling_activity).join("\n");
+  try { await navigator.clipboard.writeText(ids); showToast(`Copied ${rboVisibleRows().length} activity id(s).`); }
+  catch { showToast("Copy failed - use Export CSV.", true); }
+});
+$("#rbo-export-btn").addEventListener("click", () => {
+  const rows = rboVisibleRows();
+  if (!rows.length) return;
+  const keys = RBO_COLUMNS.map((c) => c.key).concat(["reb_activity_status", "reb_activity_type", "reason_type", "created_month", "id_billing_period", "bill_ids", "id_customer", "bills_number", "source"]);
+  const lines = [keys.join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = "open_rebillings.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---- Temp Dashboard tab 5 "DDI eligibility x complaints" (RJ 2026-10-18) ----
+// "create new temp dashboard with all this customer select * from
+// EWA_DDI_ELIGIBILITY, connect to gccc_complaint, with complaint type
+// 4102COMTYP and 4103COMTYP" - temp_dashboard.build_ddi_complaint_query.
+// Columns come from the server (every EWA column + complaint columns).
+let tddiRows = [], tddiCols = [], tddiLoaded = false, tddiSortKey = null, tddiSortDir = 1;
+let tddiF = { kpi: null, last: null, s4102: null, s4103: null };
+const TDDI_FIRST = ["account", "id_payment_form", "n_complaints", "n_4102", "n_4103", "last_complaint_ref", "last_type",
+  "last_status_en", "last_complaint_date", "last_4102_status_en", "last_4103_status_en", "first_complaint_date"];
+const TDDI_HIDE = new Set(["last_type_code", "last_status", "last_4102_status", "last_4103_status"]);
+const TDDI_LABEL = { account: "Account", id_payment_form: "Payment form", n_complaints: "Complaints", n_4102: "4102 DD Set Up", n_4103: "4103 Internal DD",
+  last_complaint_ref: "Latest complaint", last_type: "Latest type", last_status_en: "Latest status", last_complaint_date: "Latest created",
+  last_complaint_update: "Latest updated", last_4102_status_en: "4102 latest status", last_4103_status_en: "4103 latest status",
+  first_complaint_date: "First complaint" };
+const TDDI_KPI_PRED = {
+  with: (r) => Number(r.n_complaints) > 0,
+  without: (r) => !Number(r.n_complaints),
+  both: (r) => Number(r.n_4102) > 0 && Number(r.n_4103) > 0,
+  only4102: (r) => Number(r.n_4102) > 0 && !Number(r.n_4103),
+  only4103: (r) => Number(r.n_4103) > 0 && !Number(r.n_4102),
+  multi: (r) => Number(r.n_complaints) > 1,
+};
+const tddiKey = { last: (r) => r.last_status_en || "(none)", s4102: (r) => r.last_4102_status_en || "(no 4102)", s4103: (r) => r.last_4103_status_en || "(no 4103)" };
+function tddiColumns() {
+  const rest = tddiCols.filter((c) => !TDDI_FIRST.includes(c) && !TDDI_HIDE.has(c));
+  return TDDI_FIRST.filter((c) => tddiCols.includes(c)).concat(rest);
+}
+function tddiMatch(r, skip) {
+  if (skip !== "kpi" && tddiF.kpi && !TDDI_KPI_PRED[tddiF.kpi](r)) return false;
+  for (const k of ["last", "s4102", "s4103"]) if (skip !== k && tddiF[k] && tddiKey[k](r) !== tddiF[k]) return false;
+  const terms = $("#tddi-filter-search").value.split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (terms.length) {
+    const hay = [r.account, r.id_payment_form, r.last_complaint_ref].map((v) => String(v ?? "").toLowerCase()).join(" | ");
+    if (!terms.some((t) => hay.includes(t))) return false;
+  }
+  return true;
+}
+function tddiVisibleRows() {
+  let rows = tddiRows.filter((r) => tddiMatch(r));
+  if (tddiSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[tddiSortKey], b[tddiSortKey], tddiSortDir));
+  return rows;
+}
+function tddiRender() {
+  const base = tddiRows.filter((r) => tddiMatch(r, "kpi"));
+  const cnt = (k) => base.filter(TDDI_KPI_PRED[k]).length;
+  const cards = [
+    ["total", "👥", "Rows loaded", base.length, null],
+    ["complete", "📨", "With 4102/4103 complaint", cnt("with"), "with"],
+    ["nulls", "🚫", "Without complaint", cnt("without"), "without"],
+    ["services", "🏦", "Only 4102 DD Set Up", cnt("only4102"), "only4102"],
+    ["water", "🔁", "Only 4103 Internal DD", cnt("only4103"), "only4103"],
+    ["outstanding", "🔗", "Both types", cnt("both"), "both"],
+    ["pending", "📚", "More than 1 complaint", cnt("multi"), "multi"],
+  ];
+  $("#tddi-kpi-row").innerHTML = cards.map(([kpi, icon, label, value, f]) => {
+    const active = f ? tddiF.kpi === f : !tddiF.kpi;
+    return `<div class="kpi-card kpi-card-clickable${active ? " is-active" : ""}" data-kpi="${kpi}" data-tddi-kpi="${f ?? ""}" title="Click to filter - click again to clear">` +
+      `<div class="kpi-value">${value.toLocaleString()}</div><div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${escapeHtml(label)}</div></div>`;
+  }).join("");
+  for (const k of ["last", "s4102", "s4103"]) {
+    const m = rboCount(tddiRows.filter((r) => tddiMatch(r, k)), tddiKey[k]);
+    $(`#tddi-${k}`).innerHTML = rboBarsHtml([...m.entries()].sort((a, b) => b[1] - a[1]), `data-tddi-${k}`, tddiF[k]);
+  }
+  $("#tddi-active-filters").textContent = [["last", "Latest"], ["s4102", "4102"], ["s4103", "4103"]]
+    .filter(([k]) => tddiF[k]).map(([k, l]) => `${l}: ${tddiF[k]}`).join(" · ");
+  const cols = tddiColumns();
+  const head = $("#tddi-table thead tr");
+  head.innerHTML = cols.map((c) => {
+    const arrow = tddiSortKey === c ? `<span class="stats-table-sort-arrow">${tddiSortDir === 1 ? "▲" : "▼"}</span>` : "";
+    return `<th class="stats-table-th-sortable" data-sort="${c}">${escapeHtml(TDDI_LABEL[c] || c)}${arrow}</th>`;
+  }).join("");
+  head.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    tddiSortDir = tddiSortKey === th.dataset.sort ? -tddiSortDir : 1;
+    tddiSortKey = th.dataset.sort;
+    tddiRender();
+  }));
+  const rows = tddiVisibleRows();
+  const MAX = 3000;
+  const dateCol = (c) => /date|update$/.test(c);
+  $("#tddi-table tbody").innerHTML = rows.slice(0, MAX).map((r) => {
+    const kpi = !Number(r.n_complaints) ? "" : (Number(r.n_4102) && Number(r.n_4103) ? "outstanding" : Number(r.n_4102) ? "services" : "water");
+    return `<tr class="${kpi ? "kpi-tint" : ""}" ${kpi ? `data-kpi="${kpi}"` : ""}>` + cols.map((c) => {
+      const raw = String(r[c] ?? "");
+      const v = dateCol(c) ? hxDate(raw.replace(/(\d{2}:\d{2}):\d{2}\.\d+$/, "$1")) : escapeHtml(raw);
+      return `<td class="${/^(n_|bill_amount|outstanding|debt|credit|calculated)/.test(c) ? "hx-num" : ""}${c === "account" || c === "id_payment_form" ? " hx-mono" : ""}">${v}</td>`;
+    }).join("") + `</tr>`;
+  }).join("") || `<tr><td colspan="${cols.length}" class="hint-text">${tddiRows.length ? "No rows match the current filters." : "No rows."}</td></tr>`;
+  if (rows.length > MAX) $("#tddi-table tbody").insertAdjacentHTML("beforeend", `<tr><td colspan="${cols.length}" class="hint-text">Showing the first ${MAX.toLocaleString()} of ${rows.length.toLocaleString()} - narrow the filters or use Export CSV for all.</td></tr>`);
+  renderFilteredCount("#tddi-filtered-count", rows.length, tddiRows.length);
+  $("#tddi-export-btn").disabled = rows.length === 0;
+  $("#tddi-copy-btn").disabled = rows.length === 0;
+}
+$("#tddi-kpi-row").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-tddi-kpi]");
+  if (!c) return;
+  const f = c.dataset.tddiKpi || null;
+  tddiF.kpi = tddiF.kpi === f ? null : f;
+  tddiRender();
+});
+$("#tddi-panels").addEventListener("click", (e) => {
+  for (const k of ["last", "s4102", "s4103"]) {
+    const t = e.target.closest(`[data-tddi-${k}]`);
+    if (t) { const v = t.getAttribute(`data-tddi-${k}`); tddiF[k] = tddiF[k] === v ? null : v; tddiRender(); return; }
+  }
+});
+$("#tddi-filter-search").addEventListener("input", () => {
+  const n = $("#tddi-filter-search").value.split(/[\s,;]+/).filter(Boolean).length;
+  $("#tddi-filter-search-count").textContent = n > 1 ? `${n} values` : "";
+  tddiRender();
+});
+$("#tddi-clear-btn").addEventListener("click", () => {
+  tddiF = { kpi: null, last: null, s4102: null, s4103: null };
+  $("#tddi-filter-search").value = ""; $("#tddi-filter-search-count").textContent = "";
+  tddiRender();
+});
+$("#tddi-scope").addEventListener("change", () => $("#tddi-detect-btn").click());
+$("#tddi-detect-btn").addEventListener("click", async () => {
+  const btn = $("#tddi-detect-btn");
+  btn.disabled = true;
+  tddiLoaded = true;
+  $("#tddi-summary").textContent = "Loading (about 10-20s)…";
+  try {
+    const scope = $("#tddi-scope").value;
+    const data = await api("/api/temp-dashboard/ddi-complaints", { method: "POST", body: { scope } });
+    tddiRows = data.rows || [];
+    tddiCols = data.columns || [];
+    tddiF = { kpi: null, last: null, s4102: null, s4103: null };
+    $("#tddi-panels").hidden = false;
+    $("#tddi-filter-row").hidden = false;
+    const tot = Number(data.ewa_total || 0), w = Number(data.ewa_with_complaint || 0);
+    const capped = scope !== "with" && data.count >= data.row_cap ? ` (capped at ${Number(data.row_cap).toLocaleString()} - Export CSV holds these rows only)` : "";
+    $("#tddi-summary").textContent = `EWA_DDI_ELIGIBILITY: ${tot.toLocaleString()} customers - ${w.toLocaleString()} with a 4102/4103 complaint, ${(tot - w).toLocaleString()} without. Loaded ${data.count.toLocaleString()} row(s)${capped} in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
+    tddiRender();
+  } catch (err) {
+    $("#tddi-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#tddi-copy-btn").addEventListener("click", async () => {
+  const rows = tddiVisibleRows();
+  try { await navigator.clipboard.writeText(rows.map((r) => r.account).join("\n")); showToast(`Copied ${rows.length} account(s).`); }
+  catch { showToast("Copy failed - use Export CSV.", true); }
+});
+$("#tddi-export-btn").addEventListener("click", () => {
+  const rows = tddiVisibleRows();
+  if (!rows.length) return;
+  const keys = tddiColumns().concat([...TDDI_HIDE]);
+  const lines = [keys.join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = "ddi_eligibility_complaints.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// ---- FIX BILLING CAMPAIGN 2026 (RJ 2026-10-18) ----
+// EWA_DDI_ELIGIBILITY + subsidy wallet (credit, behaviour) + /mobileapp/complaint
+// request + linked RCCS with its 4 attributes. See app/core/fix_billing_campaign.py.
+let fbcRows = [], fbcEwaCols = [], fbcSortKey = null, fbcSortDir = 1;
+let fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null };
+const FBC_RANGES = [[0, "0"], [50, "0-50"], [100, "50-100"], [250, "100-250"], [500, "250-500"], [Infinity, "> 500"]];
+const FBC_RANGE_KPI = { "0": "case0", "0-50": "complete", "50-100": "services", "100-250": "pending", "250-500": "stuck", "> 500": "missing" };
+const fbcNum = (v) => { const n = Number(String(v ?? "").replace(/,/g, "")); return String(v ?? "").trim() === "" || !Number.isFinite(n) ? null : n; };
+const fbcMoney = (v) => { const n = fbcNum(v); return n === null ? "" : n.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 }); };
+function fbcRange(r) {
+  const n = fbcNum(r.wallet_balance);
+  if (n === null) return "(no wallet)";
+  if (n <= 0) return "0";
+  return FBC_RANGES.find(([lim]) => n <= lim)[1];
+}
+const fbcBehKey = (r) => (r.cod_behaviour ? `${r.behaviour_desc || "?"} (${r.cod_behaviour})` : "(no wallet)");
+const fbcRstKey = (r) => r.rccs_status_en || (r.has_request ? "(no RCCS found)" : "(no request)");
+// RJ 2026-10-18: the 3 main RCCS groups - 4102 = Direct Debit Request; 4103 = No Bank when the
+// no-bank amount (RCCS attribute RCCSNOBAMT, request noBankAmount when no RCCS) is filled,
+// otherwise Benefit. Same rule as fix_billing_campaign.category() on the server.
+function fbcCategory(r) {
+  if (r.category) return r.category;
+  const t = String(r.req_complaint_type || "").trim();
+  if (t === "4102COMTYP") return "Direct Debit Request";
+  if (t === "4103COMTYP") {
+    const nob = String(r.id_complaint || "").trim() ? r.att_nobank_amt : r.req_nobank_amount;
+    return String(nob ?? "").trim() === "" ? "Benefit" : "No Bank";
+  }
+  return "Other";
+}
+const fbcTypeKey = (r) => fbcCategory(r);
+const FBC_CATEGORIES = ["Direct Debit Request", "No Bank", "Benefit"];
+const FBC_TYPE_NAMES = { "4102COMTYP": "4102 Direct Debit Set Up", "4103COMTYP": "4103 Internal - DD Request",
+  "Direct Debit Request": "4102COMTYP", "No Bank": "4103COMTYP with No Bank Amount", "Benefit": "4103COMTYP, no No Bank Amount", "Other": "no / other request type" };
+const FBC_KPI_PRED = {
+  wallet: (r) => r.has_wallet, request: (r) => r.has_request, rccs: (r) => r.has_rccs,
+  full: (r) => r.has_wallet && r.has_request && r.has_rccs,
+  noRccs: (r) => r.has_request && !r.has_rccs, noWallet: (r) => r.has_request && !r.has_wallet,
+  issues: (r) => (r.issues || []).length > 0, multi: (r) => Number(r.req_count) > 1,
+  // RJ 2026-10-18: "add a kpi for more than 1 account in an rccs number"
+  sharedRccs: (r) => Number(r.rccs_accounts) > 1,
+};
+// how many accounts point at the same RCCS reference (latest request per account)
+function fbcMarkShared(rows) {
+  const m = new Map();
+  rows.forEach((r) => { if (r.rccs_ref) { const s = m.get(r.rccs_ref) || new Set(); s.add(r.account); m.set(r.rccs_ref, s); } });
+  rows.forEach((r) => {
+    const s = r.rccs_ref ? m.get(r.rccs_ref) : null;
+    r.rccs_accounts = s ? s.size : "";
+    r.rccs_other_accounts = s && s.size > 1 ? [...s].filter((a) => a !== r.account).join(", ") : "";
+  });
+}
+// column groups: [group label, accent, columns]
+const FBC_GROUPS = [
+  ["Customer", "#6366f1", [["account", "Account", "mono"], ["id_payment_form", "Payment form", "mono"], ["category", "RCCS group", "cat"], ["req_complaint_type", "Type", "type"], ["link_state", "Link"]]],
+  ["Subsidy wallet", "#10b981", [["wallet_balance", "Credit (balance)", "money"], ["cod_behaviour", "Behaviour", "beh"], ["wallet_updated", "Wallet updated", "date"]]],
+  // RJ 2026-10-18 v2: "for third table for json, just show 1 column for JSON and just display,
+  // request CREDIT, NO_BANK, DEDUCTION" - JSON opens the raw request on demand.
+  ["Request (JSON)", "#0ea5e9", [["req_id", "JSON", "json"], ["req_credit_amount", "CREDIT", "money"],
+    ["req_nobank_amount", "NO_BANK", "money"], ["req_deduction_amount", "DEDUCTION", "money"]]],
+  ["RCCS (GCCC_COMPLAINT)", "#f59e0b", [["rccs_ref", "RCCS", "mono"], ["rccs_accounts", "Accounts on RCCS", "shared"], ["rccs_status_en", "Status", "rst"], ["rccs_date", "Created", "date"],
+    ["att_credit_amt", "CREDITAMT", "money"], ["att_nobank_amt", "NOBANK AMT", "money"], ["att_credit_usage", "Credit usage", "usage"],
+    ["att_deduction_amt", "Deduction amount", "money"]]],
+  ["Checks", "#ef4444", [["issue_text", "Issues", "issues"]]],
+];
+function fbcColumns() {
+  const groups = FBC_GROUPS.map((g) => [...g]);
+  if ($("#fbc-ewa-cols").checked) {
+    const skip = new Set(["account", "id_payment_form"]);
+    groups.push(["EWA_DDI_ELIGIBILITY", "#64748b", fbcEwaCols.filter((c) => !skip.has(c)).map((c) => [c, c, /^(bill_amount|outstanding|debt|credit|calculated)/.test(c) ? "money" : ""])]);
+  }
+  return groups;
+}
+function fbcMatch(r, skip) {
+  if (skip !== "kpi" && fbcF.kpi && !FBC_KPI_PRED[fbcF.kpi](r)) return false;
+  if (skip !== "beh" && fbcF.beh && fbcBehKey(r) !== fbcF.beh) return false;
+  if (skip !== "rst" && fbcF.rst && fbcRstKey(r) !== fbcF.rst) return false;
+  if (skip !== "rtype" && fbcF.rtype && fbcTypeKey(r) !== fbcF.rtype) return false;
+  if (skip !== "range" && fbcF.range && fbcRange(r) !== fbcF.range) return false;
+  if (skip !== "issue" && fbcF.issue && !(r.issues || []).includes(fbcF.issue)) return false;
+  const terms = $("#fbc-filter-search").value.split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (terms.length) {
+    const hay = [r.account, r.id_payment_form, r.rccs_ref, r.id_wallet].map((v) => String(v ?? "").toLowerCase()).join(" | ");
+    if (!terms.some((t) => hay.includes(t))) return false;
+  }
+  return true;
+}
+function fbcVisibleRows() {
+  let rows = fbcRows.filter((r) => fbcMatch(r));
+  if (fbcSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[fbcSortKey], b[fbcSortKey], fbcSortDir));
+  else if (fbcF.kpi === "sharedRccs") rows = [...rows].sort((a, b) => String(a.rccs_ref).localeCompare(String(b.rccs_ref)));  // keep each RCCS's accounts together
+  return rows;
+}
+function fbcListHtml(entries, attr, active, kpiOf, extraOf) {
+  const max = Math.max(1, ...entries.map(([, n]) => n));
+  return entries.map(([k, n]) => {
+    const kpi = kpiOf ? kpiOf(k) : null;
+    return `<div class="rbo-reason${active === k ? " is-active" : ""}" ${attr}="${escapeHtml(k)}" title="${escapeHtml(k)}: ${n.toLocaleString()} - click to filter">` +
+      `<span class="rbo-reason-name">${escapeHtml(k)}${extraOf ? `<small class="rbo-sub" style="margin-left:6px">${extraOf(k)}</small>` : ""}</span>` +
+      `<span class="rbo-reason-track"><span${kpi ? ` data-kpi="${kpi}"` : ""} style="width:${100 * n / max}%"></span></span>` +
+      `<span class="rbo-reason-n">${n.toLocaleString()}</span></div>`;
+  }).join("") || `<div class="hint-text">Nothing to show.</div>`;
+}
+// v2 dashboard (RJ 2026-10-18: "I am more focused on the Type and number of customer.
+// wallet credit can be one widget"): type cards + one wallet widget + type x RCCS status.
+const FBC_TYPE_COLOR = { "Direct Debit Request": "#0ea5e9", "No Bank": "#f59e0b", "Benefit": "#a855f7", "Other": "#64748b" };
+const FBC_TYPE_ICON = { "Direct Debit Request": "🏦", "No Bank": "💵", "Benefit": "🎁", "Other": "❔" };
+// hollow (donut) chart: one arc per category, click = filter
+function fbcDonutSvg(entries, total, active) {
+  const R = 78, C = 2 * Math.PI * R, gap = entries.length > 1 ? 4 : 0;
+  let off = 0;
+  const arcs = entries.map(([k, n]) => {
+    const len = total ? Math.max(0, (C * n) / total - gap) : 0;
+    const arc = `<circle class="fbc-donut-arc${active === k ? " is-active" : ""}${active && active !== k ? " is-dim" : ""}" data-fbc-rtype="${escapeHtml(k)}" r="${R}" cx="100" cy="100" fill="none"
+      stroke="${FBC_TYPE_COLOR[k] || "#64748b"}" stroke-width="22" stroke-linecap="butt"
+      stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"
+      style="--glow:${FBC_TYPE_COLOR[k] || "#64748b"}"><title>${escapeHtml(k)}: ${n.toLocaleString()} (${total ? (100 * n / total).toFixed(1) : 0}%)</title></circle>`;
+    off += (C * n) / (total || 1);
+    return arc;
+  }).join("");
+  const sel = active ? entries.find(([k]) => k === active) : null;
+  return `<svg viewBox="0 0 200 200" class="fbc-donut" role="img" aria-label="Customers by RCCS group">
+    <defs><linearGradient id="fbcRing" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="rgba(99,102,241,.10)"/><stop offset="1" stop-color="rgba(14,165,233,.04)"/></linearGradient></defs>
+    <circle r="${R}" cx="100" cy="100" fill="none" stroke="url(#fbcRing)" stroke-width="22"/>
+    <circle r="${R - 20}" cx="100" cy="100" fill="none" stroke="var(--card-border)" stroke-width="1" stroke-dasharray="2 4"/>
+    <g transform="rotate(-90 100 100)">${arcs}</g>
+    <text x="100" y="94" text-anchor="middle" class="fbc-donut-n">${(sel ? sel[1] : total).toLocaleString()}</text>
+    <text x="100" y="116" text-anchor="middle" class="fbc-donut-l">${escapeHtml(sel ? sel[0] : "customers")}</text>
+  </svg>`;
+}
+function fbcRenderDash() {
+  const sum = (rows, key) => rows.reduce((s, r) => s + (fbcNum(r[key]) || 0), 0);
+  // 1. type cards (customers per type, under every filter except type)
+  const tRows = fbcRows.filter((r) => fbcMatch(r, "rtype"));
+  const tc = rboCount(tRows, fbcTypeKey);
+  const tTotal = tRows.length || 1;
+  // the 3 main groups always shown (even at 0), "Other" only when present
+  const typeKeys = FBC_CATEGORIES.concat([...tc.keys()].filter((k) => !FBC_CATEGORIES.includes(k)));
+  const rstMini = (rows) => {
+    const m = rboCount(rows, fbcRstKey);
+    return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4)
+      .map(([k, n]) => `<span>${escapeHtml(k)} <b>${n.toLocaleString()}</b></span>`).join("") || "<span>-</span>";
+  };
+  const donutEntries = typeKeys.map((k) => [k, tc.get(k) || 0]);
+  $("#fbc-types").innerHTML =
+    `<div class="fbc-donut-card">${fbcDonutSvg(donutEntries, tRows.length, fbcF.rtype)}` +
+      `<div class="fbc-donut-legend">${donutEntries.map(([k, n]) =>
+        `<span class="${fbcF.rtype === k ? "is-active" : ""}" data-fbc-rtype="${escapeHtml(k)}"><i style="background:${FBC_TYPE_COLOR[k] || "#64748b"}"></i>${escapeHtml(k)}<b>${tRows.length ? Math.round(100 * n / tRows.length) : 0}%</b></span>`).join("")}` +
+      `${fbcF.rtype ? `<span class="fbc-donut-all" data-fbc-rtype-all="1">✕ show all</span>` : ""}</div></div>` +
+    `<div class="fbc-cat-cards">${typeKeys.map((k) => {
+      const n = tc.get(k) || 0, rows = tRows.filter((r) => fbcTypeKey(r) === k), pct = tRows.length ? Math.round(100 * n / tRows.length) : 0;
+      const color = FBC_TYPE_COLOR[k] || "#f59e0b";
+      return `<div class="fbc-type${fbcF.rtype === k ? " is-active" : ""}${n ? "" : " is-empty"}" style="--t:${color}" data-fbc-rtype="${escapeHtml(k)}" title="Click to filter: ${escapeHtml(k)}">` +
+        `<span class="fbc-type-label"><span class="fbc-cat-ico">${FBC_TYPE_ICON[k] || "•"}</span>${escapeHtml(k)}</span>` +
+        `<b class="fbc-type-n">${n.toLocaleString()}</b>` +
+        `<span class="fbc-type-bar"><span style="width:${pct}%"></span></span>` +
+        `<span class="fbc-type-sub">${pct}% · ${escapeHtml(FBC_TYPE_NAMES[k] || "")} · credit ${fbcMoney(sum(rows, "wallet_balance"))}</span>` +
+        `<span class="fbc-type-mini">${rstMini(rows)}</span></div>`;
+    }).join("")}</div>`;
+
+  // 2. wallet credit - one widget
+  const wRows = fbcRows.filter((r) => fbcMatch(r) && r.has_wallet);
+  const bals = wRows.map((r) => fbcNum(r.wallet_balance)).filter((n) => n !== null);
+  const total = bals.reduce((s, n) => s + n, 0);
+  const rg = rboCount(wRows, fbcRange);
+  const rgKeys = FBC_RANGES.map((x) => x[1]);
+  const rgTot = Math.max(1, wRows.length);
+  const beh = [...rboCount(wRows, fbcBehKey).entries()].map(([k, n]) => `${escapeHtml(k)}: <b>${n.toLocaleString()}</b>`).join(" · ");
+  $("#fbc-wallet").innerHTML =
+    `<span class="fbc-type-label">👛 Wallet credit (EWA_GCCOM_SUBSIDY_WALLET)</span>` +
+    `<b class="fbc-wallet-total">${fbcMoney(total)}</b>` +
+    `<div class="fbc-wallet-stats"><div>Customers<b>${wRows.length.toLocaleString()}</b></div>` +
+      `<div>Average<b>${fbcMoney(bals.length ? total / bals.length : 0)}</b></div>` +
+      `<div>Max<b>${fbcMoney(bals.length ? Math.max(...bals) : 0)}</b></div>` +
+      `<div>RCCS CREDITAMT<b>${fbcMoney(sum(wRows, "att_credit_amt"))}</b></div></div>` +
+    `<div class="fbc-wallet-strip">${rgKeys.map((k) => { const n = rg.get(k) || 0; return n ? `<span data-kpi="${FBC_RANGE_KPI[k]}" data-fbc-range="${escapeHtml(k)}" class="${fbcF.range === k ? "is-active" : ""}" style="flex:${n}" title="${escapeHtml(k)} BHD: ${n.toLocaleString()} customer(s) - click to filter"></span>` : ""; }).join("")}</div>` +
+    `<div class="fbc-wallet-legend">${rgKeys.map((k) => `<span data-fbc-range="${escapeHtml(k)}"><i data-kpi="${FBC_RANGE_KPI[k]}"></i>${escapeHtml(k)} <b>${(rg.get(k) || 0).toLocaleString()}</b> <small>${Math.round(100 * (rg.get(k) || 0) / rgTot)}%</small></span>`).join("")}</div>` +
+    `<div class="fbc-wallet-beh">Behaviour - ${beh || "none"}</div>`;
+
+  // KPI strip (RJ 2026-10-18: "add a kpi for more than 1 account in an rccs number")
+  const kBase = fbcRows.filter((r) => fbcMatch(r, "kpi"));
+  const sharedRows = kBase.filter(FBC_KPI_PRED.sharedRccs);
+  const sharedRccs = new Set(sharedRows.map((r) => r.rccs_ref)).size;
+  const kCards = [
+    ["missing", "🔗", "RCCS with more than 1 account", sharedRccs, `${sharedRows.length.toLocaleString()} accounts share them`, "sharedRccs"],
+    ["pending", "❓", "Request without RCCS", kBase.filter(FBC_KPI_PRED.noRccs).length, "RCCS reference not found", "noRccs"],
+    ["stuck", "⚠️", "Customers with issues", kBase.filter(FBC_KPI_PRED.issues).length, "see consistency checks", "issues"],
+  ];
+  $("#fbc-kpi-row").innerHTML = kCards.map(([kpi, icon, label, value, sub, f]) =>
+    `<div class="rbo-kpi${fbcF.kpi === f ? " is-active" : ""}" data-kpi="${kpi}" data-fbc-kpi="${f}" title="${escapeHtml(label)} - click to filter, click again to clear">` +
+    `<span class="rbo-kpi-label"><span>${icon}</span>${escapeHtml(label)}</span>` +
+    `<span class="rbo-kpi-value">${value.toLocaleString()}</span>` +
+    `<span class="rbo-sub">${escapeHtml(sub)}</span></div>`).join("");
+
+  // 3. type x RCCS status matrix (customers)
+  const mRows = fbcRows.filter((r) => fbcMatch(r, "rtype") && fbcMatch(r, "rst"));
+  const sts = [...rboCount(mRows, fbcRstKey).entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
+  const types = [...rboCount(mRows, fbcTypeKey).entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
+  const cell = new Map();
+  mRows.forEach((r) => { const k = fbcTypeKey(r) + "|" + fbcRstKey(r); cell.set(k, (cell.get(k) || 0) + 1); });
+  // v3 (RJ 2026-10-18: "the table 2 looks bad, all are not properly proportioned"):
+  // one 100%-wide stacked bar per type (segment width = share of customers), then a
+  // fixed-layout table (equal status columns) with count + % of the type per cell.
+  const stColor = (s) => (s.startsWith("(") ? "#94a3b8" : /reject|cancel/i.test(s) ? "#ef4444"
+    : /solved|approved|resolved/i.test(s) ? "#10b981" : /request|pending|process/i.test(s) ? "#f59e0b" : "#6366f1");
+  $("#fbc-status-bars").innerHTML = types.map((t) => {
+    const tot = sts.reduce((a, s) => a + (cell.get(t + "|" + s) || 0), 0) || 1;
+    return `<div class="fbc-sbar-row"><span class="fbc-sbar-type" style="--t:${FBC_TYPE_COLOR[t] || "#f59e0b"}"><code>${escapeHtml(t)}</code><b>${tot.toLocaleString()}</b></span>` +
+      `<div class="fbc-sbar">${sts.map((s) => {
+        const n = cell.get(t + "|" + s) || 0;
+        if (!n) return "";
+        const pct = 100 * n / tot;
+        return `<span class="${fbcF.rtype === t && fbcF.rst === s ? "is-active" : ""}" data-fbc-cell="${escapeHtml(t)}|${escapeHtml(s)}" style="flex:${n};background:${stColor(s)}" title="${escapeHtml(t)} · ${escapeHtml(s)}: ${n.toLocaleString()} (${pct.toFixed(1)}%)">${pct >= 7 ? `${escapeHtml(s)} ${Math.round(pct)}%` : ""}</span>`;
+      }).join("")}</div></div>`;
+  }).join("");
+  const colW = sts.length ? (70 / sts.length).toFixed(2) : 70;
+  $("#fbc-matrix-cols").innerHTML = `<col style="width:18%">` + sts.map(() => `<col style="width:${colW}%">`).join("") + `<col style="width:12%">`;
+  $("#fbc-matrix thead").innerHTML = `<tr><th class="fbc-mx-type">Type</th>${sts.map((s) =>
+    `<th class="${fbcF.rst === s && !fbcF.rtype ? "is-active" : ""}" data-fbc-rst="${escapeHtml(s)}" title="Filter: ${escapeHtml(s)}"><i style="background:${stColor(s)}"></i>${escapeHtml(s)}</th>`).join("")}<th>Total</th></tr>`;
+  $("#fbc-matrix tbody").innerHTML = types.map((t) => {
+    const tot = sts.reduce((s, x) => s + (cell.get(t + "|" + x) || 0), 0);
+    return `<tr><th class="fbc-mx-type" data-fbc-rtype="${escapeHtml(t)}" style="--t:${FBC_TYPE_COLOR[t] || "#f59e0b"}"><code>${escapeHtml(t)}</code>` +
+      `<small>${escapeHtml(FBC_TYPE_NAMES[t] ? FBC_TYPE_NAMES[t].replace(/^\d+ /, "") : "")}</small></th>` +
+      sts.map((s) => {
+        const n = cell.get(t + "|" + s) || 0;
+        const pct = tot ? 100 * n / tot : 0;
+        return `<td class="${fbcF.rtype === t && fbcF.rst === s ? "is-active" : ""}${n ? "" : " is-zero"}" data-fbc-cell="${escapeHtml(t)}|${escapeHtml(s)}" style="--c:${stColor(s)}">` +
+          `<b>${n ? n.toLocaleString() : "–"}</b>${n ? `<small>${pct < 0.1 ? "<0.1" : pct.toFixed(1)}%</small>` : ""}</td>`;
+      }).join("") + `<td class="fbc-mx-total"><b>${tot.toLocaleString()}</b></td></tr>`;
+  }).join("") + (types.length > 1 ? `<tr class="fbc-mx-foot"><th class="fbc-mx-type">Total</th>${sts.map((s) => `<td><b>${types.reduce((a, t) => a + (cell.get(t + "|" + s) || 0), 0).toLocaleString()}</b></td>`).join("")}<td class="fbc-mx-total"><b>${mRows.length.toLocaleString()}</b></td></tr>` : "");
+}
+function fbcRender() {
+  fbcRenderDash();
+  // issues
+  const isRows = fbcRows.filter((r) => fbcMatch(r, "issue"));
+  const isC = new Map();
+  isRows.forEach((r) => (r.issues || []).forEach((i) => isC.set(i, (isC.get(i) || 0) + 1)));
+  const withIss = isRows.filter(FBC_KPI_PRED.issues).length;
+  $("#fbc-issue-sub").textContent = withIss ? `${withIss.toLocaleString()} customer(s)` : "";
+  $("#fbc-issues").innerHTML = [...isC.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) =>
+    `<div class="rbo-anom${fbcF.issue === k ? " is-active" : ""}" data-fbc-issue="${escapeHtml(k)}" title="Click to filter">` +
+    `<code>CHECK</code><span class="rbo-anom-text">${escapeHtml(k)}</span><span class="rbo-anom-n">${n.toLocaleString()}</span></div>`).join("")
+    || `<div class="rbo-anom-none">✓ No inconsistencies in the current selection</div>`;
+
+  const labels = [];
+  if (fbcF.beh) labels.push(`Behaviour: ${fbcF.beh}`);
+  if (fbcF.rst) labels.push(`RCCS: ${fbcF.rst}`);
+  if (fbcF.rtype) labels.push(`Type: ${fbcF.rtype}`);
+  if (fbcF.range) labels.push(`Credit: ${fbcF.range}`);
+  if (fbcF.issue) labels.push(`Check: ${fbcF.issue}`);
+  $("#fbc-active-filters").textContent = labels.join(" · ");
+
+  // table: grouped two-row header
+  const groups = fbcColumns();
+  const cols = groups.flatMap(([g, color, cs]) => cs.map((c, i) => ({ key: c[0], label: c[1], kind: c[2] || "", color, first: i === 0 })));
+  $("#fbc-table thead").innerHTML =
+    `<tr class="fbc-group-row">${groups.map(([g, color, cs]) => `<th colspan="${cs.length}" style="--g:${color}">${escapeHtml(g)}</th>`).join("")}</tr>` +
+    `<tr>${cols.map((c) => {
+      const arrow = fbcSortKey === c.key ? `<span class="stats-table-sort-arrow">${fbcSortDir === 1 ? "▲" : "▼"}</span>` : "";
+      return `<th class="stats-table-th-sortable${c.first ? " fbc-gstart" : ""}" style="--g:${c.color}" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
+    }).join("")}</tr>`;
+  $$("#fbc-table thead th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    fbcSortDir = fbcSortKey === th.dataset.sort ? -fbcSortDir : 1;
+    fbcSortKey = th.dataset.sort;
+    fbcRender();
+  }));
+  const rows = fbcVisibleRows();
+  const MAX = 3000;
+  $("#fbc-table tbody").innerHTML = rows.slice(0, MAX).map((r) => {
+    const tint = (r.issues || []).length ? ' class="kpi-tint" data-kpi="missing"' : "";
+    return `<tr${tint}>` + cols.map((c) => {
+      const raw = r[c.key];
+      let v = escapeHtml(raw ?? "");
+      if (c.kind === "money") v = fbcMoney(raw);
+      else if (c.kind === "date") v = hxDate(String(raw ?? "").replace(/(\d{2}:\d{2}):\d{2}(\.\d+)?$/, "$1"));
+      else if (c.kind === "beh" && raw) v = `<span class="rbo-pill" data-kpi="${String(r.behaviour_desc || "").includes("Freeze") ? "missing" : "complete"}">${escapeHtml(r.behaviour_desc || raw)}</span> <small class="hint-text">${escapeHtml(raw)}</small>`;
+      else if (c.kind === "usage" && raw) v = `${escapeHtml(r.att_credit_usage_desc || raw)} <small class="hint-text">${escapeHtml(raw)}</small>`;
+      else if (c.kind === "rst" && raw) v = `<span class="rbo-pill" data-kpi="${/reject|cancel/i.test(raw) ? "missing" : /solved|approved/i.test(raw) ? "complete" : "pending"}">${escapeHtml(raw)}</span>`;
+      else if (c.kind === "type" && raw) v = `<span title="${escapeHtml(FBC_TYPE_NAMES[raw] || raw)}">${escapeHtml(raw)}</span>`;
+      else if (c.kind === "issues" && raw) v = `<span style="color:#dc2626;font-weight:600">⚠ ${escapeHtml(raw)}</span>`;
+      else if (c.kind === "shared") v = Number(raw) > 1
+        ? `<span class="rbo-pill" data-kpi="missing" title="Also on this RCCS: ${escapeHtml(r.rccs_other_accounts || "")}">⚠ ${escapeHtml(raw)} accounts</span>`
+        : escapeHtml(raw ?? "");
+      else if (c.kind === "cat") { const k = fbcCategory(r); v = `<span class="fbc-cat-pill" style="--t:${FBC_TYPE_COLOR[k] || "#64748b"}">${FBC_TYPE_ICON[k] || ""} ${escapeHtml(k)}</span>`; }
+      else if (c.kind === "json") v = raw ? `<button type="button" class="fbc-json-btn" data-fbc-json="${escapeHtml(raw)}" data-fbc-acc="${escapeHtml(r.account || "")}" title="Open the request JSON (message ${escapeHtml(raw)})">{ } JSON</button>` : "";
+      if (c.key === "link_state") v = `<span class="rbo-pill" data-kpi="${raw === "Wallet + Request + RCCS" ? "complete" : raw === "Not in campaign" ? "case0" : "pending"}">${v}</span>`;
+      return `<td class="${c.first ? "fbc-gstart " : ""}${c.kind === "money" || c.kind === "num" ? "hx-num" : ""}${c.kind === "mono" ? " hx-mono" : ""}" style="--g:${c.color}">${v}</td>`;
+    }).join("") + `</tr>`;
+  }).join("") || `<tr><td colspan="${cols.length}" class="hint-text">${fbcRows.length ? "No customers match the current filters." : "No rows."}</td></tr>`;
+  if (rows.length > MAX) $("#fbc-table tbody").insertAdjacentHTML("beforeend", `<tr><td colspan="${cols.length}" class="hint-text">Showing the first ${MAX.toLocaleString()} of ${rows.length.toLocaleString()} - narrow the filters or use Export CSV for all.</td></tr>`);
+  renderFilteredCount("#fbc-filtered-count", rows.length, fbcRows.length);
+  $("#fbc-export-btn").disabled = rows.length === 0;
+  $("#fbc-copy-btn").disabled = rows.length === 0;
+}
+$("#fbc-dash").addEventListener("click", (e) => {
+  if (e.target.closest("[data-fbc-rtype-all]")) { fbcF.rtype = null; fbcF.rst = null; fbcRender(); return; }
+  const cellEl = e.target.closest("[data-fbc-cell]");
+  if (cellEl) {
+    const [t, s] = cellEl.dataset.fbcCell.split("|");
+    const same = fbcF.rtype === t && fbcF.rst === s;
+    fbcF.rtype = same ? null : t; fbcF.rst = same ? null : s; fbcRender(); return;
+  }
+  const k = e.target.closest("[data-fbc-kpi]");
+  if (k) { const f = k.dataset.fbcKpi || null; fbcF.kpi = f && fbcF.kpi === f ? null : f; fbcRender(); return; }
+  for (const [attr, key] of [["data-fbc-beh", "beh"], ["data-fbc-rst", "rst"], ["data-fbc-rtype", "rtype"], ["data-fbc-range", "range"], ["data-fbc-issue", "issue"]]) {
+    const t = e.target.closest(`[${attr}]`);
+    if (t) { const v = t.getAttribute(attr); fbcF[key] = fbcF[key] === v ? null : v; fbcRender(); return; }
+  }
+});
+$("#fbc-filter-search").addEventListener("input", () => {
+  const n = $("#fbc-filter-search").value.split(/[\s,;]+/).filter(Boolean).length;
+  $("#fbc-filter-search-count").textContent = n > 1 ? `${n} values` : "";
+  fbcRender();
+});
+$("#fbc-ewa-cols").addEventListener("change", fbcRender);
+// request JSON viewer (fetched on demand: GET /api/fix-billing-campaign/request/{id})
+$("#fbc-table").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-fbc-json]");
+  if (!b) return;
+  const id = b.dataset.fbcJson;
+  $("#fbc-json-title").textContent = `Request ${id} - account ${b.dataset.fbcAcc}`;
+  $("#fbc-json-body").textContent = "Loading…";
+  $("#fbc-json-modal").hidden = false;
+  try {
+    const d = await api(`/api/fix-billing-campaign/request/${encodeURIComponent(id)}`);
+    let body = d.requestentity || "";
+    try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { /* not JSON - show as is */ }
+    $("#fbc-json-body").textContent = body;
+    $("#fbc-json-title").textContent = `Request ${id} - account ${b.dataset.fbcAcc} - ${d.create_date || ""} - response ${d.responseentity || ""} (${d.reponsestatus || ""})`;
+  } catch (err) {
+    $("#fbc-json-body").textContent = err.message;
+  }
+});
+$("#fbc-json-close").addEventListener("click", () => { $("#fbc-json-modal").hidden = true; });
+$("#fbc-json-modal").addEventListener("click", (e) => { if (e.target.id === "fbc-json-modal") $("#fbc-json-modal").hidden = true; });
+$("#fbc-json-copy").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#fbc-json-body").textContent); showToast("JSON copied."); } catch { showToast("Copy failed.", true); }
+});
+$("#fbc-clear-btn").addEventListener("click", () => {
+  fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null };
+  $("#fbc-filter-search").value = ""; $("#fbc-filter-search-count").textContent = "";
+  fbcRender();
+});
+$("#fbc-scope").addEventListener("change", () => $("#fbc-detect-btn").click());
+$("#fbc-detect-btn").addEventListener("click", async () => {
+  const btn = $("#fbc-detect-btn");
+  btn.disabled = true;
+  $("#fbc-summary").textContent = "Loading (about 15s)…";
+  try {
+    const data = await api("/api/fix-billing-campaign/detect", { method: "POST", body: { scope: $("#fbc-scope").value, since: $("#fbc-since").value || "2026-10-16" } });
+    fbcRows = data.rows || [];
+    fbcRows.forEach((r) => { r.category = fbcCategory(r); });
+    fbcMarkShared(fbcRows);
+    fbcEwaCols = data.ewa_columns || [];
+    fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null };
+    $("#fbc-dash").hidden = false; $("#fbc-filter-row").hidden = false; $("#fbc-acts-title").hidden = false;
+    const capped = data.count >= data.row_cap ? ` (capped at ${Number(data.row_cap).toLocaleString()})` : "";
+    $("#fbc-summary").textContent = `${data.count.toLocaleString()} customer(s)${capped} - requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
+    fbcRender();
+  } catch (err) {
+    $("#fbc-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#fbc-copy-btn").addEventListener("click", async () => {
+  const rows = fbcVisibleRows();
+  try { await navigator.clipboard.writeText(rows.map((r) => r.account).join("\n")); showToast(`Copied ${rows.length} account(s).`); }
+  catch { showToast("Copy failed - use Export CSV.", true); }
+});
+$("#fbc-export-btn").addEventListener("click", () => {
+  const rows = fbcVisibleRows();
+  if (!rows.length) return;
+  const keys = FBC_GROUPS.flatMap((g) => g[2].map((c) => c[0])).concat(["behaviour_desc", "att_credit_usage_desc", "id_wallet", "id_complaint", "req_id", "req_status"])
+    .concat(fbcEwaCols.filter((c) => c !== "account" && c !== "id_payment_form"));
+  const lines = [keys.join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = "fix_billing_campaign_2026.csv";
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 });

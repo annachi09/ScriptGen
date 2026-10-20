@@ -349,6 +349,91 @@ ORDER BY 1, pf.REFERENCE
 """
 
 
+# ---------------------------------------------------------------------------
+# Tab 5 "DDI eligibility x complaints" (RJ 2026-10-18): "create new temp
+# dashboard with all this customer select * from EWA_DDI_ELIGIBILITY, connect
+# to gccc_complaint, with complaint type 4102COMTYP and 4103COMTYP".
+# Live 2026-10-18: OUC_COMMON_ADMIN.EWA_DDI_ELIGIBILITY 153,236 rows (one per
+# id_payment_form); GCCC_COMPLAINT.ID_ACCOUNT = GCCOM_PAYMENT_FORM.ID_PAYMENT_FORM;
+# GCCC_COMPLAINT_TYPE.COD_DEVELOP 4102COMTYP "Direct Debit Set Up" (id
+# 10000000103), 4103COMTYP "Internal - Direct Debit Request" (10000000106);
+# 39,965 eligible accounts have at least one of those complaints.
+# One row per eligible account: every EWA column + complaint counts, the latest
+# complaint (any of the two types) and the latest status per type. Scope
+# "with" (default) / "without" / "all"; "without"/"all" capped at DDI_ROW_CAP.
+# ---------------------------------------------------------------------------
+DDI_TABLE = "OUC_COMMON_ADMIN.EWA_DDI_ELIGIBILITY"
+DDI_COMPLAINT_TYPES = {"4102COMTYP": "Direct Debit Set Up", "4103COMTYP": "Internal - Direct Debit Request"}
+DDI_SCOPES = ("with", "without", "all")
+DDI_ROW_CAP = 50000
+
+
+def build_ddi_complaint_query(scope: str = "with") -> str:
+    scope = scope if scope in DDI_SCOPES else "with"
+    types = ", ".join(f"'{t}'" for t in DDI_COMPLAINT_TYPES)   # fixed codes, plain varchar literals
+    where = {"with": "WHERE ag.N_COMPLAINTS IS NOT NULL",
+             "without": "WHERE ag.N_COMPLAINTS IS NULL",
+             "all": ""}[scope]
+    top = "" if scope == "with" else f"TOP {DDI_ROW_CAP} "
+    return f"""
+SET NOCOUNT ON;
+IF OBJECT_ID('tempdb..#t') IS NOT NULL DROP TABLE #t;
+IF OBJECT_ID('tempdb..#c') IS NOT NULL DROP TABLE #c;
+IF OBJECT_ID('tempdb..#ag') IS NOT NULL DROP TABLE #ag;
+DECLARE @all int, @with int;
+
+SELECT t.ID_COMPLAINT_TYPE, t.COD_DEVELOP, COALESCE(d.TEXT, t.NAME_TYPE) AS TYPE_EN
+INTO #t
+FROM OUC_ADMIN.GCCC_COMPLAINT_TYPE t
+LEFT JOIN GCTS_DICTIONARY d ON d.ID = t.NAME_TYPE_XI18N AND d.LOCALE = 'EN'
+WHERE t.COD_DEVELOP IN ({types});
+
+SELECT c.ID_ACCOUNT, c.ID_COMPLAINT, c.COD_REF_COMPLAINT, t.COD_DEVELOP AS TYPE_CODE, t.TYPE_EN,
+       c.COD_STATUS_COMPLAINT, c.CREATE_DATE, c.UPDATE_DATE,
+       ROW_NUMBER() OVER (PARTITION BY c.ID_ACCOUNT ORDER BY c.CREATE_DATE DESC, c.ID_COMPLAINT DESC) AS RN,
+       ROW_NUMBER() OVER (PARTITION BY c.ID_ACCOUNT, t.COD_DEVELOP ORDER BY c.CREATE_DATE DESC, c.ID_COMPLAINT DESC) AS RN_TYPE
+INTO #c
+FROM OUC_ADMIN.GCCC_COMPLAINT c WITH (NOLOCK)
+JOIN #t t ON t.ID_COMPLAINT_TYPE = c.ID_COMPLAINT_TYPE
+JOIN {DDI_TABLE} e WITH (NOLOCK) ON e.id_payment_form = c.ID_ACCOUNT;
+
+SELECT ID_ACCOUNT, COUNT(*) AS N_COMPLAINTS,
+       SUM(CASE WHEN TYPE_CODE = '4102COMTYP' THEN 1 ELSE 0 END) AS N_4102,
+       SUM(CASE WHEN TYPE_CODE = '4103COMTYP' THEN 1 ELSE 0 END) AS N_4103,
+       MIN(CREATE_DATE) AS FIRST_COMPLAINT_DATE,
+       MAX(CASE WHEN TYPE_CODE = '4102COMTYP' AND RN_TYPE = 1 THEN COD_STATUS_COMPLAINT END) AS LAST_4102_STATUS,
+       MAX(CASE WHEN TYPE_CODE = '4103COMTYP' AND RN_TYPE = 1 THEN COD_STATUS_COMPLAINT END) AS LAST_4103_STATUS
+INTO #ag
+FROM #c GROUP BY ID_ACCOUNT;
+
+SELECT @all = COUNT(*) FROM {DDI_TABLE};
+SELECT @with = COUNT(*) FROM #ag;
+
+SELECT {top}e.*,
+       ISNULL(ag.N_COMPLAINTS, 0) AS N_COMPLAINTS, ISNULL(ag.N_4102, 0) AS N_4102, ISNULL(ag.N_4103, 0) AS N_4103,
+       ag.FIRST_COMPLAINT_DATE,
+       lc.COD_REF_COMPLAINT AS LAST_COMPLAINT_REF, lc.TYPE_CODE AS LAST_TYPE_CODE, lc.TYPE_EN AS LAST_TYPE,
+       lc.COD_STATUS_COMPLAINT AS LAST_STATUS, COALESCE(ds.TEXT, st.NAME_TYPE) AS LAST_STATUS_EN,
+       lc.CREATE_DATE AS LAST_COMPLAINT_DATE, lc.UPDATE_DATE AS LAST_COMPLAINT_UPDATE,
+       ag.LAST_4102_STATUS, COALESCE(d1.TEXT, s1.NAME_TYPE) AS LAST_4102_STATUS_EN,
+       ag.LAST_4103_STATUS, COALESCE(d2.TEXT, s2.NAME_TYPE) AS LAST_4103_STATUS_EN,
+       @all AS EWA_TOTAL, @with AS EWA_WITH_COMPLAINT
+FROM {DDI_TABLE} e WITH (NOLOCK)
+LEFT JOIN #ag ag ON ag.ID_ACCOUNT = e.id_payment_form
+LEFT JOIN #c lc ON lc.ID_ACCOUNT = e.id_payment_form AND lc.RN = 1
+LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_STATUS st ON st.COD_DEVELOP = lc.COD_STATUS_COMPLAINT
+LEFT JOIN GCTS_DICTIONARY ds ON ds.ID = st.NAME_TYPE_XI18N AND ds.LOCALE = 'EN'
+LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_STATUS s1 ON s1.COD_DEVELOP = ag.LAST_4102_STATUS
+LEFT JOIN GCTS_DICTIONARY d1 ON d1.ID = s1.NAME_TYPE_XI18N AND d1.LOCALE = 'EN'
+LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_STATUS s2 ON s2.COD_DEVELOP = ag.LAST_4103_STATUS
+LEFT JOIN GCTS_DICTIONARY d2 ON d2.ID = s2.NAME_TYPE_XI18N AND d2.LOCALE = 'EN'
+{where}
+ORDER BY e.account;
+
+DROP TABLE #t; DROP TABLE #c; DROP TABLE #ag;
+"""
+
+
 def parse_accounts(text: str | None) -> list[str]:
     """Accounts pasted as one per line / comma / space separated -> unique list
     (RJ 2026-10-11: "let's focus on this accounts for now" - 387 pasted)."""

@@ -3029,6 +3029,175 @@ generated" rule); info rows now Water bill(s) first, Sanitary last.
 Activities 21296002-21296011 (inserted 2026-10-14 17:12, In process, 20 Generated
 bills set to Disputed) were given a by-hand rollback (bills back to ESTFAC0008).
 
+### FIX BILLING CAMPAIGN: the 3 RCCS groups + hollow chart (2026-10-18)
+
+RJ: "very important to group the RCCS, 4103 will be no bank or Benefit, if no bank is null
+it is benefit, if with nobank it is classified as no bank, 4102 is classified as direct debit
+request, this are the 3 main types, maybe use a pie graph or something better futuristic or a
+hollow chart".
+- `fix_billing_campaign.category(row)` (+ `fbcCategory` in app.js, same rule):
+  4102COMTYP -> **Direct Debit Request**; 4103COMTYP -> **No Bank** when the no-bank amount is
+  filled, else **Benefit**. No-bank amount = RCCS attribute RCCSNOBAMT; when no RCCS was found,
+  the request's noBankAmount. Anything else -> Other. Row field `category`.
+- Section 1 now: a donut (hollow) chart of customers per group (glowing arcs, centre = total
+  or the selected group; arcs / legend click-to-filter) + one card per group (count, %, wallet
+  credit, RCCS status mini breakdown) - the 3 groups always shown, even at 0. Type x status
+  section and the table use the groups too (new "RCCS group" column, also in the CSV).
+- Live 2026-10-18 (11,238 customers): No Bank 6,558, Benefit 4,680, Direct Debit Request 0
+  (no 4102 requests since 2026-10-16).
+
+- KPI "RCCS with more than 1 account" (RJ: "add a kpi for more than 1 account in an rccs
+  number"): app.js `fbcMarkShared` counts distinct accounts per RCCS reference (latest
+  request per account) -> row fields `rccs_accounts` / `rccs_other_accounts`. KPI strip under
+  section 1: shared RCCS count + accounts involved (click = filter, rows sorted by RCCS so
+  each RCCS's accounts sit together), plus "Request without RCCS" and "Customers with
+  issues". Table RCCS group has an "Accounts on RCCS" column (red pill when > 1, tooltip
+  lists the other accounts). Live 2026-10-18: 259 RCCS shared by 524 accounts.
+
+- Fix (RJ: "why we are showing 4 records when we are suppose to show 2 records only.. see
+  RCCS1791899179"): one RCCS reference exists as one GCCC_COMPLAINT per account (live:
+  RCCS1791899179 = complaint 21451677 / account 1058800143 and 21451678 / 1052964028). The
+  RCCS join used the reference only, so each of the 2 accounts picked up both complaints
+  (2 x 2 = 4 rows). `#c` now keeps ID_ACCOUNT and the final join is reference AND
+  `c.ID_ACCOUNT = e.id_payment_form`. Live check: rows = distinct accounts (11,097 = 11,097);
+  the old join produced 11,638 (541 duplicates). The shared-RCCS KPI is unaffected (it
+  already counted distinct accounts).
+
+### All menus: tables scroll in their own window + fixed headers (2026-10-18)
+
+RJ: "for all the menu, should be separate scroll to the detail window, also all table
+headers should be fixed when scrolling". polish.css: every `.grid-wrap` (all result
+tables, incl. hx-grid and modal bodies) is its own scroll box, height viewport-relative
+`max(380px, 100vh - 230px)` (modals 70vh), `overscroll-behavior: contain`; the whole
+`<thead>` is sticky (so 2-row grouped headers like FIX BILLING / TNB keep both rows) with an
+opaque background and a shadow under the last header row. Verified: FIX BILLING table
+scrolled 2,000px - both header rows stay at the top of the box.
+
+Follow-up (RJ: "the menu on the left, i want it to have its own scroll bar and the details
+on the right to not have a scroll, the scroll will only show if the detail ... is not enough
+to show"): the app shell is pinned to the window height (html/body no longer scroll). The
+sidebar's menu list (`.nav`) scrolls on its own between the brand/profile at the top and the
+Theme / Sign out / status block at the bottom; the right-hand `.content` area has its own
+scrollbar that only appears when the page is taller than the window. Verified: document
+height = window height, nav 670px visible of 1,212px, content scrolls independently.
+
+FIX BILLING CAMPAIGN section 2 redesigned (RJ: "the table 2 looks bad, all are not properly
+proportioned"): one full-width stacked bar per type (segment = share of customers, label +
+% inside, click = filter) above a fixed-layout table with equal status columns (colgroup:
+type 18%, statuses share 70%, total 12%) showing count + % of the type per cell; consistency
+checks moved to a full-width panel in columns.
+
+### New menu: FIX BILLING CAMPAIGN 2026 (2026-10-18)
+
+RJ: "create new menu FIX BILLING CAMPAIGN 2026: ... dashboard for customers
+EWA_DDI_ELIGIBILITY, connect it with the wallet EWA_GCCOM_SUBSIDY_WALLET using payment
+form ... show me the credit amount for each customer and the cod behavior in description,
+also find the linked RCCS, and request using ... GCGE_EXTERNAL_MESSAGES_IN WHERE REQUESTURL =
+'/mobileapp/complaint' AND CREATE_DATE > '2026-10-16'; then from complain attribute
+(GCCC_COMPLAINT.COD_REF_COMPLAINT) show me 4 attributes, CREDITAMT, NOBANK AMT, creditUSage,
+deduction amount".
+
+- `app/core/fix_billing_campaign.py`, route `POST /api/fix-billing-campaign/detect
+  {scope, since}`, menu id `fixbillingcampaign`.
+- Links (verified live): wallet `ID_PAYMENT_FORM = EWA.id_payment_form`; COD_BEHAVIOUR
+  described by GCGT_ATTRIBUTE_VALUES of master attribute RCCSCRDUSG (RCCSCRDU01 Freeze,
+  02 Monthly Release, 03 Oustanding + Monthly Release); request JSON `idAccount` =
+  EWA.account (latest request per account after `since`, JSON_VALUE only when ISJSON);
+  RCCS = request `rccsReference` (fallback RESPONSEENTITY) = GCCC_COMPLAINT.COD_REF_COMPLAINT;
+  attributes from GCCC_COMPLAINT_ATT: RCCSCRDAMT Credit Amount, RCCSNOBAMT No Bank Amount,
+  RCCSCRDUSG Credit Usage, FIXAMTYP Fixed Amount = the deduction amount (request
+  deductionAmount 9.0 -> FIXAMTYP 9.000000). CPR / IBAN / phone in the JSON are not read.
+- `shape_row` flags: request without RCCS, wallet without request, request without
+  wallet, wallet balance <> RCCS credit, request credit / no-bank / deduction <> RCCS
+  attribute, wallet behaviour <> RCCS credit usage (tolerance 0.001).
+- Live 2026-10-18 (scope campaign): 10,850 customers in ~15s - 10,688 fully linked,
+  wallet credit 1,222,672.539, 689 with issues (request credit <> RCCS 532, wallet <> RCCS
+  520, deduction 229, no-bank 178, request without wallet 161, without RCCS 33).
+- UI: boxed sections (Overview hero + KPI tiles; Wallet behaviour / RCCS status /
+  request type; credit ranges; consistency checks - all click-to-filter) and a table with
+  coloured column groups Customer | Subsidy wallet | Request | RCCS | Checks (+ optional
+  all EWA columns). Copy accounts, Export CSV.
+- Same day, RJ: "exclude all where in the request, there is no CreditAmount" - every
+  scope now keeps only customers whose latest request has a `creditAmount` (null / empty
+  excluded, an explicit 0 stays). Live: 40 requests had none, 117 had 0. Customers with a
+  wallet but no request drop out too (they have no request credit).
+- Layout v2 (same day, RJ: "for third table for json, just show 1 column for JSON and just
+  display, request CREDIT, NO_BANK, DEDUCTION ... I am more focused on the Type and number
+  of customer. wallet credit can be one widget"): dashboard is now (1) type cards - all
+  customers + one card per request complaintType with customer count, %, wallet credit and
+  RCCS-status mini breakdown - next to ONE wallet-credit widget (total BHD, customers,
+  average, max, RCCS CREDITAMT, range strip, behaviour); (2) Type x RCCS status matrix of
+  customer counts (cells / headers filter) + consistency checks. KPI tiles, behaviour /
+  status / range panels removed. Table: Type moved to the Customer group; the Request group
+  is now JSON | CREDIT | NO_BANK | DEDUCTION - the JSON button opens the raw REQUESTENTITY
+  in a popup, fetched on demand by `GET /api/fix-billing-campaign/request/{id_seq}`
+  (`fix_billing_campaign.build_request_json_query`) so the scan stays small.
+
+### Temp Dashboard tab 5: "DDI eligibility × complaints" (2026-10-18)
+
+RJ: "create new temp dashboard with all this customer select * from EWA_DDI_ELIGIBILITY,
+connect to gccc_complaint, with complaint type 4102COMTYP and 4103COMTYP".
+
+- Source `OUC_COMMON_ADMIN.EWA_DDI_ELIGIBILITY` (153,236 rows, one per id_payment_form),
+  joined to `OUC_ADMIN.GCCC_COMPLAINT` on `ID_ACCOUNT = id_payment_form` (verified live:
+  ID_ACCOUNT is the payment form id). Types by `GCCC_COMPLAINT_TYPE.COD_DEVELOP`:
+  4102COMTYP Direct Debit Set Up, 4103COMTYP Internal - Direct Debit Request. Status names
+  from GCCC_COMPLAINT_STATUS + GCTS_DICTIONARY.
+- `temp_dashboard.build_ddi_complaint_query(scope)` (#temp batch, ~10s live): every EWA
+  column + N_COMPLAINTS / N_4102 / N_4103, first complaint date, latest complaint (ref,
+  type, status, dates) and the latest status per type. Scope `with` (default, ~40k rows) /
+  `without` / `all` (both capped at `DDI_ROW_CAP` 50,000); totals always for the full table.
+- Route `POST /api/temp-dashboard/ddi-complaints {scope}`.
+- UI: KPI cards (with / without complaint, only 4102, only 4103, both, more than 1),
+  status bars (latest overall, latest 4102, latest 4103) - click-to-filter; multi-value
+  search; Copy accounts; Export CSV (all filtered rows; table draws the first 3,000).
+
+### Rebilling Monitor main tab: "Open rebillings" (2026-10-18)
+
+RJ: "in the rebilling monitor, the existing will be moved to 2nd tab, add a main tab to
+show all rebilling that are not closed, i want it to have KPI, type and status. and aging
+and by period".
+
+- Tab 1 **Open rebillings** (new, default): every `GCCOM_REBILLING_ACTIVITY` not Rejected
+  (ESTREF0003) / Rebilled (ESTREF0004), whoever created it. Tab 2 **ScriptGen-tagged** is
+  the old page, unchanged.
+- `rebilling_monitor.build_open_query()` - #temp batch (open activities, then one grouped
+  pass over `GCCOM_REB_ACTIVITY_INFORMATION` -> bills/account/amount/latest billing period);
+  status / type / reason in English via GCCOM_REB_ACTIVITY_STATUS / _TYPE /
+  GCCOM_REB_REASON_TYPE + GCTS_DICTIONARY. Live 2026-10-18: 2,510 rows in 3.5s
+  (correlated OUTER APPLY version took 109s).
+- Route `POST /api/rebilling-monitor/open` adds `aging` (`AGING_BUCKETS`: 0-7, 8-30, 31-90,
+  91-180, 181-365 days, over 1 year) and `source` (ScriptGen tag, if any).
+- Dashboard: KPI cards (all open, Pending, In process, >30 / >90 days, >1 year, no bills
+  attached, created by ScriptGen), type x status matrix, aging bars, reason bars (top 12),
+  by-period columns stacked by status (switch: created month / bills' billing period - most
+  massive activities have no bills, so created month is the default). Everything is
+  click-to-filter and combines; search box takes many pasted values. Copy activity ids,
+  Export CSV (all filtered rows; the table draws the first 3,000).
+- Layout v2 (same day, RJ: "the layout of the pending rebilling is not good, you can do
+  better"): hero band (total, Pending / In process split bar, median age, oldest, created
+  in the last 30 days); compact one-row KPI tiles with % meter; type x status as stacked
+  bars per type (legend clickable); aging as green->purple columns; period chart with
+  year separators, square-root bar scale and a Created month / Bills' billing period
+  toggle; all reasons in a two-column list; table rows no longer all-red - status and
+  aging shown as coloured pills instead.
+- Rebilling state + anomalies (same day, RJ: "i want to see the state of the rebilling, or
+  if there is anomalous on the reb activity information, also maybe better to have visible
+  separator or boxes"): `build_open_query` now also counts each activity's bill lines per
+  `GCCOM_REB_ACTIVITY_INFORMATION.REB_DN_STATUS` (GCCOM_REB_DELIVERY_NOTE_STATUS:
+  EREALB0001 Disputed ... 0008 Anomalous in batch rebill process, 0009 Substitutive
+  Rebilling) and takes the anomaly reason from the latest `GCCOM_REB_STATUS_HISTORY.COMMENTS`
+  (REB_STATUS EREALB0008) of each still-anomalous line, plus activity PROCESSING_INFO.
+  `rebilling_monitor.shape_open_row` derives a per-activity **rebilling state** (worst line
+  wins: Anomalous > Batch recalculation > Substitutive rebilling > Partly rebilled >
+  Disputed - waiting > Compliant > Cancelled lines; none = No bill lines). Live 2026-10-18:
+  88 activities with anomalous lines (NOSUFDATFO Lacks Data 75, DIFFDATES 8, OUTRAMOUNT 5,
+  OUTMXMAX 3); query still ~3s.
+  UI: numbered, boxed sections (1 Overview, 2 Rebilling state & anomalies, 3 Distribution,
+  4 Activities) on a tinted background; new "Anomalous bill lines" KPI; panels Rebilling
+  state / Anomaly reasons (code chip + text) / Bill lines by status - click to filter; table
+  columns Rebilling state, Bill lines, Anomaly reason, Processing info; anomalous rows red.
+
 ### Reading Discrepancies tab 2: "Unbilled readings" dashboard (2026-10-16)
 
 RJ: "add a new tab, unbilled readings per billing period that i can check all. idea is
@@ -3050,8 +3219,13 @@ terminated not billed or uau billed" + "make a good dashboard".
   table. Table: check-all + per-row checkboxes, sortable, search takes a pasted list;
   Copy accounts / Copy reading ids / Export CSV use the checked rows (or all visible).
   Cards and matrix count ALL unbilled readings even when the table hits the 20,000 cap.
-- Not live-verified yet: the DB tunnel stopped answering on 2026-10-16 while testing
-  ("Could not reach localhost:1433").
+- Live 2026-10-16 (direct SQL): September 2,266 unbilled (Cycle 1,562, Removal 368, Direct
+  Connection 278, Distribution 38, Disconnection 20), summary 1.5s, detail 5s; last 6 months
+  821 / 988 / 1,239 / 1,477 / 2,266 / 73,506 (October = current period).
+- Same day: the auto-scan on October (73,506 open readings, 20,000-row table) ran > 3 min and
+  the tunnel dropped. Changes: the picker opens on the latest CLOSED period (index 1), the
+  table cap is 5,000 rows, and the account lookup runs once per supply (#acc) instead of
+  once per reading. Cards / matrix still count everything.
 
 ### Temp Dashboard tab 4: "Water vs Sanitary status" (2026-10-14)
 
