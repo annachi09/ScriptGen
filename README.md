@@ -3059,6 +3059,23 @@ count was compared live with the number its page shows after Scan:
   cards) execute in worker threads, which did not inherit the capture context. Workers now run
   in `contextvars.copy_context()`, so those statements are captured too.
 
+### Temp Dashboard tab 6: RCCS list check (2026-10-22)
+
+RJ: "extract details for me for the following excel ... use rccs and account, give me the
+id_complaint, status, id_wallet" + "add for me the wallet amount and generate a temp dashboard".
+- New tab **RCCS list check**: paste rows from Excel (header RCCS / ACCOUNT, optional COMMENTS or
+  REASON). `POST /api/temp-dashboard/rccs-list` -> `temp_dashboard.parse_rccs_list` +
+  `build_rccs_list_query`: complaint matched on COD_REF_COMPLAINT **and** ID_ACCOUNT = the
+  account's payment form (GCCOM_PAYMENT_FORM.REFERENCE), status (EN), type, plus the subsidy
+  wallet (ID_WALLET, BALANCE = wallet amount, behaviour). One result row per pasted row, same
+  order, duplicates kept; unmatched rows get a note (SR... reference, RCCS on another account, ...).
+- Dashboard: KPI cards (rows, matched, not found, with wallet + amount, matched without wallet,
+  duplicate rows, total wallet amount), status x comment matrix (rows + wallet amount), wallet
+  behaviour cards with %. Everything clicks to filter; search; copy accounts; CSV export.
+- Pre-filled from `web/static/data/rccs_list_default.txt` = CANCEL_RCCS_NBB_BENIFIT (189 rows:
+  RCCS, account, comment only - no CPR / mobile). "Default list" puts it back.
+- Restart needed (new route), then Ctrl+F5.
+
 ### FIX BILLING CAMPAIGN: credit-behaviour KPI cards (2026-10-21)
 
 RJ: "in the kpi, i want to also filter and see the percentage of the credit behaviour". The

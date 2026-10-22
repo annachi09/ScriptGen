@@ -1775,7 +1775,45 @@
           <button type="button" class="da-subnav-btn" data-tmpd-sub="subsidy">Subsidized, bill not generated</button>
           <button type="button" class="da-subnav-btn" data-tmpd-sub="wsstatus">Water vs Sanitary status</button>
           <button type="button" class="da-subnav-btn" data-tmpd-sub="ddi">DDI eligibility × complaints</button>
+          <button type="button" class="da-subnav-btn" data-tmpd-sub="rccslist">RCCS list check</button>
         </nav>
+
+        <!-- RJ 2026-10-22: tab 6 "RCCS list check" - pasted RCCS + account list -> complaint + wallet -->
+        <div class="da-subpage" data-tmpd-sub="rccslist">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Paste rows from Excel (with a header line <b>RCCS</b>, <b>ACCOUNT</b> and optionally <b>COMMENTS</b> / <b>REASON</b>). Each row is matched on the <b>RCCS reference</b> (GCCC_COMPLAINT.COD_REF_COMPLAINT) <b>and the account's payment form</b>, and gets the complaint id, status and type plus the <b>subsidy wallet</b> (id, amount, behaviour). One result row per pasted row, same order. Pre-filled with CANCEL_RCCS_NBB_BENIFIT (189 rows).</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>RCCS list check</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="trl-detect-btn">🔍 Check list</button>
+              <button type="button" class="btn btn-pill" id="trl-reset-btn" title="Put the CANCEL_RCCS_NBB_BENIFIT list back">↺ Default list</button>
+              <button type="button" class="btn btn-pill" id="trl-copy-btn" disabled title="Copy the visible accounts (one per line)">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="trl-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <textarea id="trl-input" class="text-input" rows="5" spellcheck="false" style="width:100%;font-family:var(--font-mono,monospace);font-size:12px;resize:vertical;" placeholder="RCCS&#9;ACCOUNT&#9;COMMENTS&#10;RCCS1791904075&#9;1073919183&#9;duplicate_biller_reference"></textarea>
+          <div class="hint-text" id="trl-summary">Click Check list (a few seconds).</div>
+          <div class="rbo-dash" id="trl-dash" hidden>
+            <div class="kpi-row" id="trl-kpi-row" style="margin:10px 0 4px;"></div>
+            <div class="trl-panels">
+              <div class="rbo-panel"><div class="rbo-section-title">Status × comment (rows · wallet amount)</div><div id="trl-matrix"></div></div>
+              <div class="rbo-panel"><div class="rbo-section-title">Wallet behaviour</div><div id="trl-beh"></div></div>
+            </div>
+          </div>
+          <div class="key-panel-row" id="trl-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <input id="trl-filter-search" class="text-input text-input-sm" placeholder="RCCS / account / complaint / wallet" style="width:240px;" />
+            <span class="hint-text" id="trl-active-filters"></span>
+          </div>
+          <div class="hint-text" id="trl-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="trl-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        </div>
 
         <div class="da-subpage is-active" data-tmpd-sub="accounts">
         <p class="page-subtitle" style="margin:-6px 0 14px;">Accounts of EWA_DDI_ELIGIBILITY with no September bill amount (BILL_AMOUNT_SET): active Electricity / Water services and whether they have a reading (Cycle types TIPTL00003 / TIPTL00005, status 5000 / 6000 / 7000STSRED) in the billing period.</p>

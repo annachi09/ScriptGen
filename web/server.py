@@ -4605,6 +4605,39 @@ def temp_dashboard_ddi_complaints(body: TempDashboardDdiRequest, user: str = Dep
             "complaint_types": temp_dashboard.DDI_COMPLAINT_TYPES, "elapsed_ms": res.elapsed_ms}
 
 
+# RJ 2026-10-22: Temp Dashboard tab 6 "RCCS list check" - pasted RCCS + account rows ->
+# complaint (id, status, type) + subsidy wallet (id, amount, behaviour); one output row per
+# input row, same order (temp_dashboard.parse_rccs_list / build_rccs_list_query).
+class TempDashboardRccsListRequest(BaseModel):
+    text: str = ""
+
+
+@app.post("/api/temp-dashboard/rccs-list")
+def temp_dashboard_rccs_list(body: TempDashboardRccsListRequest, user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    items = temp_dashboard.parse_rccs_list(body.text)
+    if not items:
+        raise HTTPException(status_code=400, detail="Paste at least one row (RCCS and account).")
+    try:
+        res = mssql.run_query(conn, temp_dashboard.build_rccs_list_query(items), timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    by_n = {}
+    for r in res.rows:
+        d = {c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)}
+        by_n[str(d.get("n"))] = d
+    rows = []
+    for it in items:
+        d = dict(by_n.get(str(it["n"]), {}))
+        d.update({"n": it["n"], "rccs": it["rccs"], "account": it["account"], "group": it["group"], "valid": it["valid"]})
+        d["note"] = temp_dashboard.rccs_list_note(d)
+        rows.append(d)
+    return {"rows": rows, "count": len(rows), "max": temp_dashboard.RCCS_LIST_MAX, "elapsed_ms": res.elapsed_ms}
+
+
 # RJ 2026-10-12: Temp Dashboard tab 3 "Subsidized, September not generated"
 # (temp_dashboard.build_subsidy_missing_bill_query) - ~90s live, 5-min timeout.
 @app.post("/api/temp-dashboard/subsidy-missing-bill")

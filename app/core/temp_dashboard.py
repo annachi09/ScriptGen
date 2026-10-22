@@ -35,6 +35,8 @@ Pure logic: builds SELECT text only.
 """
 from __future__ import annotations
 
+import re
+
 # RJ 2026-10-11: "change it bill_amount_set is null then main focus for now is
 # billing period september" - September 2026 = 10000000237 (GCCOM_BILLING_PERIOD
 # "9-September 2026"), source filter on BILL_AMOUNT_SET (was _OCT / 10000000238).
@@ -432,6 +434,101 @@ ORDER BY e.account;
 
 DROP TABLE #t; DROP TABLE #c; DROP TABLE #ag;
 """
+
+
+# ---------------------------------------------------------------------------
+# RJ 2026-10-22: Temp Dashboard tab 6 "RCCS list check" - "extract details for me for the
+# following excel ... use rccs and account, give me the id_complaint, status, id_wallet"
+# + "add for me the wallet amount and generate a temp dashboard".
+# A pasted list of (RCCS reference, account) -> ONE output row per input row, same order
+# (duplicates kept): complaint matched on COD_REF_COMPLAINT AND ID_ACCOUNT = the account's
+# payment form (one RCCS can exist once per account), its status (EN), type, and the
+# subsidy wallet (ID_WALLET, BALANCE, COD_BEHAVIOUR) of the payment form.
+# Live 2026-10-22 on CANCEL_RCCS_NBB_BENIFIT (189 rows): 186 matched, 3 SR... refs not found.
+RCCS_LIST_MAX = 5000
+_REF_RE = re.compile(r"^[A-Za-z0-9]{1,40}$")
+_ACC_RE = re.compile(r"^[0-9]{1,15}$")
+
+
+def parse_rccs_list(text: str | None) -> list[dict]:
+    """Rows pasted from Excel (tab / comma / ; separated). With a header line holding
+    RCCS + ACCOUNT the named columns are used (plus REASON / COMMENTS as the group);
+    without one, the first RCCS-like token and the first 7-15 digit number are taken.
+    Every non-empty line becomes one row (invalid ones keep their place with a note)."""
+    lines = [ln for ln in str(text or "").replace("\r", "").split("\n") if ln.strip()]
+    if not lines:
+        return []
+    split = lambda ln: [c.strip() for c in re.split(r"\t|,|;", ln)]
+    head = [h.upper() for h in split(lines[0])]
+    rows: list[dict] = []
+    if "RCCS" in head and "ACCOUNT" in head:
+        ir, ia = head.index("RCCS"), head.index("ACCOUNT")
+        ig = head.index("COMMENTS") if "COMMENTS" in head else (head.index("REASON") if "REASON" in head else -1)
+        for ln in lines[1:]:
+            c = split(ln)
+            get = lambda i: c[i] if 0 <= i < len(c) else ""
+            rows.append({"rccs": get(ir), "account": get(ia), "group": get(ig)})
+    else:
+        for ln in lines:
+            toks = [t for t in split(ln) if t]
+            ref = next((t for t in toks if re.match(r"^(RCCS|RFRON|SR)\w+$", t, re.I)), toks[0] if toks else "")
+            acc = next((t for t in toks if t != ref and re.match(r"^\d{7,15}$", t)), "")
+            rest = [t for t in toks if t not in (ref, acc)]
+            rows.append({"rccs": ref, "account": acc, "group": rest[-1] if rest else ""})
+    for i, r in enumerate(rows, 1):
+        r["n"] = i
+        r["rccs"] = r["rccs"].strip().upper()
+        r["account"] = r["account"].strip()
+        r["valid"] = bool(_REF_RE.match(r["rccs"]) and _ACC_RE.match(r["account"]))
+    return rows[:RCCS_LIST_MAX]
+
+
+def build_rccs_list_query(rows: list[dict]) -> str:
+    """One output row per VALID input row (N = input position), in input order."""
+    vals = ",".join(f"({int(r['n'])},'{r['rccs']}','{r['account']}')" for r in rows if r.get("valid"))
+    if not vals:
+        vals = "(0,'','')"
+    return f"""
+SET NOCOUNT ON;
+WITH inp(N, RCCS, ACC) AS (SELECT * FROM (VALUES {vals}) v(N, RCCS, ACC))
+SELECT i.N, pf.ID_PAYMENT_FORM,
+       ex.ID_COMPLAINT, ex.COD_STATUS_COMPLAINT AS STATUS_CODE, COALESCE(ds.TEXT, st.NAME_TYPE) AS STATUS_EN,
+       ex.TYPE_CODE AS COMPLAINT_TYPE, ex.RCCS_DATE,
+       (SELECT COUNT(*) FROM OUC_ADMIN.GCCC_COMPLAINT c2 WITH (NOLOCK) WHERE c2.COD_REF_COMPLAINT = i.RCCS) AS N_REF_ANY_ACCOUNT,
+       w.ID_WALLET, w.BALANCE AS WALLET_AMOUNT, w.COD_BEHAVIOUR, bv.TXT AS BEHAVIOUR_DESC
+FROM inp i
+OUTER APPLY (SELECT TOP 1 p.ID_PAYMENT_FORM FROM GCCOM_PAYMENT_FORM p WITH (NOLOCK)
+             WHERE p.REFERENCE = i.ACC ORDER BY p.ID_PAYMENT_FORM DESC) pf
+OUTER APPLY (SELECT TOP 1 c.ID_COMPLAINT, c.COD_STATUS_COMPLAINT, c.CREATE_DATE AS RCCS_DATE, ct.COD_DEVELOP AS TYPE_CODE
+             FROM OUC_ADMIN.GCCC_COMPLAINT c WITH (NOLOCK)
+             LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_TYPE ct ON ct.ID_COMPLAINT_TYPE = c.ID_COMPLAINT_TYPE
+             WHERE c.COD_REF_COMPLAINT = i.RCCS AND c.ID_ACCOUNT = pf.ID_PAYMENT_FORM
+             ORDER BY c.ID_COMPLAINT DESC) ex
+LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_STATUS st ON st.COD_DEVELOP = ex.COD_STATUS_COMPLAINT
+LEFT JOIN GCTS_DICTIONARY ds ON ds.ID = st.NAME_TYPE_XI18N AND ds.LOCALE = 'EN'
+LEFT JOIN OUC_COMMON_ADMIN.EWA_GCCOM_SUBSIDY_WALLET w WITH (NOLOCK) ON w.ID_PAYMENT_FORM = pf.ID_PAYMENT_FORM
+LEFT JOIN (SELECT v.COD_DEVELOP, COALESCE(d.TEXT, v.NAME_TYPE) AS TXT
+           FROM OUC_COMMON_ADMIN.GCGT_ATTRIBUTE_VALUES v
+           LEFT JOIN GCTS_DICTIONARY d ON d.ID = v.NAME_TYPE_XI18N AND d.LOCALE = 'EN'
+           WHERE v.COD_MASTER_ATTRIBUTE = 'RCCSCRDUSG') bv ON bv.COD_DEVELOP = w.COD_BEHAVIOUR
+ORDER BY i.N;
+"""
+
+
+def rccs_list_note(r: dict) -> str:
+    if not r.get("valid"):
+        return "Invalid RCCS / account in the pasted row"
+    if not str(r.get("id_payment_form") or "").strip():
+        return "Account not found"
+    if not str(r.get("id_complaint") or "").strip():
+        if str(r.get("rccs", "")).startswith("SR"):
+            return "Not found - reference is a Service Request (SR...), not an RCCS"
+        if int(str(r.get("n_ref_any_account") or "0") or 0) > 0:
+            return "RCCS exists but on another account"
+        return "RCCS not found"
+    if not str(r.get("id_wallet") or "").strip():
+        return "No subsidy wallet for this payment form"
+    return ""
 
 
 def parse_accounts(text: str | None) -> list[str]:

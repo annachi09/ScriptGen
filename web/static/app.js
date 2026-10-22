@@ -148,6 +148,7 @@ const SG_ENDPOINT_OWNER = [
   ["/api/temp-dashboard/sanitary-mismatch", "tempdashboard", "sanitary"],
   ["/api/temp-dashboard/water-sanitary-status", "tempdashboard", "wsstatus"],
   ["/api/temp-dashboard/ddi-complaints", "tempdashboard", "ddi"],
+  ["/api/temp-dashboard/rccs-list", "tempdashboard", "rccslist"],
   ["/api/temp-dashboard/subsidy-missing-bill", "tempdashboard", "subsidy"],
   ["/api/reading-discrepancies/pending-validation", "readingdiscrepancies", "pending"],
   ["/api/reading-discrepancies/", "readingdiscrepancies", "unbilled"],
@@ -10045,7 +10046,7 @@ const HX_REFRESH = {
   bulkchecker: () => ({ fn: () => bcRunSearch({ refresh: true }) }),
   rebillingmonitor: () => ({ btn: hxActiveSub("data-rbm-sub") === "tagged" ? "#rbm-detect-btn" : "#rbo-detect-btn" }),
   pendingsr: () => ({ btn: "#psr-detect-btn" }),
-  tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", subsidy: "#tsub-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
+  tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", subsidy: "#tsub-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn", rccslist: "#trl-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
   fixbillingcampaign: () => ({ btn: "#fbc-detect-btn" }),
 };
@@ -10368,7 +10369,142 @@ $$(".da-subnav-btn[data-tmpd-sub]").forEach((btn) => {
     if (sub === "subsidy" && !tsubLoaded) $("#tsub-detect-btn").click();
     if (sub === "wsstatus" && !twsLoaded) $("#tws-detect-btn").click();
     if (sub === "ddi" && !tddiLoaded) $("#tddi-detect-btn").click();
+    if (sub === "rccslist" && !trlLoaded) trlLoadDefault().then(() => $("#trl-detect-btn").click());
   });
+});
+
+// ---- RJ 2026-10-22: Temp Dashboard tab 6 "RCCS list check" --------------------------
+// "use rccs and account, give me the id_complaint, status, id_wallet" + "add for me the
+// wallet amount and generate a temp dashboard". Pasted rows -> /api/temp-dashboard/rccs-list
+// (one result row per pasted row, same order). KPI cards / matrix / behaviour bars filter.
+let trlRows = [], trlLoaded = false, trlF = { kpi: null, status: null, group: null, beh: null };
+const TRL_COLUMNS = [
+  ["n", "#"], ["rccs", "RCCS"], ["account", "Account"], ["group", "Comment"], ["id_complaint", "ID_COMPLAINT"],
+  ["status_en", "Status"], ["status_code", "Status code"], ["complaint_type", "Type"], ["id_payment_form", "Payment form"],
+  ["id_wallet", "ID_WALLET"], ["wallet_amount", "Wallet amount"], ["behaviour_desc", "Behaviour"], ["note", "Note"],
+];
+const trlNum = (v) => { const n = parseFloat(String(v ?? "").replace(/,/g, "")); return Number.isFinite(n) ? n : 0; };
+const trlMoney = (v) => v.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+const trlStatus = (r) => r.status_en || (r.id_complaint ? r.status_code : "Not found");
+const trlBeh = (r) => (r.cod_behaviour ? `${r.behaviour_desc || r.cod_behaviour}` : "No wallet");
+const TRL_KPI = {
+  all: () => true,
+  matched: (r) => !!r.id_complaint,
+  notfound: (r) => !r.id_complaint,
+  wallet: (r) => !!r.id_wallet,
+  nowallet: (r) => !!r.id_complaint && !r.id_wallet,
+  dup: (r) => trlDupKeys.has(`${r.rccs}|${r.account}`),
+};
+let trlDupKeys = new Set();
+async function trlLoadDefault() {
+  if ($("#trl-input").value.trim()) return;
+  try { const t = await (await fetch("/data/rccs_list_default.txt", { cache: "no-store" })).text(); $("#trl-input").value = t.trim(); } catch (_) { /* paste manually */ }
+}
+function trlMatch(r, skip) {
+  const sk = (k) => skip === k || (Array.isArray(skip) && skip.includes(k));
+  if (!sk("kpi") && trlF.kpi && !TRL_KPI[trlF.kpi](r)) return false;
+  if (!sk("status") && trlF.status && trlStatus(r) !== trlF.status) return false;
+  if (!sk("group") && trlF.group && (r.group || "(none)") !== trlF.group) return false;
+  if (!sk("beh") && trlF.beh && trlBeh(r) !== trlF.beh) return false;
+  const q = ($("#trl-filter-search").value || "").trim().toLowerCase();
+  if (q && ![r.rccs, r.account, r.id_complaint, r.id_wallet, r.id_payment_form].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+  return true;
+}
+const trlVisible = () => trlRows.filter((r) => trlMatch(r));
+function trlRender() {
+  const base = trlRows.filter((r) => trlMatch(r, "kpi"));
+  const amt = (rows) => rows.reduce((s, r) => s + trlNum(r.wallet_amount), 0);
+  const cards = [
+    ["all", "total", "📋", "Rows in the list", base.length, ""],
+    ["matched", "complete", "✅", "RCCS matched", base.filter(TRL_KPI.matched).length, ""],
+    ["notfound", "missing", "❓", "Not found", base.filter(TRL_KPI.notfound).length, ""],
+    ["wallet", "services", "👛", "With a wallet", base.filter(TRL_KPI.wallet).length, `amount ${trlMoney(amt(base.filter(TRL_KPI.wallet)))}`],
+    ["nowallet", "pending", "🚫", "Matched, no wallet", base.filter(TRL_KPI.nowallet).length, ""],
+    ["dup", "case0", "🔁", "Duplicate rows in list", base.filter(TRL_KPI.dup).length, "same RCCS + account twice"],
+  ];
+  $("#trl-kpi-row").innerHTML = cards.map(([f, kpi, icon, label, v, sub]) =>
+    `<div class="kpi-card kpi-card-clickable${(trlF.kpi || "all") === f ? " is-active" : ""}" data-kpi="${kpi}" data-trl-kpi="${f}" title="Click to filter">` +
+    `<div class="kpi-value">${v.toLocaleString()}</div><div class="kpi-label"><span class="kpi-card-icon">${icon}</span>${label}</div>` +
+    (sub ? `<div class="hint-text" style="font-size:11px;">${escapeHtml(sub)}</div>` : "") + `</div>`).join("") +
+    `<div class="kpi-card" data-kpi="services"><div class="kpi-value">${trlMoney(amt(base))}</div><div class="kpi-label"><span class="kpi-card-icon">💰</span>Total wallet amount</div></div>`;
+  // status x comment matrix (rows + wallet amount), cells filter
+  const mRows = trlRows.filter((r) => trlMatch(r, ["status", "group"]));
+  const statuses = [...new Set(mRows.map(trlStatus))].sort();
+  const groups = [...new Set(mRows.map((r) => r.group || "(none)"))];
+  const cell = (s, g) => { const rs = mRows.filter((r) => trlStatus(r) === s && (r.group || "(none)") === g); return rs.length ? `<b>${rs.length}</b><br><small>${trlMoney(amt(rs))}</small>` : "<span class='hint-text'>-</span>"; };
+  const sKpi = (s) => (/cancel/i.test(s) ? "missing" : /not found/i.test(s) ? "case0" : "complete");
+  $("#trl-matrix").innerHTML = `<table class="data-grid trl-matrix"><thead><tr><th>Status</th>${groups.map((g) => `<th class="trl-click${trlF.group === g ? " is-active" : ""}" data-trl-group="${escapeHtml(g)}">${escapeHtml(g)}</th>`).join("")}<th>Total</th></tr></thead><tbody>` +
+    statuses.map((s) => { const rs = mRows.filter((r) => trlStatus(r) === s); return `<tr><td class="trl-click${trlF.status === s ? " is-active" : ""}" data-trl-status="${escapeHtml(s)}"><span class="rbo-pill" data-kpi="${sKpi(s)}">${escapeHtml(s)}</span></td>` +
+      groups.map((g) => `<td class="hx-num">${cell(s, g)}</td>`).join("") + `<td class="hx-num"><b>${rs.length}</b><br><small>${trlMoney(amt(rs))}</small></td></tr>`; }).join("") + "</tbody></table>";
+  // behaviour bars
+  const bRows = trlRows.filter((r) => trlMatch(r, "beh"));
+  const bMap = new Map(); bRows.forEach((r) => { const k = trlBeh(r); const o = bMap.get(k) || { n: 0, a: 0 }; o.n++; o.a += trlNum(r.wallet_amount); bMap.set(k, o); });
+  const bTot = Math.max(1, bRows.length);
+  const bKpi = (k) => (/Freeze/.test(k) ? "missing" : /Oustanding|Outstanding/.test(k) ? "pending" : /No wallet/.test(k) ? "case0" : "complete");
+  $("#trl-beh").innerHTML = [...bMap.entries()].sort((a, b) => b[1].n - a[1].n).map(([k, o]) =>
+    `<button type="button" class="fbc-beh-card${trlF.beh === k ? " is-active" : ""}" data-kpi="${bKpi(k)}" data-trl-beh="${escapeHtml(k)}" style="width:100%;margin-bottom:6px;">` +
+    `<span class="fbc-beh-name">${escapeHtml(k)}</span><span class="fbc-beh-pct">${(100 * o.n / bTot).toFixed(1)}%</span>` +
+    `<span class="fbc-beh-sub">${o.n.toLocaleString()} row(s) · amount ${trlMoney(o.a)}</span></button>`).join("") || "<span class='hint-text'>No rows.</span>";
+  // table
+  $("#trl-table thead tr").innerHTML = TRL_COLUMNS.map(([, l]) => `<th>${l}</th>`).join("");
+  const vis = trlVisible();
+  $("#trl-table tbody").innerHTML = vis.map((r) => {
+    const tint = !r.id_complaint ? "missing" : !r.id_wallet ? "pending" : "";
+    return `<tr${tint ? ` class="kpi-tint" data-kpi="${tint}"` : ""}>` + TRL_COLUMNS.map(([k]) => {
+      let v = r[k] ?? "";
+      if (k === "wallet_amount") return `<td class="hx-num">${v === "" ? "" : trlMoney(trlNum(v))}</td>`;
+      if (k === "status_en" && r.id_complaint) return `<td><span class="rbo-pill" data-kpi="${sKpi(String(v))}">${escapeHtml(String(v))}</span></td>`;
+      if (k === "note" && v) return `<td style="color:#dc2626;font-weight:600">⚠ ${escapeHtml(String(v))}</td>`;
+      return `<td${/^(rccs|account|id_)/.test(k) ? ' class="hx-mono"' : ""}>${escapeHtml(String(v))}</td>`;
+    }).join("") + "</tr>";
+  }).join("") || `<tr><td colspan="${TRL_COLUMNS.length}" class="hint-text">No rows match.</td></tr>`;
+  $("#trl-filtered-count").textContent = `${vis.length.toLocaleString()} of ${trlRows.length.toLocaleString()} rows shown · wallet amount ${trlMoney(amt(vis))}`;
+  const act = [trlF.kpi && trlF.kpi !== "all" ? `KPI: ${trlF.kpi}` : "", trlF.status ? `Status: ${trlF.status}` : "", trlF.group ? `Comment: ${trlF.group}` : "", trlF.beh ? `Behaviour: ${trlF.beh}` : ""].filter(Boolean);
+  $("#trl-active-filters").textContent = act.length ? `Filters: ${act.join(" · ")} (click again to clear)` : "";
+  $("#trl-copy-btn").disabled = $("#trl-export-btn").disabled = vis.length === 0;
+}
+$("#trl-dash").addEventListener("click", (e) => {
+  const k = e.target.closest("[data-trl-kpi]");
+  if (k) { const f = k.dataset.trlKpi; trlF.kpi = f === "all" || trlF.kpi === f ? null : f; trlRender(); return; }
+  for (const [attr, key] of [["data-trl-status", "status"], ["data-trl-group", "group"], ["data-trl-beh", "beh"]]) {
+    const t = e.target.closest(`[${attr}]`);
+    if (t) { const v = t.getAttribute(attr); trlF[key] = trlF[key] === v ? null : v; trlRender(); return; }
+  }
+});
+$("#trl-filter-search").addEventListener("input", () => trlRender());
+$("#trl-reset-btn").addEventListener("click", async () => { $("#trl-input").value = ""; await trlLoadDefault(); });
+$("#trl-detect-btn").addEventListener("click", async () => {
+  const btn = $("#trl-detect-btn");
+  btn.disabled = true; trlLoaded = true;
+  $("#trl-summary").textContent = "Checking…";
+  try {
+    await trlLoadDefault();
+    const data = await api("/api/temp-dashboard/rccs-list", { method: "POST", body: { text: $("#trl-input").value } });
+    trlRows = data.rows || [];
+    const cnt = new Map(); trlRows.forEach((r) => { const k = `${r.rccs}|${r.account}`; cnt.set(k, (cnt.get(k) || 0) + 1); });
+    trlDupKeys = new Set([...cnt.entries()].filter(([, n]) => n > 1).map(([k]) => k));
+    trlF = { kpi: null, status: null, group: null, beh: null };
+    $("#trl-dash").hidden = false; $("#trl-filter-row").hidden = false;
+    $("#trl-summary").textContent = `${trlRows.length.toLocaleString()} pasted row(s) checked - one result row per pasted row, same order - ${(data.elapsed_ms / 1000).toFixed(1)}s.`;
+    trlRender();
+  } catch (err) {
+    $("#trl-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#trl-copy-btn").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(trlVisible().map((r) => r.account).join("\n")); showToast("Accounts copied."); } catch { showToast("Copy failed.", true); }
+});
+$("#trl-export-btn").addEventListener("click", () => {
+  const q = (v) => { v = String(v ?? ""); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
+  const keys = TRL_COLUMNS.map(([k]) => k).concat(["cod_behaviour"]);
+  const csv = [keys.map((k) => k.toUpperCase()).join(",")].concat(trlVisible().map((r) => keys.map((k) => q(r[k])).join(","))).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
+  a.download = `rccs_list_check_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 });
 let tsanRows = [], tsanKpi = null, tsanLoaded = false, tsanSortKey = null, tsanSortDir = 1;
 const TSAN_COLUMNS = [
