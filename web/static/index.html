@@ -1970,17 +1970,19 @@
         <header class="page-header">
           <h1>FIX BILLING CAMPAIGN 2026</h1>
         </header>
-        <p class="page-subtitle" style="margin:-6px 0 14px;">Customers in <b>EWA_DDI_ELIGIBILITY</b> linked to their <b>subsidy wallet</b> (EWA_GCCOM_SUBSIDY_WALLET, by payment form) - credit balance and behaviour - to the <b>/mobileapp/complaint</b> request (GCGE_EXTERNAL_MESSAGES_IN, latest per account since the date) and to the <b>RCCS</b> it created (GCCC_COMPLAINT.COD_REF_COMPLAINT) with its attributes Credit Amount, No Bank Amount, Credit Usage and Deduction (Fixed) Amount.</p>
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Every account with a <b>/mobileapp/complaint</b> request (GCGE_EXTERNAL_MESSAGES_IN, latest per account since the date, with a CreditAmount) - payment form via GCCOM_PAYMENT_FORM - linked to its <b>subsidy wallet</b> (credit balance and behaviour), flagged whether it is in <b>EWA_DDI_ELIGIBILITY</b> (info only), and to the <b>RCCS</b> it created (GCCC_COMPLAINT.COD_REF_COMPLAINT) with its attributes Credit Amount, No Bank Amount, Credit Usage and Deduction (Fixed) Amount.</p>
         <div class="card">
           <div class="card-header">
             <h2>Campaign customers</h2>
             <div class="card-header-actions">
               <label class="field-label" for="fbc-scope">Customers</label>
               <select id="fbc-scope" class="text-input text-input-sm">
-                <option value="campaign">In campaign (wallet or request)</option>
-                <option value="wallet">With a wallet</option>
-                <option value="request">With a request</option>
-                <option value="all">All eligible (first 60,000)</option>
+                <!-- RJ 2026-10-21: rows = the /mobileapp/complaint requests; EWA is info only -->
+                <option value="all">All requests</option>
+                <option value="in_ewa">Requests - in EWA_DDI_ELIGIBILITY</option>
+                <option value="not_in_ewa">Requests - NOT in EWA_DDI_ELIGIBILITY</option>
+                <option value="with_wallet">Requests - with a wallet</option>
+                <option value="no_wallet">Requests - without a wallet</option>
               </select>
               <span class="hint-text" title="RJ 2026-10-18: customers whose request has no creditAmount are excluded">only requests with a CreditAmount</span>
               <label class="field-label" for="fbc-since">Requests after</label>

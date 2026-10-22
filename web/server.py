@@ -115,6 +115,12 @@ app.add_middleware(
 )
 
 
+# RJ 2026-10-21: FIX BILLING now returns every account (~163k expected) - compress big JSON
+# responses (repetitive keys shrink ~10x) so the transfer is not the bottleneck.
+from starlette.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=50_000)
+
+
 @app.middleware("http")
 async def _no_cache_static_assets(request, call_next):
     """
@@ -137,6 +143,71 @@ async def _no_cache_static_assets(request, call_next):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     return response
+
+
+# ---------------------------------------------------------------------
+# "Query used" for every table (RJ 2026-10-21: "always add the query used in the
+# information for all our tables in this project ... add it as secondary info for
+# all"). Every SQL text sent through mssql.run_query during an /api/ request is
+# captured (contextvar) and kept per browser session + endpoint; the UI's
+# "ℹ Query used" button on each result card reads it back via /api/query-log.
+# Read-only bookkeeping - the SQL itself is unchanged.
+# ---------------------------------------------------------------------
+import contextvars as _ctxv
+import hashlib as _hashlib
+import threading as _ql_threading
+
+_SQL_CAPTURE: "_ctxv.ContextVar[list | None]" = _ctxv.ContextVar("sg_sql_capture", default=None)
+_QUERY_LOG: dict[tuple[str, str], dict] = {}
+_QUERY_LOG_LOCK = _ql_threading.Lock()
+_QUERY_LOG_MAX_SQL = 200_000          # characters kept per statement
+_orig_run_query = mssql.run_query
+
+
+def _run_query_logged(conn_cfg, sql, *args, **kwargs):
+    captured = _SQL_CAPTURE.get()
+    if captured is not None and isinstance(sql, str):
+        captured.append(sql[:_QUERY_LOG_MAX_SQL])
+    return _orig_run_query(conn_cfg, sql, *args, **kwargs)
+
+
+mssql.run_query = _run_query_logged
+
+
+def _ql_client_key(request) -> str:
+    raw = (request.cookies.get("scriptgen_session") or "") + "|" + (request.client.host if request.client else "")
+    return _hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+@app.middleware("http")
+async def _capture_query_used(request, call_next):
+    path = request.url.path
+    if not path.startswith("/api/") or path.startswith("/api/query-log"):
+        return await call_next(request)
+    captured: list = []
+    token = _SQL_CAPTURE.set(captured)
+    try:
+        response = await call_next(request)
+    finally:
+        _SQL_CAPTURE.reset(token)
+    if captured:
+        with _QUERY_LOG_LOCK:
+            _QUERY_LOG[(_ql_client_key(request), path)] = {
+                "path": path, "method": request.method,
+                "at": datetime.now(timezone.utc).isoformat(), "queries": captured[-20:],
+            }
+        response.headers["X-SG-Query-Count"] = str(len(captured))
+    return response
+
+
+@app.get("/api/query-log")
+def query_log(request: Request, path: str = ""):
+    """Last SQL statement(s) run for `path` by this browser session (all paths if empty)."""
+    key = _ql_client_key(request)
+    with _QUERY_LOG_LOCK:
+        items = [dict(v) for (k, p), v in _QUERY_LOG.items() if k == key and (not path or p == path)]
+    items.sort(key=lambda x: x["at"], reverse=True)
+    return {"items": items}
 
 
 # ---------------------------------------------------------------------
@@ -1330,14 +1401,17 @@ def _ov_biss1(conn, user):
     return len(stuck.rows) + len(nc.rows)
 
 
+# RJ 2026-10-21: "for bill issuance validator, why in the overview there is 600++ but when i
+# check detail it is only 9?" - the Overview counted Case 3's raw rows (677) while the Case 3
+# page removes accounts already in Case 1 / Case 2 (668 of them) -> 9. Case 2's card had the
+# same gap (no Case 1 exclusion). The cards now call the page's own detect functions, so the
+# number on the Overview is exactly the number the page shows.
 def _ov_biss2(conn, user):
-    result = mssql.run_query(conn, bill_issuance_validator.build_terminated_period_mismatch_query(limit=bill_issuance_validator.TERMINATED_PERIOD_DEFAULT_LIMIT))
-    accounts = _case2_group_rows_by_account([dict(zip(result.columns, r)) for r in result.rows])
-    return sum(1 for a in accounts if not a["complete"])
+    return bill_issuance_case2_detect(user=user)["accounts_needing_action"]
 
 
 def _ov_biss3(conn, user):
-    return len(mssql.run_query(conn, bill_issuance_validator.build_bills_complete_query(limit=bill_issuance_validator.ALL_CONTRACT_STATUS_DEFAULT_LIMIT)).rows)
+    return bill_issuance_case3_detect(user=user)["account_count"]
 
 
 def _run_queries_parallel(conn, sqls: list[str], max_workers: int = 5) -> list:
@@ -1350,7 +1424,11 @@ def _run_queries_parallel(conn, sqls: list[str], max_workers: int = 5) -> list:
     if len(sqls) <= 1:
         return [mssql.run_query(conn, s) for s in sqls]
     with ThreadPoolExecutor(max_workers=min(max_workers, len(sqls))) as pool:
-        futures = [pool.submit(mssql.run_query, conn, s) for s in sqls]
+        # RJ 2026-10-21: run each worker in a copy of the request's context, so the
+        # "ℹ Query used" capture (_SQL_CAPTURE) also sees queries run in parallel
+        # (Bill Issuance cases, Overview counts) - worker threads don't inherit it.
+        import contextvars as _cv
+        futures = [pool.submit(_cv.copy_context().run, mssql.run_query, conn, s) for s in sqls]
         return [f.result() for f in futures]
 
 
@@ -1369,15 +1447,23 @@ _OVERVIEW_COUNTERS = {
     "wrongstuckhierarchy": lambda conn, user: wrong_stuck_hierarchy_detect(body=None, user=user)["count"],
     "wrongstuckhierarchy_sanitary": lambda conn, user: wrong_stuck_hierarchy_sanitary_detect(user=user)["count"],
     "disconnectiontnb": lambda conn, user: disconnection_tnb_detect(user=user)["count"],
-    "doubleitb": lambda conn, user: double_itb_detect(user=user)["needs_rebilling_count"],
-    "unusualsanitary": lambda conn, user: len(mssql.run_query(conn, unusual_sanitary.build_query()).rows),
+    # RJ 2026-10-21 "make sure all overview aligns with its real application in the menu":
+    # every card now returns the same headline number its page shows, from the page's own
+    # detect function (DOUBLE ITB: anomalous items, as the page summary leads with; Wrong
+    # Bill Case 1: the page's alerts.detect_unusual_sanitary rows, not the raw query).
+    "doubleitb": lambda conn, user: double_itb_detect(user=user)["anomalous_item_count"],
+    "unusualsanitary": lambda conn, user: unusual_sanitary_detect(user=user)["count"],
     "wrongbill_case2": lambda conn, user: wrong_bill_perc_dist_detect(user=user)["primary_count"],
     "wrongbill_case3": lambda conn, user: wrong_bill_sanitary_zero_detect(body=None, user=user)["count"],
     "wrongbill_case4": lambda conn, user: wrong_bill_first_regularized_detect(body=None, user=user)["count"],
     "anomstats_billing": lambda conn, user: int(mssql.run_query(conn, anomaly_stats.build_billing_count_query()).rows[0][0]),
     "anomstats_reading": lambda conn, user: int(mssql.run_query(conn, anomaly_stats.build_reading_count_query()).rows[0][0]),
-    # RJ 2026-10-09: ScriptGen-tagged rebilling activities still open
-    "rebillingmonitor": lambda conn, user: rebilling_monitor_detect(user=user)["open_count"],
+    # RJ 2026-10-21: the Rebilling Monitor's main tab is now "Open rebillings" (every open
+    # activity, 2,511 live) - the card showed only the ScriptGen-tagged ones (3).
+    "rebillingmonitor": lambda conn, user: rebilling_monitor_open(user=user)["count"],
+    # RJ 2026-10-21: cards for the menus added since the Overview was built
+    "readingdiscrepancies": lambda conn, user: reading_discrepancies_pending(user=user)["count"],
+    "fixbillingcampaign": lambda conn, user: fix_billing_campaign_detect(FixBillingCampaignRequest(), user=user)["count"],
     # RJ 2026-10-09: pending service requests with a JIRA comment
     "pendingsr": lambda conn, user: pending_service_request_detect(user=user)["count"],
 }
@@ -1392,7 +1478,9 @@ _DIGEST_LABELS = {
     "disconnectiontnb": "Disconnection TNB", "doubleitb": "DOUBLE ITB (needs rebilling)",
     "unusualsanitary": "Wrong Bill Case 1 - High Sanitary", "wrongbill_case2": "Wrong Bill Case 2",
     "wrongbill_case3": "Wrong Bill Case 3", "wrongbill_case4": "Wrong Bill Case 4",
-    "rebillingmonitor": "Open ScriptGen rebillings",
+    "rebillingmonitor": "Open rebilling activities",
+    "readingdiscrepancies": "Readings pending validation > 3 days",
+    "fixbillingcampaign": "FIX BILLING CAMPAIGN 2026 request accounts",
     "pendingsr": "Pending Service Requests (JIRA)",
 }
 alerts.register_digest_counters({k: (_DIGEST_LABELS.get(k, k), fn) for k, fn in _OVERVIEW_COUNTERS.items()
@@ -4674,7 +4762,7 @@ def reading_discrepancies_generate(body: ReadingDiscrepanciesGenerateRequest, us
 # EWA_DDI_ELIGIBILITY + subsidy wallet + /mobileapp/complaint requests + RCCS attributes
 # ---------------------------------------------------------------------
 class FixBillingCampaignRequest(BaseModel):
-    scope: str = "campaign"
+    scope: str = "all"   # RJ 2026-10-21: request-based scopes (fix_billing_campaign.SCOPES)
     since: str = fix_billing_campaign.DEFAULT_SINCE
 
 
@@ -4694,11 +4782,9 @@ def fix_billing_campaign_detect(body: FixBillingCampaignRequest, user: str = Dep
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     rows = [fix_billing_campaign.shape_row({c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)})
             for r in res.rows]
-    ewa_cols = []
-    for c in res.columns:
-        if c.upper() == "ID_WALLET":
-            break
-        ewa_cols.append(c.lower())
+    # RJ 2026-10-21: rows come from the requests; EWA_DDI_ELIGIBILITY values are the
+    # EWA_* columns at the end (info only).
+    ewa_cols = [c.lower() for c in res.columns if c.upper().startswith("EWA_")]
     return {"rows": rows, "count": len(rows), "ewa_columns": ewa_cols, "scope": body.scope, "since": body.since,
             "row_cap": fix_billing_campaign.ROW_CAP, "attrs": fix_billing_campaign.ATTRS,
             "elapsed_ms": res.elapsed_ms}

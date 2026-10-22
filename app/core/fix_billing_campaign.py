@@ -29,7 +29,10 @@ Live schema (checked 2026-10-18):
   RCCSCRDAMT Credit Amount, RCCSNOBAMT No Bank Amount, RCCSCRDUSG Credit Usage,
   FIXAMTYP Fixed Amount (= the request's deductionAmount, e.g. 9.0 -> 9.000000).
 
-One row per EWA customer in scope; latest request per account since `since`.
+RJ 2026-10-21: one row per REQUEST account (latest /mobileapp/complaint request per
+idAccount since `since`, with a creditAmount). Payment form via
+GCCOM_PAYMENT_FORM.REFERENCE; EWA_DDI_ELIGIBILITY is only extra info (IN_EWA + EWA_*
+columns), no longer the base.
 Pure logic: builds SELECT text only.
 """
 from __future__ import annotations
@@ -44,8 +47,15 @@ DEFAULT_SINCE = "2026-10-16"
 BEHAVIOUR_MASTER = "RCCSCRDUSG"
 ATTRS = {"RCCSCRDAMT": "Credit Amount", "RCCSNOBAMT": "No Bank Amount",
          "RCCSCRDUSG": "Credit Usage", "FIXAMTYP": "Deduction (Fixed) Amount"}
-SCOPES = ("campaign", "wallet", "request", "all")
-ROW_CAP = 60000
+# RJ 2026-10-21: "let's not fully rely on EWA_DDI_ELIGIBILITY, should be mostly from
+# external messages_in" - the requests (GCGE_EXTERNAL_MESSAGES_IN, latest per account)
+# are now the base; EWA_DDI_ELIGIBILITY is optional extra info (LEFT JOIN) and the
+# payment form comes from GCCOM_PAYMENT_FORM.REFERENCE = the request's idAccount.
+SCOPES = ("all", "in_ewa", "not_in_ewa", "with_wallet", "no_wallet")
+EWA_COLUMNS = ("outstanding_as_of_now", "bill_amount_may", "bill_amount_jun", "bill_amount_jul",
+               "bill_amount_aug", "bill_amount_set", "bill_amount_oct", "debt_as_of_cutoff_date",
+               "credit_as_of_cutoff_date", "payment_method", "calculated_ddi", "credit", "ind_processed")
+ROW_CAP = 0   # RJ 2026-10-21: no row cap any more (was 60,000); 0 = unlimited
 AMOUNT_TOLERANCE = 0.001
 
 
@@ -56,20 +66,21 @@ def _since(value: str | None) -> str:
     return v
 
 
-def build_query(scope: str = "campaign", since: str | None = None) -> str:
-    scope = scope if scope in SCOPES else "campaign"
+def build_query(scope: str = "all", since: str | None = None) -> str:
+    scope = scope if scope in SCOPES else "all"
     since = _since(since)
     # RJ 2026-10-18: "exclude all where in the request, there is no CreditAmount" -
-    # every scope keeps only customers whose (latest) request has a creditAmount
-    # (null / empty excluded; an explicit 0 is a value and stays). Live: 40 of
-    # 10,470 requests had none.
+    # only requests with a creditAmount (null / empty excluded; an explicit 0 stays).
     has_credit = "NULLIF(LTRIM(RTRIM(m.CREDIT_AMOUNT)), '') IS NOT NULL"
-    where = {
-        "campaign": f"WHERE (w.ID_PAYMENT_FORM IS NOT NULL OR m.ID_SEQ IS NOT NULL) AND {has_credit}",
-        "wallet": f"WHERE w.ID_PAYMENT_FORM IS NOT NULL AND {has_credit}",
-        "request": f"WHERE m.ID_SEQ IS NOT NULL AND {has_credit}",
-        "all": f"WHERE {has_credit}",
+    extra = {
+        "all": "",
+        "in_ewa": " AND e.id_payment_form IS NOT NULL",
+        "not_in_ewa": " AND e.id_payment_form IS NULL",
+        "with_wallet": " AND w.ID_PAYMENT_FORM IS NOT NULL",
+        "no_wallet": " AND w.ID_PAYMENT_FORM IS NULL",
     }[scope]
+    where = f"WHERE {has_credit}{extra}"
+    ewa_cols = ",\n       ".join(f"e.{c} AS EWA_{c.upper()}" for c in EWA_COLUMNS)
     return f"""
 SET NOCOUNT ON;
 IF OBJECT_ID('tempdb..#m') IS NOT NULL DROP TABLE #m;
@@ -126,8 +137,11 @@ LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_ATT a WITH (NOLOCK)
      ON a.ID_COMPLAINT = c.ID_COMPLAINT AND a.COD_MASTER_ATTRIBUTE IN ('RCCSCRDAMT', 'RCCSNOBAMT', 'RCCSCRDUSG', 'FIXAMTYP')
 GROUP BY c.COD_REF_COMPLAINT, c.ID_ACCOUNT, c.ID_COMPLAINT, c.COD_STATUS_COMPLAINT, c.CREATE_DATE, ct.COD_DEVELOP;
 
-SELECT TOP {ROW_CAP}
-       e.*,
+-- RJ 2026-10-21: no TOP - "do not limit top 60k, we are expecting 163k customers".
+-- RJ 2026-10-21 (later): base = the requests (#m), EWA_DDI_ELIGIBILITY only as info.
+SELECT m.ID_ACCOUNT_REF AS ACCOUNT,
+       pf.ID_PAYMENT_FORM,
+       CASE WHEN e.id_payment_form IS NOT NULL THEN 'YES' ELSE 'NO' END AS IN_EWA,
        w.ID_WALLET, w.IND_ACTIVE AS WALLET_ACTIVE, w.BALANCE AS WALLET_BALANCE, w.COD_BEHAVIOUR,
        bvw.TXT AS BEHAVIOUR_DESC, w.UPDATE_DATE AS WALLET_UPDATED,
        m.ID_SEQ AS REQ_ID, m.REQ_DATE, m.REQ_STATUS, m.REQ_COUNT, m.COMPLAINT_TYPE AS REQ_COMPLAINT_TYPE,
@@ -136,17 +150,19 @@ SELECT TOP {ROW_CAP}
        m.AMOUNT_TYPE AS REQ_AMOUNT_TYPE, m.DEDUCTION_DAY AS REQ_DEDUCTION_DAY,
        c.ID_COMPLAINT, c.RCCS_DATE, c.RCCS_TYPE_CODE, c.COD_STATUS_COMPLAINT AS RCCS_STATUS,
        COALESCE(ds.TEXT, st.NAME_TYPE) AS RCCS_STATUS_EN,
-       c.ATT_CREDIT_AMT, c.ATT_NOBANK_AMT, c.ATT_CREDIT_USAGE, bva.TXT AS ATT_CREDIT_USAGE_DESC, c.ATT_DEDUCTION_AMT
-FROM {DDI_TABLE} e WITH (NOLOCK)
-LEFT JOIN {WALLET_TABLE} w WITH (NOLOCK) ON w.ID_PAYMENT_FORM = e.id_payment_form
+       c.ATT_CREDIT_AMT, c.ATT_NOBANK_AMT, c.ATT_CREDIT_USAGE, bva.TXT AS ATT_CREDIT_USAGE_DESC, c.ATT_DEDUCTION_AMT,
+       {ewa_cols}
+FROM #m m
+LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.REFERENCE = m.ID_ACCOUNT_REF
+LEFT JOIN {DDI_TABLE} e WITH (NOLOCK) ON e.account = m.ID_ACCOUNT_REF
+LEFT JOIN {WALLET_TABLE} w WITH (NOLOCK) ON w.ID_PAYMENT_FORM = pf.ID_PAYMENT_FORM
 LEFT JOIN #bv bvw ON bvw.COD_DEVELOP = w.COD_BEHAVIOUR
-LEFT JOIN #m m ON m.ID_ACCOUNT_REF = e.account
-LEFT JOIN #c c ON c.COD_REF_COMPLAINT = m.RCCS_REF AND c.ID_ACCOUNT = e.id_payment_form
+LEFT JOIN #c c ON c.COD_REF_COMPLAINT = m.RCCS_REF AND c.ID_ACCOUNT = pf.ID_PAYMENT_FORM
 LEFT JOIN #bv bva ON bva.COD_DEVELOP = c.ATT_CREDIT_USAGE
 LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_STATUS st ON st.COD_DEVELOP = c.COD_STATUS_COMPLAINT
 LEFT JOIN GCTS_DICTIONARY ds ON ds.ID = st.NAME_TYPE_XI18N AND ds.LOCALE = 'EN'
 {where}
-ORDER BY e.account;
+ORDER BY m.ID_ACCOUNT_REF;
 
 DROP TABLE #m; DROP TABLE #c; DROP TABLE #bv;
 """
@@ -206,11 +222,14 @@ def shape_row(r: dict) -> dict:
     has_req = bool(str(r.get("req_id") or "").strip())
     has_rccs = bool(str(r.get("id_complaint") or "").strip())
     r["has_wallet"], r["has_request"], r["has_rccs"] = has_wallet, has_req, has_rccs
+    in_ewa = str(r.get("in_ewa") or "").upper() == "YES"
+    r["in_ewa_flag"] = in_ewa
     issues = []
+    # RJ 2026-10-21: rows now come from the requests - flag what the request can't be tied to.
+    if not str(r.get("id_payment_form") or "").strip():
+        issues.append("Account not found (no payment form)")
     if has_req and not has_rccs:
         issues.append("Request without RCCS complaint")
-    if has_wallet and not has_req:
-        issues.append("Wallet without request")
     if has_req and not has_wallet:
         issues.append("Request without wallet")
     if _differs(r.get("wallet_balance"), r.get("att_credit_amt")):

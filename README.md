@@ -3029,6 +3029,103 @@ generated" rule); info rows now Water bill(s) first, Sanitary last.
 Activities 21296002-21296011 (inserted 2026-10-14 17:12, In process, 20 Generated
 bills set to Disputed) were given a by-hand rollback (bills back to ESTFAC0008).
 
+### Overview audit: every card = its page's headline number (2026-10-21)
+
+RJ: "make sure all overview aligns with its real application in the menu". Each card's
+count was compared live with the number its page shows after Scan:
+- Matched already: DIFF DATES (1), Hierarchy (812), Bill Issuance Case 1 (161) / Case 4 (513),
+  Incorrect Billing Period (24), TNB Cycle/Disc (2,375), Disconnection TNB (5,144), Wrong Stuck
+  (both tabs), Wrong Bill Cases 2-4 (5 / 176 / 11), Anomalies Statistics (4,684 / 2,498),
+  Pending SR (37).
+- Fixed: Bill Issuance Case 2 / Case 3 (page exclusions - see below); Rebilling Monitor (card
+  counted only ScriptGen-tagged open activities, 3, while the page's main tab shows all open
+  activities, 2,511 -> card now = `rebilling_monitor_open` count and opens that tab); DOUBLE ITB
+  (card showed "needs rebilling", page headline is anomalous items -> same as page); Wrong Bill
+  Case 1 (card ran the raw query, page uses `alerts.detect_unusual_sanitary` -> page function).
+- Added cards for menus built after the Overview: Reading Discrepancies (pending validation
+  > 3 days) and FIX BILLING CAMPAIGN 2026 (campaign customers). Both also feed the daily digest.
+- Rule: every counter in `_OVERVIEW_COUNTERS` calls the page's own detect function and returns
+  the field the page's summary leads with - never a separate query.
+
+### Overview Bill Issuance cards = page numbers; "Query used" for parallel queries (2026-10-21)
+
+- RJ: "why in the overview there is 600++ but when i check detail it is only 9?" - live:
+  Overview Case 3 = 677 raw rows; the Case 3 page removes the 668 accounts already in Case 1 /
+  Case 2 -> 9. `_ov_biss2` / `_ov_biss3` now call `bill_issuance_case2_detect` /
+  `bill_issuance_case3_detect` directly, so the card shows the page's own number (Case 2 also
+  gains the Case 1 exclusion it was missing).
+- RJ: "the query info is still not there" - the button was there, but its popup said "No query
+  has run": queries run through `_run_queries_parallel` (Bill Issuance cases, several Overview
+  cards) execute in worker threads, which did not inherit the capture context. Workers now run
+  in `contextvars.copy_context()`, so those statements are captured too.
+
+### FIX BILLING CAMPAIGN: credit-behaviour KPI cards (2026-10-21)
+
+RJ: "in the kpi, i want to also filter and see the percentage of the credit behaviour". The
+wallet widget's behaviour line is now a stacked bar + one card per behaviour (Freeze red,
+Monthly Release green, Outstanding + Monthly Release amber) with % of wallets, count and
+credit total. Click = filter the whole page (dashboard + table), click again = clear. The %
+is counted with every other filter applied except the behaviour one. Static change (Ctrl+F5).
+
+### "Query used" filed per menu + tab (2026-10-21)
+
+RJ: "the query used should be distributed on specific menu. like for rebilling only show
+rebilling". Before, a query was filed under whatever page was open when the call FINISHED, so
+slow scans, auto-refresh and background loads (Overview counters, billing-period lists) leaked
+into other menus. Now `SG_ENDPOINT_OWNER` (app.js) maps every endpoint to its own menu + tab
+(e.g. `/api/rebilling-monitor/open` -> Rebilling Monitor / Open rebillings,
+`/api/rebilling-monitor/detect` -> the tagged tab), decided when the call starts. Generic
+endpoints (Query workspace) still use the page that was open. Static change only (Ctrl+F5).
+
+### FIX BILLING CAMPAIGN: driven by the requests, not EWA (2026-10-21)
+
+RJ: "revise fix billing campaing, let's not fully rely on EWA_DDI_ELIGIBILITY, should be
+mostly from external messages_in".
+
+- Base = the `/mobileapp/complaint` requests in `GCGE_EXTERNAL_MESSAGES_IN` (latest per JSON
+  `idAccount` since the date, only with a creditAmount). One row per request account.
+- Payment form = `GCCOM_PAYMENT_FORM.REFERENCE = idAccount`; wallet and RCCS are joined on it.
+- `EWA_DDI_ELIGIBILITY` is LEFT JOINed for info only: new `IN_EWA` flag (YES/NO) and the EWA
+  values as `EWA_*` columns (shown by the "EWA columns" toggle, grouped "EWA_DDI_ELIGIBILITY (info)").
+- Scopes: All requests / in EWA / NOT in EWA / with a wallet / without a wallet (default All).
+- New KPI "Not in EWA_DDI_ELIGIBILITY"; new check "Account not found (no payment form)";
+  "Wallet without request" dropped (every row has a request now).
+- Live 2026-10-21 (since 2026-10-16): 14,799 rows = 14,799 accounts, all with a payment form,
+  4 not in EWA, 132 without a wallet, 14,790 with the RCCS found.
+- `fix_billing_campaign_2026_single_query.sql` (workspace root) revised the same way.
+
+### FIX BILLING CAMPAIGN: no 60k cap + fast search (2026-10-21)
+
+RJ: "do not limit top 60k, we are expecting 163k customers ... also the search is very slow".
+- `TOP 60000` removed from the final SELECT (`ROW_CAP = 0`); every account comes back, so
+  KPIs / donut / matrix / checks / Export CSV cover all accounts. The table still DRAWS only the
+  first 3,000 filtered rows (Export has all). "All eligible" option relabelled.
+- server.py: `GZipMiddleware` (responses > 50 KB) so ~163k rows travel compressed.
+- Search: terms parsed once per keystroke (was once per row per pass), each row's search text
+  built once (`r._hay`), a pasted list of > 20 values is an exact Set lookup on account /
+  payment form / RCCS / wallet, and typing is debounced (250 ms, was a full re-render per key).
+- Bug found while load-testing: the wallet widget's `Math.max(...balances)` overflows the call
+  stack above ~120k rows -> replaced with a reduce.
+- Measured in the browser with the live rows replicated to 171,780: no search 1.2 s (table
+  draw), one account 0.2 s, 300 pasted accounts 0.5 s.
+
+### "ℹ Query used" on every result table (2026-10-21)
+
+RJ: "i remember i told you to always add the query used in the information for all our
+tables in this project, now we dont have it add it as secondary info for all".
+- server.py: `mssql.run_query` is wrapped once at start-up; every SQL text sent during an
+  `/api/...` request is captured (contextvar) and kept per browser session + endpoint
+  (latest call, up to 20 statements). Response header `X-SG-Query-Count`.
+  `GET /api/query-log?path=...` returns it. Nothing about the SQL itself changes.
+- app.js: `api()` remembers which endpoints ran SQL while each page / tab was open; every
+  card that holds a table gets an "ℹ Query used" button (card header) that opens a popup with
+  the endpoint, run time and every statement (Copy button). Before the first Scan it says so.
+- Not covered: work done in background jobs (DIFF DATES batch, Bulk Checker prefetch) -
+  those run outside the request.
+- Standing rule for new menus: nothing extra needed - any table card gets the button and any
+  route that uses `mssql.run_query` is logged automatically.
+- FIX BILLING CAMPAIGN query rendered for RJ: `fix_billing_campaign_2026_query.sql` (workspace root).
+
 ### FIX BILLING CAMPAIGN: the 3 RCCS groups + hollow chart (2026-10-18)
 
 RJ: "very important to group the RCCS, 4103 will be no bank or Benefit, if no bank is null

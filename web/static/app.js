@@ -105,11 +105,178 @@ const sgLoader = (() => {
   };
 })();
 
+// ---- "Query used" secondary info for every table (RJ 2026-10-21: "always add the query
+// used in the information for all our tables in this project ... add it as secondary info
+// for all"). The server captures every SQL run per endpoint (web/server.py
+// _capture_query_used / GET /api/query-log); here we remember which endpoints were called
+// from which page + tab, and a "ℹ Query used" button is added to every result card.
+const SG_PAGE_QUERY_PATHS = {};   // "page|tab" -> [paths, most recent first]
+function sgQueryKey(el) {
+  const page = (el ? el.closest(".page") : document.querySelector(".page.is-active"));
+  if (!page) return "";
+  const sub = el ? el.closest(".da-subpage") : page.querySelector(".da-subpage.is-active");
+  const subVal = sub ? [...sub.attributes].filter((a) => a.name.startsWith("data-") && a.name.endsWith("-sub")).map((a) => a.value).join(",") : "";
+  return `${page.id}|${subVal}`;
+}
+// RJ 2026-10-21: "the query used should be distributed on specific menu. like for rebilling
+// only show rebilling". Every endpoint is owned by ONE menu (+ tab) - the query is filed
+// there, never under whatever page happened to be open when a slow / background / auto-
+// refresh call finished. [path prefix, page, tab or null (= the tab open at call time)].
+const SG_ENDPOINT_OWNER = [
+  ["/api/date-anomaly/detect-all", "dateanomaly", "detectall"],
+  ["/api/date-anomaly/batch", "dateanomaly", "batch"],
+  ["/api/date-anomaly/history", "dateanomaly", "history"],
+  ["/api/date-anomaly/", "dateanomaly", "single"],
+  ["/api/hierarchy-analysis/", "hierarchy", ""],
+  ["/api/bill-issuance/case2/", "billissuance", "case2"],
+  ["/api/bill-issuance/case3/", "billissuance", "case3"],
+  ["/api/bill-issuance/case4/", "billissuance", "case4"],
+  ["/api/bill-issuance/release-complete", "billissuance", null],
+  ["/api/bill-issuance/", "billissuance", "case1"],
+  ["/api/incorrect-billing-period/", "incorrectbillingperiod", ""],
+  ["/api/reading-validation/", "readingvalidation", ""],
+  ["/api/tnb-cycle-disc/", "tnbcycledisc", ""],
+  ["/api/wrong-stuck-hierarchy/sanitary/", "wrongstuckhierarchy", "sanitary"],
+  ["/api/wrong-stuck-hierarchy/generate", "wrongstuckhierarchy", null],
+  ["/api/wrong-stuck-hierarchy/", "wrongstuckhierarchy", "primary"],
+  ["/api/wrong-billed-consumption/", "wrongbilledconsumption", ""],
+  ["/api/unusual-sanitary/", "wrongbill", "case1"],
+  ["/api/wrong-bill/perc-dist/", "wrongbill", "case2"],
+  ["/api/wrong-bill/sanitary-zero/", "wrongbill", "case3"],
+  ["/api/wrong-bill/first-regularized/", "wrongbill", "case4"],
+  ["/api/temp-dashboard/detect", "tempdashboard", "accounts"],
+  ["/api/temp-dashboard/sanitary-mismatch", "tempdashboard", "sanitary"],
+  ["/api/temp-dashboard/water-sanitary-status", "tempdashboard", "wsstatus"],
+  ["/api/temp-dashboard/ddi-complaints", "tempdashboard", "ddi"],
+  ["/api/temp-dashboard/subsidy-missing-bill", "tempdashboard", "subsidy"],
+  ["/api/reading-discrepancies/pending-validation", "readingdiscrepancies", "pending"],
+  ["/api/reading-discrepancies/", "readingdiscrepancies", "unbilled"],
+  ["/api/fix-billing-campaign/", "fixbillingcampaign", ""],
+  ["/api/pending-sr/", "pendingsr", ""],
+  ["/api/rebilling-monitor/open", "rebillingmonitor", "open"],
+  ["/api/rebilling-monitor/detect", "rebillingmonitor", "tagged"],
+  ["/api/double-itb/", "doubleitb", ""],
+  ["/api/disconnection-tnb/", "disconnectiontnb", ""],
+  ["/api/bulk-checker/", "bulkchecker", ""],
+  ["/api/anomaly-stats/", "anomalystats", ""],
+  ["/api/dashboard/", "dashboard", ""],
+  ["/api/overview/", "overview", ""],
+];
+function sgOwnerKey(path) {
+  const clean = String(path).split("?")[0];
+  const hit = SG_ENDPOINT_OWNER.find(([p]) => clean.startsWith(p));
+  if (!hit) return sgQueryKey(null);           // generic endpoints (query/run ...): the open page
+  const [, page, tab] = hit;
+  if (tab !== null) return `page-${page}|${tab}`;
+  const active = sgQueryKey(null);              // ambiguous tab: the one open, if on that page
+  return active.startsWith(`page-${page}|`) ? active : `page-${page}|`;
+}
+function sgRememberQueryPath(path, ownerKey) {
+  const clean = String(path).split("?")[0];
+  const key = ownerKey || sgOwnerKey(path);
+  if (!key) return;
+  const list = (SG_PAGE_QUERY_PATHS[key] || []).filter((p) => p !== clean);
+  list.unshift(clean);
+  SG_PAGE_QUERY_PATHS[key] = list.slice(0, 6);
+}
+function sgEnsureQueryModal() {
+  let m = document.getElementById("sg-query-modal");
+  if (m) return m;
+  m = document.createElement("div");
+  m.id = "sg-query-modal";
+  m.className = "fbc-json-modal";
+  m.hidden = true;
+  m.innerHTML = `<div class="fbc-json-box sg-query-box"><header><h3 id="sg-query-title">Query used</h3>
+    <div><button type="button" class="btn btn-pill btn-sm" id="sg-query-copy">📋 Copy</button>
+    <button type="button" class="btn btn-pill btn-sm" id="sg-query-close">✕ Close</button></div></header>
+    <div id="sg-query-body" class="sg-query-body"></div></div>`;
+  document.body.appendChild(m);
+  m.addEventListener("click", (e) => { if (e.target === m) m.hidden = true; });
+  m.querySelector("#sg-query-close").addEventListener("click", () => { m.hidden = true; });
+  m.querySelector("#sg-query-copy").addEventListener("click", async () => {
+    const txt = [...m.querySelectorAll("pre")].map((p) => p.textContent).join("\n\n-- ----------------------------------------\n\n");
+    try { await navigator.clipboard.writeText(txt); showToast("Query copied."); } catch { showToast("Copy failed.", true); }
+  });
+  return m;
+}
+async function sgShowQueryUsed(btn) {
+  const m = sgEnsureQueryModal();
+  const key = sgQueryKey(btn);
+  let paths = SG_PAGE_QUERY_PATHS[key] || [];
+  // a table outside any tab of its page: every query filed under that page (this page only)
+  if (!paths.length && key.endsWith("|")) {
+    paths = [...new Set(Object.keys(SG_PAGE_QUERY_PATHS).filter((k) => k.startsWith(key)).flatMap((k) => SG_PAGE_QUERY_PATHS[k]))];
+  }
+  const card = btn.closest(".card");
+  const title = card?.querySelector(".card-header h2")?.textContent || "this table";
+  m.querySelector("#sg-query-title").textContent = `Query used - ${title}`;
+  const body = m.querySelector("#sg-query-body");
+  m.hidden = false;
+  if (!paths.length) {
+    body.innerHTML = `<p class="hint-text" style="padding:16px">No query has run for this table yet in this session - click Scan / Search first, then open this again.</p>`;
+    return;
+  }
+  body.innerHTML = `<p class="hint-text" style="padding:12px 16px">Loading…</p>`;
+  try {
+    const parts = [];
+    for (const p of paths) {
+      const d = await api(`/api/query-log?path=${encodeURIComponent(p)}`, { quiet: true });
+      (d.items || []).forEach((it) => parts.push(it));
+    }
+    body.innerHTML = parts.map((it) =>
+      `<div class="sg-query-item"><div class="sg-query-meta"><code>${escapeHtml(it.method)} ${escapeHtml(it.path)}</code>` +
+      `<span>run ${escapeHtml(hxDate(String(it.at).replace("T", " ").slice(0, 16)))} UTC · ${it.queries.length} statement(s)</span></div>` +
+      it.queries.map((q, i) => `${it.queries.length > 1 ? `<div class="sg-query-n">Statement ${i + 1}</div>` : ""}<pre>${escapeHtml(String(q).trim())}</pre>`).join("") +
+      `</div>`).join("") || `<p class="hint-text" style="padding:16px">The server no longer has the query (it was restarted) - run Scan again.</p>`;
+  } catch (err) {
+    body.innerHTML = `<p class="hint-text" style="padding:16px">${escapeHtml(err.message)}</p>`;
+  }
+}
+// add the button to every result card (card with a table) - once, at start-up
+// RJ 2026-10-21 follow-up ("applied for all?"): driven by every result-table wrapper
+// (.grid-wrap), not only by cards - Hierarchy, Wrong Billed Consumption, Anomalies
+// Statistics and the Wrong Bill / Bill Issuance cases keep their tables outside a .card.
+function sgMakeQueryBtn() {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "btn btn-pill btn-sm sg-query-btn";
+  b.title = "Show the SQL query used to load this table";
+  b.textContent = "ℹ Query used";
+  b.addEventListener("click", () => sgShowQueryUsed(b));
+  return b;
+}
+function sgAddQueryButtons() {
+  document.querySelectorAll(".page .grid-wrap, .page .hx-grid").forEach((wrap) => {
+    if (!wrap.querySelector("table") || wrap.closest(".hx-modal, .fbc-json-modal, #sg-query-modal")) return;
+    const card = wrap.closest(".card");
+    if (card) {
+      if (card.querySelector(".sg-query-btn")) return;
+      const actions = card.querySelector(".card-header-actions") || card.querySelector(".card-header");
+      if (actions) { actions.appendChild(sgMakeQueryBtn()); return; }
+    }
+    // no card header: one small bar right above the table (once per section)
+    const section = wrap.closest(".da-subpage") || wrap.closest(".page");
+    const prev = wrap.previousElementSibling;
+    if (prev && prev.classList.contains("sg-query-bar")) return;
+    if (section && section.querySelector(":scope .sg-query-bar") && !card) {
+      // a second table in the same section without a card: still give it its own bar
+    }
+    const bar = document.createElement("div");
+    bar.className = "sg-query-bar";
+    bar.appendChild(sgMakeQueryBtn());
+    wrap.insertAdjacentElement("beforebegin", bar);
+  });
+}
+document.addEventListener("DOMContentLoaded", sgAddQueryButtons);
+if (document.readyState !== "loading") setTimeout(sgAddQueryButtons, 0);
+
 async function api(path, options = {}) {
   _apiInflight++;
   // options.quiet: background loads (e.g. Bulk Checker prefetch) don't hold
   // the global loading pill while you work on other menus.
   const _ldr = options.quiet ? null : sgLoader.start(path);
+  // RJ 2026-10-21: owner menu/tab decided when the call STARTS (not when a slow call ends)
+  const _qOwner = sgOwnerKey(path);
   try {
     const resp = await fetch(path, {
       method: options.method || "GET",
@@ -117,6 +284,9 @@ async function api(path, options = {}) {
       body: options.body ? JSON.stringify(options.body) : undefined,
       credentials: "same-origin",
     });
+    // RJ 2026-10-21: remember which endpoint ran SQL while this page/tab was open,
+    // for the "ℹ Query used" button on every result card (sgQueryKey / sgShowQueryUsed).
+    if (Number(resp.headers.get("X-SG-Query-Count") || 0) > 0) sgRememberQueryPath(path, _qOwner);
     let data = null;
     try { data = await resp.json(); } catch (_) { /* no body */ }
     if (!resp.ok) {
@@ -417,7 +587,7 @@ const OVERVIEW_CARDS = [
   },
   {
     key: "doubleitb", icon: "👯", label: "DOUBLE ITB", color: "#ec4899",
-    desc: "Anomalous items to bill with a billed twin that need rebilling.",
+    desc: "Anomalous items to bill with a billed twin (same headline as the page).",
     page: "doubleitb", group: "Billing anomalies",
   },
   {
@@ -465,8 +635,19 @@ const OVERVIEW_CARDS = [
   },
   {
     key: "rebillingmonitor", icon: "🔁", label: "Rebilling Monitor", color: "#0ea5e9",
-    desc: "ScriptGen rebilling activities still open (not Rebilled / Rejected).",
-    page: "rebillingmonitor", group: "History",
+    desc: "Open rebilling activities - Pending / In process (the page's main tab).",
+    page: "rebillingmonitor", subAttr: "data-rbm-sub", subValue: "open", group: "History",
+  },
+  // RJ 2026-10-21: cards for the menus added after the Overview was built
+  {
+    key: "readingdiscrepancies", icon: "🔍", label: "Reading Discrepancies", color: "#8b5cf6",
+    desc: "Readings pending validation for more than 3 days (last 6 months).",
+    page: "readingdiscrepancies", subAttr: "data-rdisc-sub", subValue: "pending", group: "Hierarchy & readings",
+  },
+  {
+    key: "fixbillingcampaign", icon: "💳", label: "FIX BILLING CAMPAIGN 2026", color: "#10b981",
+    desc: "Accounts with a /mobileapp/complaint request after 2026-10-16 that has a CreditAmount (all requests, EWA is info only).",
+    page: "fixbillingcampaign", group: "Campaigns",
   },
   {
     key: "history", icon: "🕓", label: "Script History", color: "#06b6d4",
@@ -11705,6 +11886,7 @@ const FBC_KPI_PRED = {
   issues: (r) => (r.issues || []).length > 0, multi: (r) => Number(r.req_count) > 1,
   // RJ 2026-10-18: "add a kpi for more than 1 account in an rccs number"
   sharedRccs: (r) => Number(r.rccs_accounts) > 1,
+  notInEwa: (r) => String(r.in_ewa || "").toUpperCase() !== "YES",
 };
 // how many accounts point at the same RCCS reference (latest request per account)
 function fbcMarkShared(rows) {
@@ -11718,7 +11900,8 @@ function fbcMarkShared(rows) {
 }
 // column groups: [group label, accent, columns]
 const FBC_GROUPS = [
-  ["Customer", "#6366f1", [["account", "Account", "mono"], ["id_payment_form", "Payment form", "mono"], ["category", "RCCS group", "cat"], ["req_complaint_type", "Type", "type"], ["link_state", "Link"]]],
+  // RJ 2026-10-21: rows come from the requests; "In EWA" = also in EWA_DDI_ELIGIBILITY (info)
+  ["Customer", "#6366f1", [["account", "Account", "mono"], ["id_payment_form", "Payment form", "mono"], ["category", "RCCS group", "cat"], ["req_complaint_type", "Type", "type"], ["in_ewa", "In EWA"], ["link_state", "Link"]]],
   ["Subsidy wallet", "#10b981", [["wallet_balance", "Credit (balance)", "money"], ["cod_behaviour", "Behaviour", "beh"], ["wallet_updated", "Wallet updated", "date"]]],
   // RJ 2026-10-18 v2: "for third table for json, just show 1 column for JSON and just display,
   // request CREDIT, NO_BANK, DEDUCTION" - JSON opens the raw request on demand.
@@ -11733,7 +11916,7 @@ function fbcColumns() {
   const groups = FBC_GROUPS.map((g) => [...g]);
   if ($("#fbc-ewa-cols").checked) {
     const skip = new Set(["account", "id_payment_form"]);
-    groups.push(["EWA_DDI_ELIGIBILITY", "#64748b", fbcEwaCols.filter((c) => !skip.has(c)).map((c) => [c, c, /^(bill_amount|outstanding|debt|credit|calculated)/.test(c) ? "money" : ""])]);
+    groups.push(["EWA_DDI_ELIGIBILITY (info)", "#64748b", fbcEwaCols.filter((c) => !skip.has(c)).map((c) => { const n = c.replace(/^ewa_/, ""); return [c, n, /^(bill_amount|outstanding|debt|credit|calculated)/.test(n) ? "money" : ""]; })]);
   }
   return groups;
 }
@@ -11744,12 +11927,24 @@ function fbcMatch(r, skip) {
   if (skip !== "rtype" && fbcF.rtype && fbcTypeKey(r) !== fbcF.rtype) return false;
   if (skip !== "range" && fbcF.range && fbcRange(r) !== fbcF.range) return false;
   if (skip !== "issue" && fbcF.issue && !(r.issues || []).includes(fbcF.issue)) return false;
-  const terms = $("#fbc-filter-search").value.split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-  if (terms.length) {
-    const hay = [r.account, r.id_payment_form, r.rccs_ref, r.id_wallet].map((v) => String(v ?? "").toLowerCase()).join(" | ");
-    if (!terms.some((t) => hay.includes(t))) return false;
+  // RJ 2026-10-21 "the search is very slow": terms are parsed once per keystroke (not per
+  // row), each row's search text is built once, and a pasted list (> 20 values) is an
+  // exact Set lookup instead of substring scans.
+  if (fbcTerms.length) {
+    if (fbcTermSet) {
+      if (!(fbcTermSet.has(String(r.account ?? "").toLowerCase()) || fbcTermSet.has(String(r.id_payment_form ?? "").toLowerCase())
+        || fbcTermSet.has(String(r.rccs_ref ?? "").toLowerCase()) || fbcTermSet.has(String(r.id_wallet ?? "").toLowerCase()))) return false;
+    } else {
+      if (r._hay === undefined) r._hay = [r.account, r.id_payment_form, r.rccs_ref, r.id_wallet].map((v) => String(v ?? "").toLowerCase()).join(" | ");
+      if (!fbcTerms.some((t) => r._hay.includes(t))) return false;
+    }
   }
   return true;
+}
+let fbcTerms = [], fbcTermSet = null;
+function fbcUpdateTerms() {
+  fbcTerms = $("#fbc-filter-search").value.split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+  fbcTermSet = fbcTerms.length > 20 ? new Set(fbcTerms) : null;
 }
 function fbcVisibleRows() {
   let rows = fbcRows.filter((r) => fbcMatch(r));
@@ -11831,17 +12026,33 @@ function fbcRenderDash() {
   const rg = rboCount(wRows, fbcRange);
   const rgKeys = FBC_RANGES.map((x) => x[1]);
   const rgTot = Math.max(1, wRows.length);
-  const beh = [...rboCount(wRows, fbcBehKey).entries()].map(([k, n]) => `${escapeHtml(k)}: <b>${n.toLocaleString()}</b>`).join(" · ");
+  // RJ 2026-10-21: "in the kpi, i want to also filter and see the percentage of the credit
+  // behaviour" - one clickable card per behaviour (count, % of wallets, credit); counted
+  // without the behaviour filter itself so the other behaviours stay visible while filtering.
+  const bRows = fbcRows.filter((r) => fbcMatch(r, "beh") && r.has_wallet);
+  const bTot = Math.max(1, bRows.length);
+  const bCount = rboCount(bRows, fbcBehKey);
+  const bKpi = (k) => (/Freeze/.test(k) ? "missing" : /Oustanding|Outstanding/.test(k) ? "pending" : "complete");
+  const bKeys = [...bCount.keys()].sort((a, b) => bCount.get(b) - bCount.get(a));
+  const beh = `<div class="fbc-beh-strip">${bKeys.map((k) => `<span data-kpi="${bKpi(k)}" data-fbc-beh="${escapeHtml(k)}" class="${fbcF.beh === k ? "is-active" : ""}" style="flex:${bCount.get(k)}" title="${escapeHtml(k)}: ${bCount.get(k).toLocaleString()} - click to filter"></span>`).join("")}</div>` +
+    `<div class="fbc-beh-cards">${bKeys.map((k) => {
+      const n = bCount.get(k);
+      const rowsK = bRows.filter((r) => fbcBehKey(r) === k);
+      return `<button type="button" class="fbc-beh-card${fbcF.beh === k ? " is-active" : ""}" data-kpi="${bKpi(k)}" data-fbc-beh="${escapeHtml(k)}" title="Click to filter, click again to clear">` +
+        `<span class="fbc-beh-name">${escapeHtml(k)}</span>` +
+        `<span class="fbc-beh-pct">${(100 * n / bTot).toFixed(1)}%</span>` +
+        `<span class="fbc-beh-sub">${n.toLocaleString()} wallet(s) · credit ${fbcMoney(sum(rowsK, "wallet_balance"))}</span></button>`;
+    }).join("")}</div>`;
   $("#fbc-wallet").innerHTML =
     `<span class="fbc-type-label">👛 Wallet credit (EWA_GCCOM_SUBSIDY_WALLET)</span>` +
     `<b class="fbc-wallet-total">${fbcMoney(total)}</b>` +
     `<div class="fbc-wallet-stats"><div>Customers<b>${wRows.length.toLocaleString()}</b></div>` +
       `<div>Average<b>${fbcMoney(bals.length ? total / bals.length : 0)}</b></div>` +
-      `<div>Max<b>${fbcMoney(bals.length ? Math.max(...bals) : 0)}</b></div>` +
+      `<div>Max<b>${fbcMoney(bals.length ? bals.reduce((a, b) => (b > a ? b : a), -Infinity) : 0)}</b></div>` +
       `<div>RCCS CREDITAMT<b>${fbcMoney(sum(wRows, "att_credit_amt"))}</b></div></div>` +
     `<div class="fbc-wallet-strip">${rgKeys.map((k) => { const n = rg.get(k) || 0; return n ? `<span data-kpi="${FBC_RANGE_KPI[k]}" data-fbc-range="${escapeHtml(k)}" class="${fbcF.range === k ? "is-active" : ""}" style="flex:${n}" title="${escapeHtml(k)} BHD: ${n.toLocaleString()} customer(s) - click to filter"></span>` : ""; }).join("")}</div>` +
     `<div class="fbc-wallet-legend">${rgKeys.map((k) => `<span data-fbc-range="${escapeHtml(k)}"><i data-kpi="${FBC_RANGE_KPI[k]}"></i>${escapeHtml(k)} <b>${(rg.get(k) || 0).toLocaleString()}</b> <small>${Math.round(100 * (rg.get(k) || 0) / rgTot)}%</small></span>`).join("")}</div>` +
-    `<div class="fbc-wallet-beh">Behaviour - ${beh || "none"}</div>`;
+    `<div class="fbc-wallet-beh"><span class="fbc-beh-title">Credit behaviour${fbcF.beh ? ` <small>(filtered - click again to clear)</small>` : ""}</span>${bKeys.length ? beh : "none"}</div>`;
 
   // KPI strip (RJ 2026-10-18: "add a kpi for more than 1 account in an rccs number")
   const kBase = fbcRows.filter((r) => fbcMatch(r, "kpi"));
@@ -11850,6 +12061,7 @@ function fbcRenderDash() {
   const kCards = [
     ["missing", "🔗", "RCCS with more than 1 account", sharedRccs, `${sharedRows.length.toLocaleString()} accounts share them`, "sharedRccs"],
     ["pending", "❓", "Request without RCCS", kBase.filter(FBC_KPI_PRED.noRccs).length, "RCCS reference not found", "noRccs"],
+    ["case0", "🗂️", "Not in EWA_DDI_ELIGIBILITY", kBase.filter(FBC_KPI_PRED.notInEwa).length, "request accounts outside the EWA list", "notInEwa"],
     ["stuck", "⚠️", "Customers with issues", kBase.filter(FBC_KPI_PRED.issues).length, "see consistency checks", "issues"],
   ];
   $("#fbc-kpi-row").innerHTML = kCards.map(([kpi, icon, label, value, sub, f]) =>
@@ -11973,10 +12185,15 @@ $("#fbc-dash").addEventListener("click", (e) => {
     if (t) { const v = t.getAttribute(attr); fbcF[key] = fbcF[key] === v ? null : v; fbcRender(); return; }
   }
 });
+let fbcSearchTimer = null;
 $("#fbc-filter-search").addEventListener("input", () => {
-  const n = $("#fbc-filter-search").value.split(/[\s,;]+/).filter(Boolean).length;
-  $("#fbc-filter-search-count").textContent = n > 1 ? `${n} values` : "";
-  fbcRender();
+  // debounced: re-render once typing / pasting pauses (was a full re-render per keystroke)
+  clearTimeout(fbcSearchTimer);
+  fbcSearchTimer = setTimeout(() => {
+    fbcUpdateTerms();
+    $("#fbc-filter-search-count").textContent = fbcTerms.length > 1 ? `${fbcTerms.length} values` : "";
+    fbcRender();
+  }, 250);
 });
 $("#fbc-ewa-cols").addEventListener("change", fbcRender);
 // request JSON viewer (fetched on demand: GET /api/fix-billing-campaign/request/{id})
@@ -12005,6 +12222,7 @@ $("#fbc-json-copy").addEventListener("click", async () => {
 $("#fbc-clear-btn").addEventListener("click", () => {
   fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null };
   $("#fbc-filter-search").value = ""; $("#fbc-filter-search-count").textContent = "";
+  fbcUpdateTerms();
   fbcRender();
 });
 $("#fbc-scope").addEventListener("change", () => $("#fbc-detect-btn").click());
@@ -12017,10 +12235,11 @@ $("#fbc-detect-btn").addEventListener("click", async () => {
     fbcRows = data.rows || [];
     fbcRows.forEach((r) => { r.category = fbcCategory(r); });
     fbcMarkShared(fbcRows);
+    fbcUpdateTerms();
     fbcEwaCols = data.ewa_columns || [];
     fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null };
     $("#fbc-dash").hidden = false; $("#fbc-filter-row").hidden = false; $("#fbc-acts-title").hidden = false;
-    const capped = data.count >= data.row_cap ? ` (capped at ${Number(data.row_cap).toLocaleString()})` : "";
+    const capped = data.row_cap && data.count >= data.row_cap ? ` (capped at ${Number(data.row_cap).toLocaleString()})` : "";
     $("#fbc-summary").textContent = `${data.count.toLocaleString()} customer(s)${capped} - requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
     fbcRender();
   } catch (err) {
