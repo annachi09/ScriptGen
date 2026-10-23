@@ -2008,6 +2008,12 @@
         <header class="page-header">
           <h1>FIX BILLING CAMPAIGN 2026</h1>
         </header>
+        <!-- RJ 2026-10-23: tab 2 "Subsidized - planned billing" -->
+        <nav class="da-subnav" aria-label="Fix billing campaign tabs">
+          <button type="button" class="da-subnav-btn is-active" data-fbc-sub="campaign">Campaign requests</button>
+          <button type="button" class="da-subnav-btn" data-fbc-sub="planned">Subsidized - planned billing</button>
+        </nav>
+        <div class="da-subpage is-active" data-fbc-sub="campaign">
         <p class="page-subtitle" style="margin:-6px 0 14px;">Every account with a <b>/mobileapp/complaint</b> request (GCGE_EXTERNAL_MESSAGES_IN, latest per account since the date, with a CreditAmount) - payment form via GCCOM_PAYMENT_FORM - linked to its <b>subsidy wallet</b> (credit balance and behaviour), flagged whether it is in <b>EWA_DDI_ELIGIBILITY</b> (info only), and to the <b>RCCS</b> it created (GCCC_COMPLAINT.COD_REF_COMPLAINT) with its attributes Credit Amount, No Bank Amount, Credit Usage and Deduction (Fixed) Amount.</p>
         <div class="card">
           <div class="card-header">
@@ -2063,6 +2069,47 @@
           <div class="grid-wrap fbc-grid" style="margin-top:10px;">
             <table class="data-grid" id="fbc-table"><thead></thead><tbody></tbody></table>
           </div>
+        </div>
+        </div>
+
+        <!-- RJ 2026-10-23: "for all the subsidized account, i want to see the planned billing date on
+             their readings for September 2026, make KPI" - planned billing date = READING_DATE + 3 -->
+        <div class="da-subpage" data-fbc-sub="planned">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Every account with an active <b>subsidized service</b> (Bahraini First Account tariff <b>E-D2 / W-D2 / E-D2-NM</b>) and its readings of the billing period (GCGT_RE_READING). <b>Planned billing date = reading date + 3 days.</b> Billed = reading status Billed / UAU - Billed. Also shows whether the account has a <b>subsidy wallet</b>, the amount and the behaviour.</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Subsidized accounts - planned billing</h2>
+            <div class="card-header-actions">
+              <label class="field-label" for="fsp-bp">Billing period</label>
+              <input id="fsp-bp" class="text-input text-input-sm" value="10000000237" title="10000000237 = September 2026" style="width:120px;" />
+              <button type="button" class="btn btn-pill" id="fsp-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="fsp-copy-btn" disabled title="Copy the visible accounts (one per line)">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="fsp-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="fsp-summary">Click Scan to load (about a minute - 160k+ accounts).</div>
+          <div class="rbo-dash" id="fsp-dash" hidden>
+            <div class="rbo-section-title"><span>1</span>Accounts <small>click a card to filter</small></div>
+            <div class="rbo-kpis fbc-kpis" id="fsp-kpi-row"></div>
+            <div class="rbo-section-title"><span>2</span>Planned billing date <small>accounts per day (first planned date of the account) - click a bar to filter</small></div>
+            <section class="rbo-panel"><div class="fsp-days" id="fsp-days"></div></section>
+            <div class="rbo-section-title"><span>3</span>Subsidy wallet &amp; tariff</div>
+            <div class="fsp-panels">
+              <section class="rbo-panel"><header><h3>👛 Wallet behaviour</h3><span class="rbo-sub" id="fsp-wallet-sub"></span></header><div id="fsp-beh"></div></section>
+              <section class="rbo-panel"><header><h3>🏷 Tariff</h3></header><div id="fsp-tariff"></div></section>
+            </div>
+          </div>
+          <div class="key-panel-row" id="fsp-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <textarea id="fsp-filter-search" class="text-input text-input-sm" rows="2" placeholder="Account / payment form… or paste many" style="width:240px;resize:vertical;"></textarea>
+            <span class="hint-text" id="fsp-active-filters" style="margin-left:auto;"></span>
+            <button type="button" class="btn btn-pill btn-sm" id="fsp-clear-btn">Clear filters</button>
+          </div>
+          <div class="hint-text" id="fsp-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="fsp-table"><thead><tr></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
         </div>
         <!-- request JSON viewer -->
         <div class="fbc-json-modal" id="fbc-json-modal" hidden>

@@ -168,6 +168,93 @@ DROP TABLE #m; DROP TABLE #c; DROP TABLE #bv;
 """
 
 
+# ---------------------------------------------------------------------------
+# Tab 2 "Subsidized - planned billing" (RJ 2026-10-23): "for all the subsidized account,
+# i want to see the planned billing date on their readings for September 2026, make KPI"
+# + "tell me if it has subsidy wallet and how much and the behaviour in description"
+# + "use GCGT_RE_READING.reading_date +3".
+#   subsidized = active contracted service (STATUS not Pending/Terminated/Cancelled) whose
+#       billing service fare is a Bahraini First Account tariff (same as Temp Dashboard
+#       subsidy tab): 10000000003 E-D2, 10000000004 W-D2, 10000000006 E-D2-NM
+#   readings = GCGT_RE_READING of those services' sector supplies in the billing period
+#   PLANNED BILLING DATE = READING_DATE + 3 days (RJ)
+#   billed = READ_STATUS 7000STSRED Billed / 7001STSRED UAU - Billed
+# One row per subsidized account (accounts without a reading in the period included).
+# Live 2026-10-23 (period 10000000237 = September 2026): 166,833 accounts, ~52 s.
+# ---------------------------------------------------------------------------
+SUBSIDY_FARES = {10000000003: "E-D2", 10000000004: "W-D2", 10000000006: "E-D2-NM"}
+SUBSIDY_PERIOD_DEFAULT = 10000000237
+PLANNED_BILLING_DAYS = 3
+BILLED_READ_STATUSES = ("7000STSRED", "7001STSRED")
+
+
+def build_subsidy_planned_query(billing_period: int = SUBSIDY_PERIOD_DEFAULT) -> str:
+    bp = int(billing_period)
+    fares = ", ".join(str(f) for f in SUBSIDY_FARES)
+    fare_name = "CASE s2.ID_FARE " + " ".join(f"WHEN {f} THEN '{n}'" for f, n in SUBSIDY_FARES.items()) + " END"
+    billed = ", ".join(f"'{s}'" for s in BILLED_READ_STATUSES)
+    return f"""
+SET NOCOUNT ON;
+IF OBJECT_ID('tempdb..#sub') IS NOT NULL DROP TABLE #sub;
+IF OBJECT_ID('tempdb..#rd') IS NOT NULL DROP TABLE #rd;
+IF OBJECT_ID('tempdb..#st') IS NOT NULL DROP TABLE #st;
+
+-- subsidized (Bahraini First Account tariff) active services
+SELECT cs.ID_PAYMENT_FORM, cs.ID_CONTRACTED_SERVICE, cs.ID_SECTOR_SUPPLY, cs.ID_OFFERED_SERVICE, bs.ID_FARE
+INTO #sub
+FROM GCCOM_CONTRACTED_SERVICE cs WITH (NOLOCK)
+JOIN GCCOM_BILLING_SERVICE bs WITH (NOLOCK) ON bs.ID_CONTRACTED_SERVICE = cs.ID_CONTRACTED_SERVICE
+WHERE bs.ID_FARE IN ({fares}) AND cs.STATUS NOT IN ('ESTSC00001', 'ESTSC00004', 'ESTSC00005');
+
+-- reading status names (EN)
+SELECT s.COD_DEVELOP, COALESCE(d.TEXT, s.DESCRIPTION) AS TXT INTO #st
+FROM OUC_COMMON_ADMIN.GCGT_RE_READ_STATUS s
+LEFT JOIN GCTS_DICTIONARY d ON d.ID = s.DESCRIPTION_XI18N AND d.LOCALE = 'EN';
+
+-- readings of the period; planned billing date = reading date + {PLANNED_BILLING_DAYS} days (RJ)
+SELECT s.ID_PAYMENT_FORM, r.ID_READING, r.READ_STATUS, r.READING_TYPE,
+       CAST(r.READING_DATE AS date) AS READING_DATE,
+       DATEADD(day, {PLANNED_BILLING_DAYS}, CAST(r.READING_DATE AS date)) AS PLANNED_BILLING_DATE,
+       CASE s.ID_OFFERED_SERVICE WHEN 1 THEN 'Electricity' WHEN 19 THEN 'Water'
+            ELSE CAST(s.ID_OFFERED_SERVICE AS varchar(10)) END AS SVC
+INTO #rd
+FROM #sub s
+JOIN GCGT_RE_READING r WITH (NOLOCK) ON r.ID_SECTOR_SUPPLY = s.ID_SECTOR_SUPPLY AND r.ID_BILLING_PERIOD = {bp};
+
+SELECT pf.REFERENCE AS ACCOUNT, a.ID_PAYMENT_FORM,
+  (SELECT STRING_AGG(x.F, ', ') FROM (SELECT DISTINCT {fare_name} AS F FROM #sub s2
+     WHERE s2.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM) x) AS TARIFFS,
+  a.SUB_SERVICES,
+  ISNULL(rs.READINGS, 0) AS READINGS,
+  rs.FIRST_PLANNED_BILLING_DATE, rs.LAST_PLANNED_BILLING_DATE, rs.UNBILLED_PLANNED_DATE,
+  ISNULL(rs.BILLED, 0) AS BILLED_READINGS, ISNULL(rs.READINGS, 0) - ISNULL(rs.BILLED, 0) AS NOT_BILLED_READINGS,
+  (SELECT STRING_AGG(r2.SVC + ' ' + CONVERT(varchar(10), r2.READING_DATE, 23) + ' -> '
+          + CONVERT(varchar(10), r2.PLANNED_BILLING_DATE, 23) + ' ' + ISNULL(st.TXT, r2.READ_STATUS)
+          + ' (' + ISNULL(rt.DESCRIPTION, r2.READING_TYPE) + ')', '; ')
+     FROM #rd r2
+     LEFT JOIN #st st ON st.COD_DEVELOP = r2.READ_STATUS
+     LEFT JOIN OUC_COMMON_ADMIN.GCGT_RE_READING_TYPE rt ON rt.COD_DEVELOP = r2.READING_TYPE
+     WHERE r2.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM) AS READINGS_DETAIL,
+  w.ID_WALLET, w.BALANCE AS WALLET_AMOUNT, w.COD_BEHAVIOUR, bv.TXT AS BEHAVIOUR_DESC
+FROM (SELECT ID_PAYMENT_FORM, COUNT(*) AS SUB_SERVICES FROM #sub GROUP BY ID_PAYMENT_FORM) a
+LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM
+LEFT JOIN (SELECT ID_PAYMENT_FORM, COUNT(*) AS READINGS,
+                  MIN(PLANNED_BILLING_DATE) AS FIRST_PLANNED_BILLING_DATE,
+                  MAX(PLANNED_BILLING_DATE) AS LAST_PLANNED_BILLING_DATE,
+                  MIN(CASE WHEN READ_STATUS NOT IN ({billed}) THEN PLANNED_BILLING_DATE END) AS UNBILLED_PLANNED_DATE,
+                  SUM(CASE WHEN READ_STATUS IN ({billed}) THEN 1 ELSE 0 END) AS BILLED
+           FROM #rd GROUP BY ID_PAYMENT_FORM) rs ON rs.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM
+LEFT JOIN {WALLET_TABLE} w WITH (NOLOCK) ON w.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM
+LEFT JOIN (SELECT v.COD_DEVELOP, COALESCE(d.TEXT, v.NAME_TYPE) AS TXT
+           FROM OUC_COMMON_ADMIN.GCGT_ATTRIBUTE_VALUES v
+           LEFT JOIN GCTS_DICTIONARY d ON d.ID = v.NAME_TYPE_XI18N AND d.LOCALE = 'EN'
+           WHERE v.COD_MASTER_ATTRIBUTE = '{BEHAVIOUR_MASTER}') bv ON bv.COD_DEVELOP = w.COD_BEHAVIOUR
+ORDER BY rs.FIRST_PLANNED_BILLING_DATE, pf.REFERENCE;
+
+DROP TABLE #sub; DROP TABLE #rd; DROP TABLE #st;
+"""
+
+
 def build_request_json_query(id_seq: int) -> str:
     """RJ 2026-10-18: the request group in the table shows one JSON column - the raw
     REQUESTENTITY is fetched on demand per request (keeps the scan payload small)."""

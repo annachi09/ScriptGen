@@ -4823,6 +4823,27 @@ def fix_billing_campaign_detect(body: FixBillingCampaignRequest, user: str = Dep
             "elapsed_ms": res.elapsed_ms}
 
 
+# RJ 2026-10-23: tab 2 "Subsidized - planned billing" (fix_billing_campaign.build_subsidy_planned_query)
+class SubsidyPlannedRequest(BaseModel):
+    billing_period: int = fix_billing_campaign.SUBSIDY_PERIOD_DEFAULT
+
+
+@app.post("/api/fix-billing-campaign/subsidy-planned")
+def fix_billing_campaign_subsidy_planned(body: SubsidyPlannedRequest, user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, fix_billing_campaign.build_subsidy_planned_query(body.billing_period), timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    return {"rows": rows, "count": len(rows), "billing_period": body.billing_period,
+            "planned_days": fix_billing_campaign.PLANNED_BILLING_DAYS,
+            "tariffs": fix_billing_campaign.SUBSIDY_FARES, "elapsed_ms": res.elapsed_ms}
+
+
 # RJ 2026-10-18: raw request JSON for one message (table "JSON" column, on demand)
 @app.get("/api/fix-billing-campaign/request/{id_seq}")
 def fix_billing_campaign_request(id_seq: int, user: str = Depends(require_login)):

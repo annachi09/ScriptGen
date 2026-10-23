@@ -152,7 +152,8 @@ const SG_ENDPOINT_OWNER = [
   ["/api/temp-dashboard/subsidy-missing-bill", "tempdashboard", "subsidy"],
   ["/api/reading-discrepancies/pending-validation", "readingdiscrepancies", "pending"],
   ["/api/reading-discrepancies/", "readingdiscrepancies", "unbilled"],
-  ["/api/fix-billing-campaign/", "fixbillingcampaign", ""],
+  ["/api/fix-billing-campaign/subsidy-planned", "fixbillingcampaign", "planned"],
+  ["/api/fix-billing-campaign/", "fixbillingcampaign", "campaign"],
   ["/api/pending-sr/", "pendingsr", ""],
   ["/api/rebilling-monitor/open", "rebillingmonitor", "open"],
   ["/api/rebilling-monitor/detect", "rebillingmonitor", "tagged"],
@@ -10048,7 +10049,7 @@ const HX_REFRESH = {
   pendingsr: () => ({ btn: "#psr-detect-btn" }),
   tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", subsidy: "#tsub-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn", rccslist: "#trl-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
-  fixbillingcampaign: () => ({ btn: "#fbc-detect-btn" }),
+  fixbillingcampaign: () => ({ btn: hxActiveSub("data-fbc-sub") === "planned" ? "#fsp-detect-btn" : "#fbc-detect-btn" }),
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
@@ -12362,6 +12363,170 @@ $("#fbc-clear-btn").addEventListener("click", () => {
   fbcRender();
 });
 $("#fbc-scope").addEventListener("change", () => $("#fbc-detect-btn").click());
+
+// ---- RJ 2026-10-23: FIX BILLING tab 2 "Subsidized - planned billing" -------------------------
+// "for all the subsidized account, i want to see the planned billing date on their readings for
+// September 2026, make KPI" + wallet (has / amount / behaviour) + "use reading_date +3".
+// One row per subsidized account (/api/fix-billing-campaign/subsidy-planned). KPI cards, day bars,
+// behaviour and tariff cards all filter the table; everything is computed on all rows.
+let fbcActiveSub = "campaign";
+$$(".da-subnav-btn[data-fbc-sub]").forEach((btn) => btn.addEventListener("click", () => {
+  const sub = btn.dataset.fbcSub;
+  fbcActiveSub = sub;
+  $$(".da-subnav-btn[data-fbc-sub]").forEach((b) => b.classList.toggle("is-active", b === btn));
+  $$(".da-subpage[data-fbc-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.fbcSub === sub));
+  if (sub === "planned" && !fspLoaded) $("#fsp-detect-btn").click();
+}));
+let fspRows = [], fspLoaded = false, fspF = { kpi: null, day: null, beh: null, tariff: null }, fspTerms = null;
+const fspToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const fspNum = (v) => { const n = parseFloat(String(v ?? "").replace(/,/g, "")); return Number.isFinite(n) ? n : 0; };
+const fspMoney = (v) => v.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+const fspDay = (r) => (r.first_planned_billing_date ? String(r.first_planned_billing_date).slice(0, 10) : "No reading");
+const fspBeh = (r) => (r.id_wallet ? (r.behaviour_desc || r.cod_behaviour || "?") : "No wallet");
+const fspState = (r) => (!Number(r.readings) ? "No reading" : Number(r.not_billed_readings) ? "Not billed" : "Billed");
+const FSP_KPI = {
+  reading: (r) => Number(r.readings) > 0,
+  noreading: (r) => !Number(r.readings),
+  billed: (r) => Number(r.readings) > 0 && !Number(r.not_billed_readings),
+  pending: (r) => Number(r.not_billed_readings) > 0,
+  overdue: (r) => Number(r.not_billed_readings) > 0 && r.unbilled_planned_date && String(r.unbilled_planned_date).slice(0, 10) < fspToday(),
+  upcoming: (r) => Number(r.not_billed_readings) > 0 && r.unbilled_planned_date && String(r.unbilled_planned_date).slice(0, 10) >= fspToday(),
+  wallet: (r) => !!r.id_wallet,
+  nowallet: (r) => !r.id_wallet,
+};
+function fspMatch(r, skip) {
+  const sk = (k) => skip === k || (Array.isArray(skip) && skip.includes(k));
+  if (!sk("kpi") && fspF.kpi && !FSP_KPI[fspF.kpi](r)) return false;
+  if (!sk("day") && fspF.day && fspDay(r) !== fspF.day) return false;
+  if (!sk("beh") && fspF.beh && fspBeh(r) !== fspF.beh) return false;
+  if (!sk("tariff") && fspF.tariff && !String(r.tariffs || "").split(", ").includes(fspF.tariff)) return false;
+  if (fspTerms) {
+    if (fspTerms.size > 1) { if (!fspTerms.has(String(r.account)) && !fspTerms.has(String(r.id_payment_form))) return false; }
+    else { const q = [...fspTerms][0]; if (!String(r.account).includes(q) && !String(r.id_payment_form).includes(q)) return false; }
+  }
+  return true;
+}
+const FSP_COLS = [
+  ["account", "Account", "mono"], ["id_payment_form", "Payment form", "mono"], ["tariffs", "Tariff"], ["state", "Sept state", "state"],
+  ["first_planned_billing_date", "Planned billing (first)", "date"], ["last_planned_billing_date", "Planned billing (last)", "date"],
+  ["unbilled_planned_date", "Planned - not billed", "date"], ["readings", "Readings", "num"], ["billed_readings", "Billed", "num"],
+  ["not_billed_readings", "Not billed", "num"], ["id_wallet", "ID_WALLET", "mono"], ["wallet_amount", "Wallet amount", "money"],
+  ["behaviour_desc", "Behaviour", "beh"], ["readings_detail", "Readings (reading date -> planned billing date, status)", "detail"],
+];
+function fspRender() {
+  const today = fspToday();
+  const base = fspRows.filter((r) => fspMatch(r, "kpi"));
+  const sumAmt = (rows) => rows.reduce((s, r) => s + fspNum(r.wallet_amount), 0);
+  const cnt = (k) => base.filter(FSP_KPI[k]).length;
+  const tot = Math.max(1, base.length);
+  const cards = [
+    [null, "total", "🏠", "Subsidized accounts", base.length, "E-D2 / W-D2 / E-D2-NM active"],
+    ["reading", "services", "📖", "With a reading in the period", cnt("reading"), `${(100 * cnt("reading") / tot).toFixed(1)}%`],
+    ["noreading", "case0", "∅", "No reading in the period", cnt("noreading"), `${(100 * cnt("noreading") / tot).toFixed(1)}%`],
+    ["billed", "complete", "✅", "All readings billed", cnt("billed"), `${(100 * cnt("billed") / tot).toFixed(1)}%`],
+    ["pending", "pending", "⏳", "Has a not-billed reading", cnt("pending"), `${(100 * cnt("pending") / tot).toFixed(1)}%`],
+    ["overdue", "missing", "🚨", "Planned date passed, not billed", cnt("overdue"), `planned before ${today}`],
+    ["upcoming", "pending", "📅", "Not billed, planned today or later", cnt("upcoming"), ""],
+    ["wallet", "complete", "👛", "With a subsidy wallet", cnt("wallet"), `amount ${fspMoney(sumAmt(base.filter(FSP_KPI.wallet)))}`],
+    ["nowallet", "case0", "🚫", "No subsidy wallet", cnt("nowallet"), ""],
+  ];
+  $("#fsp-kpi-row").innerHTML = cards.map(([f, kpi, icon, label, v, sub]) =>
+    `<div class="rbo-kpi${(fspF.kpi || null) === f && f ? " is-active" : ""}" data-kpi="${kpi}" data-fsp-kpi="${f || ""}" title="${escapeHtml(label)} - click to filter, click again to clear">` +
+    `<span class="rbo-kpi-label"><span>${icon}</span>${escapeHtml(label)}</span>` +
+    `<span class="rbo-kpi-value">${v.toLocaleString()}</span><span class="rbo-sub">${escapeHtml(sub)}</span></div>`).join("");
+  // day bars (first planned billing date of the account)
+  const dRows = fspRows.filter((r) => fspMatch(r, "day"));
+  const dMap = new Map(); dRows.forEach((r) => { const k = fspDay(r); const o = dMap.get(k) || { n: 0, nb: 0 }; o.n++; if (Number(r.not_billed_readings)) o.nb++; dMap.set(k, o); });
+  const days = [...dMap.keys()].sort((a, b) => (a === "No reading") - (b === "No reading") || a.localeCompare(b));
+  const max = days.reduce((m, k) => Math.max(m, dMap.get(k).n), 1);
+  $("#fsp-days").innerHTML = days.map((k) => {
+    const o = dMap.get(k); const past = k !== "No reading" && k < today;
+    return `<button type="button" class="fsp-day${fspF.day === k ? " is-active" : ""}" data-fsp-day="${escapeHtml(k)}" title="${escapeHtml(k)}: ${o.n.toLocaleString()} account(s), ${o.nb.toLocaleString()} with a not-billed reading - click to filter">` +
+      `<span class="fsp-day-bar"><span style="height:${Math.max(2, 100 * o.n / max)}%"></span><span class="fsp-day-nb" style="height:${100 * o.nb / max}%"></span></span>` +
+      `<span class="fsp-day-n">${o.n.toLocaleString()}</span><span class="fsp-day-lbl${past ? "" : " is-future"}">${k === "No reading" ? "none" : escapeHtml(k.slice(5))}</span></button>`;
+  }).join("") + `<div class="hint-text" style="width:100%;font-size:11px;">Bar = accounts whose first planned billing date is that day; red part = accounts with a not-billed reading.</div>`;
+  // wallet behaviour cards + tariff
+  const bRows = fspRows.filter((r) => fspMatch(r, "beh"));
+  const bMap = new Map(); bRows.forEach((r) => { const k = fspBeh(r); const o = bMap.get(k) || { n: 0, a: 0 }; o.n++; o.a += fspNum(r.wallet_amount); bMap.set(k, o); });
+  const bTot = Math.max(1, bRows.length);
+  const bKpi = (k) => (/Freeze/.test(k) ? "missing" : /Oustanding|Outstanding/.test(k) ? "pending" : /No wallet/.test(k) ? "case0" : "complete");
+  $("#fsp-wallet-sub").textContent = `${bRows.filter((r) => r.id_wallet).length.toLocaleString()} wallet(s) · ${fspMoney(sumAmt(bRows))}`;
+  $("#fsp-beh").innerHTML = `<div class="fbc-beh-cards">${[...bMap.entries()].sort((a, b) => b[1].n - a[1].n).map(([k, o]) =>
+    `<button type="button" class="fbc-beh-card${fspF.beh === k ? " is-active" : ""}" data-kpi="${bKpi(k)}" data-fsp-beh="${escapeHtml(k)}">` +
+    `<span class="fbc-beh-name">${escapeHtml(k)}</span><span class="fbc-beh-pct">${(100 * o.n / bTot).toFixed(1)}%</span>` +
+    `<span class="fbc-beh-sub">${o.n.toLocaleString()} account(s)${o.a ? ` · amount ${fspMoney(o.a)}` : ""}</span></button>`).join("")}</div>`;
+  const tRows = fspRows.filter((r) => fspMatch(r, "tariff"));
+  const tMap = new Map(); tRows.forEach((r) => String(r.tariffs || "").split(", ").filter(Boolean).forEach((t) => tMap.set(t, (tMap.get(t) || 0) + 1)));
+  $("#fsp-tariff").innerHTML = `<div class="fbc-beh-cards">${[...tMap.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) =>
+    `<button type="button" class="fbc-beh-card${fspF.tariff === k ? " is-active" : ""}" data-kpi="services" data-fsp-tariff="${escapeHtml(k)}">` +
+    `<span class="fbc-beh-name">${escapeHtml(k)}</span><span class="fbc-beh-pct">${n.toLocaleString()}</span><span class="fbc-beh-sub">accounts with this tariff</span></button>`).join("")}</div>`;
+  // table (first 2000 rows drawn; KPIs / export use all)
+  $("#fsp-table thead tr").innerHTML = FSP_COLS.map(([, l]) => `<th>${escapeHtml(l)}</th>`).join("");
+  const vis = fspRows.filter((r) => fspMatch(r));
+  $("#fsp-table tbody").innerHTML = vis.slice(0, 2000).map((r) => {
+    const st = fspState(r); const over = FSP_KPI.overdue(r);
+    return `<tr${over ? ' class="kpi-tint" data-kpi="missing"' : st === "Not billed" ? ' class="kpi-tint" data-kpi="pending"' : ""}>` + FSP_COLS.map(([k, , kind]) => {
+      const raw = k === "state" ? st : r[k];
+      let v = escapeHtml(String(raw ?? ""));
+      if (kind === "date") v = escapeHtml(String(raw ?? "").slice(0, 10));
+      else if (kind === "money") v = raw === "" || raw == null ? "" : fspMoney(fspNum(raw));
+      else if (kind === "state") v = `<span class="rbo-pill" data-kpi="${st === "Billed" ? "complete" : st === "Not billed" ? (over ? "missing" : "pending") : "case0"}">${escapeHtml(st)}</span>`;
+      else if (kind === "beh") v = r.id_wallet ? `${escapeHtml(r.behaviour_desc || "")} <small class="hint-text">${escapeHtml(r.cod_behaviour || "")}</small>` : `<span class="hint-text">no wallet</span>`;
+      else if (kind === "detail") v = `<span style="font-size:11px;white-space:normal;">${v}</span>`;
+      return `<td${kind === "num" || kind === "money" ? ' class="hx-num"' : kind === "mono" ? ' class="hx-mono"' : ""}>${v}</td>`;
+    }).join("") + "</tr>";
+  }).join("") || `<tr><td colspan="${FSP_COLS.length}" class="hint-text">No accounts match.</td></tr>`;
+  $("#fsp-filtered-count").textContent = `${vis.length.toLocaleString()} of ${fspRows.length.toLocaleString()} accounts${vis.length > 2000 ? " (table shows the first 2,000 - export has all)" : ""} · wallet amount ${fspMoney(sumAmt(vis))}`;
+  const act = [fspF.kpi ? `KPI: ${fspF.kpi}` : "", fspF.day ? `Planned: ${fspF.day}` : "", fspF.beh ? `Wallet: ${fspF.beh}` : "", fspF.tariff ? `Tariff: ${fspF.tariff}` : ""].filter(Boolean);
+  $("#fsp-active-filters").textContent = act.join(" · ");
+  $("#fsp-copy-btn").disabled = $("#fsp-export-btn").disabled = vis.length === 0;
+}
+$("#fsp-dash").addEventListener("click", (e) => {
+  const k = e.target.closest("[data-fsp-kpi]");
+  if (k) { const f = k.dataset.fspKpi || null; fspF.kpi = !f || fspF.kpi === f ? null : f; fspRender(); return; }
+  for (const [attr, key] of [["data-fsp-day", "day"], ["data-fsp-beh", "beh"], ["data-fsp-tariff", "tariff"]]) {
+    const t = e.target.closest(`[${attr}]`);
+    if (t) { const v = t.getAttribute(attr); fspF[key] = fspF[key] === v ? null : v; fspRender(); return; }
+  }
+});
+let fspSearchTimer = null;
+$("#fsp-filter-search").addEventListener("input", () => {
+  clearTimeout(fspSearchTimer);
+  fspSearchTimer = setTimeout(() => {
+    const toks = $("#fsp-filter-search").value.split(/[\s,;]+/).map((t) => t.trim()).filter(Boolean);
+    fspTerms = toks.length ? new Set(toks) : null; fspRender();
+  }, 250);
+});
+$("#fsp-clear-btn").addEventListener("click", () => { fspF = { kpi: null, day: null, beh: null, tariff: null }; fspTerms = null; $("#fsp-filter-search").value = ""; fspRender(); });
+$("#fsp-detect-btn").addEventListener("click", async () => {
+  const btn = $("#fsp-detect-btn");
+  btn.disabled = true; fspLoaded = true;
+  $("#fsp-summary").textContent = "Loading… (about a minute)";
+  try {
+    const data = await api("/api/fix-billing-campaign/subsidy-planned", { method: "POST", body: { billing_period: Number($("#fsp-bp").value) || 10000000237 } });
+    fspRows = data.rows || [];
+    $("#fsp-dash").hidden = false; $("#fsp-filter-row").hidden = false;
+    $("#fsp-summary").textContent = `${fspRows.length.toLocaleString()} subsidized account(s) - period ${data.billing_period}, planned billing date = reading date + ${data.planned_days} days - loaded in ${(data.elapsed_ms / 1000).toFixed(1)}s.`;
+    fspRender();
+  } catch (err) {
+    $("#fsp-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#fsp-copy-btn").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(fspRows.filter((r) => fspMatch(r)).map((r) => r.account).join("\n")); showToast("Accounts copied."); } catch { showToast("Copy failed.", true); }
+});
+$("#fsp-export-btn").addEventListener("click", () => {
+  const q = (v) => { v = String(v ?? ""); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
+  const keys = FSP_COLS.map(([k]) => k).concat(["cod_behaviour", "sub_services"]);
+  const csv = [keys.map((k) => k.toUpperCase()).join(",")].concat(fspRows.filter((r) => fspMatch(r)).map((r) => keys.map((k) => q(k === "state" ? fspState(r) : r[k])).join(","))).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
+  a.download = `subsidized_planned_billing_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
 $("#fbc-detect-btn").addEventListener("click", async () => {
   const btn = $("#fbc-detect-btn");
   btn.disabled = true;

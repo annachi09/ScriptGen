@@ -3059,6 +3059,27 @@ count was compared live with the number its page shows after Scan:
   cards) execute in worker threads, which did not inherit the capture context. Workers now run
   in `contextvars.copy_context()`, so those statements are captured too.
 
+### FIX BILLING CAMPAIGN tab 2: Subsidized - planned billing (2026-10-23)
+
+RJ: "for all the subsidized account, i want to see the planned billing date on their readings for
+September 2026, make KPI" + "tell me if it has subsidy wallet and how much and the behaviour in
+description" + "use GCGT_RE_READING.reading_date +3".
+- FIX BILLING CAMPAIGN 2026 now has tabs: **Campaign requests** (existing) and **Subsidized - planned
+  billing**. `POST /api/fix-billing-campaign/subsidy-planned` ->
+  `fix_billing_campaign.build_subsidy_planned_query(billing_period)` (default 10000000237 = Sept 2026).
+- Subsidized = active service on a Bahraini First Account tariff (E-D2 10000000003, W-D2 10000000004,
+  E-D2-NM 10000000006 - same rule as the Temp Dashboard subsidy tab). Readings = GCGT_RE_READING of
+  those services' supplies in the period. **Planned billing date = READING_DATE + 3 days.**
+  Billed = 7000STSRED / 7001STSRED.
+- One row per account: tariffs, readings, first / last planned billing date, earliest planned date of a
+  not-billed reading, billed / not billed counts, every reading (reading date -> planned date, status,
+  type), subsidy wallet id / amount / behaviour description.
+- KPIs (click = filter): accounts, with / without reading, all billed, has not-billed reading, planned
+  date passed but not billed, not billed planned today or later, with / without wallet (+ amount).
+  Day bars (first planned date per account, red = not billed), wallet-behaviour and tariff cards.
+- Live 2026-10-23: 166,833 accounts, 160,003 fully billed, 6,824 with a not-billed reading (all past
+  their planned date), 21,974 with a wallet (2,535,511.619). ~52 s. Restart needed (new route).
+
 ### Temp Dashboard tab 6: RCCS list check (2026-10-22)
 
 RJ: "extract details for me for the following excel ... use rccs and account, give me the
