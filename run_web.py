@@ -36,9 +36,14 @@ Run with:  python run_web.py
 """
 from __future__ import annotations
 
+import json
+import os
 import socket
+import subprocess
+import sys
 import threading
 import time
+import urllib.request
 import webbrowser
 
 BIND_HOST = "0.0.0.0"   # listen on every interface - allows LAN teammates in
@@ -77,6 +82,39 @@ def _lan_ip() -> str | None:
         return None
 
 
+def _running_scriptgen_pid() -> int | None:
+    """PID of the ScriptGen server already on PORT, read from its own /api/server-info
+    (so we only ever stop ScriptGen itself, never some other program on that port)."""
+    try:
+        with urllib.request.urlopen(f"http://{CHECK_HOST}:{PORT}/api/server-info", timeout=3) as resp:
+            pid = json.loads(resp.read().decode("utf-8")).get("pid")
+            return int(pid) if pid else None
+    except Exception:
+        return None
+
+
+def _stop_old_server() -> bool:
+    """RJ 2026-10-23: "why we cannot auto close the pid now?" - restart automatically:
+    stop the previous ScriptGen server (old code) and wait for the port to free up.
+    Returns True when the port is free afterwards."""
+    pid = _running_scriptgen_pid()
+    if not pid or pid == os.getpid():
+        return False
+    print(f"An older ScriptGen server (PID {pid}) is running on port {PORT} - stopping it to load the latest code...")
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, check=False)
+        else:
+            os.kill(pid, 9)
+    except Exception as exc:
+        print(f"Could not stop PID {pid}: {exc}")
+        return False
+    deadline = time.time() + 10
+    while time.time() < deadline and _port_is_open(CHECK_HOST, PORT):
+        time.sleep(0.2)
+    return not _port_is_open(CHECK_HOST, PORT)
+
+
 def main() -> None:
     import uvicorn
     from web.server import app
@@ -84,6 +122,12 @@ def main() -> None:
     url = f"http://{CHECK_HOST}:{PORT}/"
     lan_ip = _lan_ip()
     lan_url = f"http://{lan_ip}:{PORT}/" if lan_ip else None
+
+    # RJ 2026-10-23: default = restart (stop the old ScriptGen, start with the new code).
+    # `python run_web.py --attach` keeps the old behaviour (just open the running one).
+    if _port_is_open(CHECK_HOST, PORT) and "--attach" not in sys.argv:
+        if _stop_old_server():
+            print("Old server stopped.")
 
     if _port_is_open(CHECK_HOST, PORT):
         print(f"ScriptGen already appears to be running at {url} - opening it in your browser.")

@@ -1480,7 +1480,7 @@ _DIGEST_LABELS = {
     "wrongbill_case3": "Wrong Bill Case 3", "wrongbill_case4": "Wrong Bill Case 4",
     "rebillingmonitor": "Open rebilling activities",
     "readingdiscrepancies": "Readings pending validation > 3 days",
-    "fixbillingcampaign": "FIX BILLING CAMPAIGN 2026 request accounts",
+    "fixbillingcampaign": "FIX BILLING CAMPAIGN 2026 requests",   # RJ 2026-10-25: one row per MESSAGES_IN request
     "pendingsr": "Pending Service Requests (JIRA)",
 }
 alerts.register_digest_counters({k: (_DIGEST_LABELS.get(k, k), fn) for k, fn in _OVERVIEW_COUNTERS.items()
@@ -4638,6 +4638,37 @@ def temp_dashboard_rccs_list(body: TempDashboardRccsListRequest, user: str = Dep
     return {"rows": rows, "count": len(rows), "max": temp_dashboard.RCCS_LIST_MAX, "elapsed_ms": res.elapsed_ms}
 
 
+# RJ 2026-10-24: Temp Dashboard tab 7 "Sanitary: last bill date > billing date"
+@app.post("/api/temp-dashboard/sanitary-last-bill-date")
+def temp_dashboard_sanitary_last_bill_date(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, temp_dashboard.build_sanitary_last_bill_date_query(), timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    return {"rows": rows, "count": len(rows), "elapsed_ms": res.elapsed_ms}
+
+
+# RJ 2026-10-25: Temp Dashboard tab "Duplicate RCCS" - campaign RCCS references that exist as
+# 2+ complaints (campaign vs non-campaign), ~16s live.
+@app.post("/api/temp-dashboard/duplicate-rccs")
+def temp_dashboard_duplicate_rccs(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, temp_dashboard.build_duplicate_rccs_query(), timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+    return {"rows": rows, "count": len(rows), "elapsed_ms": res.elapsed_ms}
+
+
 # RJ 2026-10-12: Temp Dashboard tab 3 "Subsidized, September not generated"
 # (temp_dashboard.build_subsidy_missing_bill_query) - ~90s live, 5-min timeout.
 @app.post("/api/temp-dashboard/subsidy-missing-bill")
@@ -5380,6 +5411,24 @@ def double_itb_detect(user: str = Depends(require_login)):
         "anomalous_item_count": len({r.get("anom_id_item_to_bill") for r in rows}),
         "needs_rebilling_count": sum(1 for r in rows if r.get("needs_rebilling") == "1"),
     }
+
+
+# RJ 2026-10-24: DOUBLE ITB tab 2 "Sanitary only" (water is ok, the Sanitary duplicate remains)
+@app.post("/api/double-itb/sanitary-only")
+def double_itb_sanitary_only(user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(conn, double_itb.build_sanitary_only_query(), timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(result.columns, r)} for r in result.rows]
+    return {"rows": rows, "count": len(rows),
+            "account_count": len({r.get("account") for r in rows}),
+            "needs_rebilling_count": sum(1 for r in rows if r.get("needs_rebilling") == "1"),
+            "elapsed_ms": result.elapsed_ms}
 
 
 # ---------------------------------------------------------------------

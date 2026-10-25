@@ -149,7 +149,9 @@ const SG_ENDPOINT_OWNER = [
   ["/api/temp-dashboard/water-sanitary-status", "tempdashboard", "wsstatus"],
   ["/api/temp-dashboard/ddi-complaints", "tempdashboard", "ddi"],
   ["/api/temp-dashboard/rccs-list", "tempdashboard", "rccslist"],
-  ["/api/temp-dashboard/subsidy-missing-bill", "tempdashboard", "subsidy"],
+  ["/api/temp-dashboard/sanitary-last-bill-date", "tempdashboard", "sanlbd"],
+  ["/api/temp-dashboard/duplicate-rccs", "tempdashboard", "duprccs"],
+  ["/api/temp-dashboard/subsidy-missing-bill", "fixbillingcampaign", "subsidy"],   // RJ 2026-10-23: tab moved to FIX BILLING
   ["/api/reading-discrepancies/pending-validation", "readingdiscrepancies", "pending"],
   ["/api/reading-discrepancies/", "readingdiscrepancies", "unbilled"],
   ["/api/fix-billing-campaign/subsidy-planned", "fixbillingcampaign", "planned"],
@@ -157,7 +159,8 @@ const SG_ENDPOINT_OWNER = [
   ["/api/pending-sr/", "pendingsr", ""],
   ["/api/rebilling-monitor/open", "rebillingmonitor", "open"],
   ["/api/rebilling-monitor/detect", "rebillingmonitor", "tagged"],
-  ["/api/double-itb/", "doubleitb", ""],
+  ["/api/double-itb/sanitary-only", "doubleitb", "sanonly"],   // RJ 2026-10-24
+  ["/api/double-itb/", "doubleitb", "main"],
   ["/api/disconnection-tnb/", "disconnectiontnb", ""],
   ["/api/bulk-checker/", "bulkchecker", ""],
   ["/api/anomaly-stats/", "anomalystats", ""],
@@ -10033,7 +10036,7 @@ const HX_REFRESH = {
     : { btn: "#rv-supply-search-btn" }),
   tnbcycledisc: () => ({ btn: "#tcd-detect-btn" }),
   wrongstuckhierarchy: () => ({ btn: hxActiveSub("data-wsh-sub") === "sanitary" ? "#wshs-detect-btn" : "#wsh-detect-btn" }),
-  doubleitb: () => ({ btn: "#ditb-detect-btn" }),
+  doubleitb: () => ({ btn: hxActiveSub("data-ditb-sub") === "sanonly" ? "#dsan-detect-btn" : "#ditb-detect-btn" }),
   // Wrong Bill: one entry per case tab (add more as cases are added).
   wrongbill: () => ({ btn: ({ case1: "#usan-detect-btn", case2: "#wbpd-detect-btn", case3: "#wbsz-detect-btn", case4: "#wbfr-detect-btn" })[hxActiveSub("data-wb-sub") || "case1"] || "#usan-detect-btn" }),
   wrongbilledconsumption: () => ({ btn: "#wbc-detect-btn" }),
@@ -10047,9 +10050,9 @@ const HX_REFRESH = {
   bulkchecker: () => ({ fn: () => bcRunSearch({ refresh: true }) }),
   rebillingmonitor: () => ({ btn: hxActiveSub("data-rbm-sub") === "tagged" ? "#rbm-detect-btn" : "#rbo-detect-btn" }),
   pendingsr: () => ({ btn: "#psr-detect-btn" }),
-  tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", subsidy: "#tsub-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn", rccslist: "#trl-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
+  tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn", rccslist: "#trl-detect-btn", sanlbd: "#tslb-detect-btn", duprccs: "#tdr-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
-  fixbillingcampaign: () => ({ btn: hxActiveSub("data-fbc-sub") === "planned" ? "#fsp-detect-btn" : "#fbc-detect-btn" }),
+  fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
@@ -10367,11 +10370,216 @@ $$(".da-subnav-btn[data-tmpd-sub]").forEach((btn) => {
     $$(".da-subnav-btn[data-tmpd-sub]").forEach((b) => b.classList.toggle("is-active", b === btn));
     $$(".da-subpage[data-tmpd-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.tmpdSub === sub));
     if (sub === "sanitary" && !tsanLoaded) $("#tsan-detect-btn").click();
-    if (sub === "subsidy" && !tsubLoaded) $("#tsub-detect-btn").click();
     if (sub === "wsstatus" && !twsLoaded) $("#tws-detect-btn").click();
     if (sub === "ddi" && !tddiLoaded) $("#tddi-detect-btn").click();
     if (sub === "rccslist" && !trlLoaded) trlLoadDefault().then(() => $("#trl-detect-btn").click());
+    if (sub === "sanlbd" && !tslbLoaded) $("#tslb-detect-btn").click();
+    if (sub === "duprccs" && !tdrLoaded) $("#tdr-detect-btn").click();
   });
+});
+
+// ---- RJ 2026-10-25: Temp Dashboard tab "Duplicate RCCS" (campaign vs non-campaign) ----------
+let tdrRows = [], tdrLoaded = false, tdrF = { kpi: null, kind: null, status: null };
+const TDR_ROLE_KPI = { "CAMPAIGN": "complete", "CAMPAIGN (older request)": "case0", "NON-CAMPAIGN": "missing" };
+// pair kind per RCCS reference = which roles share it
+function tdrKinds(rows) {
+  const by = new Map();
+  rows.forEach((r) => { const s = by.get(r.rccs) || new Set(); s.add(r.rccs_role); by.set(r.rccs, s); });
+  rows.forEach((r) => {
+    const s = by.get(r.rccs);
+    r._kind = s.has("NON-CAMPAIGN") ? "Campaign vs Non-campaign"
+      : s.has("CAMPAIGN (older request)") ? "Campaign vs older campaign request"
+      : "Campaign on 2+ accounts";
+  });
+}
+const TDR_KPI = { main: (r) => r.rccs_role !== "NON-CAMPAIGN", dup: (r) => r.rccs_role === "NON-CAMPAIGN" };
+function tdrMatch(r, skip) {
+  if (skip !== "kpi" && tdrF.kpi && !TDR_KPI[tdrF.kpi](r)) return false;
+  if (skip !== "kind" && tdrF.kind && r._kind !== tdrF.kind) return false;
+  if (skip !== "status" && tdrF.status && (r.rccs_status_en || r.rccs_status) !== tdrF.status) return false;
+  const q = ($("#tdr-filter-search").value || "").trim().toLowerCase();
+  if (q && ![r.rccs, r.account, r.id_complaint, r.account_latest_campaign_rccs].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+  return true;
+}
+const TDR_COLS = [["rccs", "RCCS", "mono"], ["n_complaints", "# complaints", "num"], ["rccs_role", "Role", "role"], ["account", "Account", "mono"],
+  ["id_complaint", "ID_COMPLAINT", "mono"], ["rccs_date", "RCCS created", "dt"], ["rccs_updated", "RCCS updated", "dt"], ["req_date", "Campaign request date", "dt"],
+  ["rccs_status_en", "RCCS status", "status"], ["rccs_type", "RCCS type"], ["cod_origin", "Origin"], ["update_user", "Updated by"],
+  ["account_latest_campaign_rccs", "Account's latest campaign RCCS", "mono"], ["account_latest_req_date", "Latest request date", "dt"]];
+function tdrRender() {
+  const base = tdrRows.filter((r) => tdrMatch(r, "kpi"));
+  const refs = (rows) => new Set(rows.map((r) => r.rccs)).size;
+  // RJ 2026-10-25 (later): "the main rccs is the campaign, but the duplicating should be non campaign"
+  const cards = [
+    [null, "total", "🔁", "Duplicate RCCS", refs(base), `${base.length.toLocaleString()} complaint(s) · ${new Set(base.map((r) => r.account)).size.toLocaleString()} account(s)`],
+    ["main", "complete", "⭐", "Main (campaign) complaints", base.filter(TDR_KPI.main).length, "RCCS from the campaign request"],
+    ["dup", "missing", "⚠", "Duplicates (non-campaign)", base.filter(TDR_KPI.dup).length, "same RCCS, not from the campaign"],
+  ];
+  $("#tdr-kpi-row").innerHTML = cards.map(([f, kpi, icon, label, v, sub]) =>
+    `<div class="rbo-kpi${f && tdrF.kpi === f ? " is-active" : ""}" data-kpi="${kpi}" data-tdr-kpi="${f || ""}" title="${escapeHtml(label)} - click to filter, click again to clear">` +
+    `<span class="rbo-kpi-label"><span>${icon}</span>${escapeHtml(label)}</span>` +
+    `<span class="rbo-kpi-value">${v.toLocaleString()}</span><span class="rbo-sub">${escapeHtml(sub)}</span></div>`).join("");
+  const cardsOf = (rows, keyFn, attr, active, kpiFn) => {
+    const m = new Map(); rows.forEach((r) => { const k = keyFn(r); const o = m.get(k) || { n: 0, refs: new Set() }; o.n++; o.refs.add(r.rccs); m.set(k, o); });
+    return `<div class="fbc-beh-cards">${[...m.entries()].sort((a, b) => b[1].n - a[1].n).map(([k, o]) =>
+      `<button type="button" class="fbc-beh-card${active === k ? " is-active" : ""}" data-kpi="${kpiFn(k)}" ${attr}="${escapeHtml(k)}">` +
+      `<span class="fbc-beh-name">${escapeHtml(k)}</span><span class="fbc-beh-pct">${o.refs.size.toLocaleString()}</span>` +
+      `<span class="fbc-beh-sub">RCCS · ${o.n.toLocaleString()} complaint(s)</span></button>`).join("") || "<span class='hint-text'>-</span>"}</div>`;
+  };
+  $("#tdr-kind").innerHTML = cardsOf(tdrRows.filter((r) => tdrMatch(r, "kind")), (r) => r._kind, "data-tdr-kind", tdrF.kind,
+    (k) => (/Non-campaign/.test(k) ? "missing" : /older/.test(k) ? "case0" : "services"));
+  $("#tdr-status").innerHTML = cardsOf(tdrRows.filter((r) => tdrMatch(r, "status")), (r) => r.rccs_status_en || r.rccs_status || "?", "data-tdr-status", tdrF.status,
+    (k) => (/cancel/i.test(k) ? "missing" : /solved|resolved|approved/i.test(k) ? "complete" : "case0"));
+  $("#tdr-table thead tr").innerHTML = TDR_COLS.map(([, l]) => `<th>${escapeHtml(l)}</th>`).join("");
+  const vis = tdrRows.filter((r) => tdrMatch(r));
+  let prev = null, band = 0;
+  $("#tdr-table tbody").innerHTML = vis.map((r) => {
+    if (r.rccs !== prev) { band ^= 1; prev = r.rccs; }   // alternate shading per RCCS group
+    return `<tr${r.rccs_role === "NON-CAMPAIGN" ? ' class="kpi-tint" data-kpi="missing"' : ""}${band ? ' style="background:var(--surface-2, rgba(127,127,127,.06))"' : ""}>` + TDR_COLS.map(([k, , kind]) => {
+      const v = r[k] ?? "";
+      if (kind === "dt") return `<td>${escapeHtml(String(v).slice(0, 19))}</td>`;
+      if (kind === "role") return `<td><span class="rbo-pill" data-kpi="${TDR_ROLE_KPI[v] || "services"}">${escapeHtml(v === "NON-CAMPAIGN" ? "DUPLICATE (non-campaign)" : `MAIN (${v.toLowerCase()})`)}</span></td>`;
+      if (kind === "status") return `<td>${escapeHtml(String(v || r.rccs_status || ""))} <small class="hint-text">${escapeHtml(r.rccs_status || "")}</small></td>`;
+      return `<td${kind === "num" ? ' class="hx-num"' : kind === "mono" ? ' class="hx-mono"' : ""}>${escapeHtml(String(v))}</td>`;
+    }).join("") + "</tr>";
+  }).join("") || `<tr><td colspan="${TDR_COLS.length}" class="hint-text">No rows match.</td></tr>`;
+  $("#tdr-filtered-count").textContent = `${vis.length.toLocaleString()} of ${tdrRows.length.toLocaleString()} complaints · ${refs(vis).toLocaleString()} RCCS`;
+  $("#tdr-active-filters").textContent = [tdrF.kpi ? `KPI: ${tdrF.kpi}` : "", tdrF.kind ? `Kind: ${tdrF.kind}` : "", tdrF.status ? `Status: ${tdrF.status}` : ""].filter(Boolean).join(" · ");
+  $("#tdr-copy-btn").disabled = $("#tdr-export-btn").disabled = vis.length === 0;
+}
+$("#tdr-dash").addEventListener("click", (e) => {
+  const k = e.target.closest("[data-tdr-kpi]");
+  if (k) { const f = k.dataset.tdrKpi || null; tdrF.kpi = !f || tdrF.kpi === f ? null : f; tdrRender(); return; }
+  for (const [attr, key] of [["data-tdr-kind", "kind"], ["data-tdr-status", "status"]]) {
+    const t = e.target.closest(`[${attr}]`);
+    if (t) { const v = t.getAttribute(attr); tdrF[key] = tdrF[key] === v ? null : v; tdrRender(); return; }
+  }
+});
+$("#tdr-filter-search").addEventListener("input", () => tdrRender());
+$("#tdr-clear-btn").addEventListener("click", () => { tdrF = { kpi: null, kind: null, status: null }; $("#tdr-filter-search").value = ""; tdrRender(); });
+$("#tdr-detect-btn").addEventListener("click", async () => {
+  const btn = $("#tdr-detect-btn");
+  btn.disabled = true; tdrLoaded = true;
+  $("#tdr-summary").textContent = "Loading… (~20s)";
+  try {
+    const data = await api("/api/temp-dashboard/duplicate-rccs", { method: "POST" });
+    tdrRows = data.rows || [];
+    tdrKinds(tdrRows);
+    $("#tdr-dash").hidden = false; $("#tdr-filter-row").hidden = false;
+    $("#tdr-summary").textContent = `${new Set(tdrRows.map((r) => r.rccs)).size.toLocaleString()} campaign RCCS reference(s) also used by a non-campaign complaint (${data.count.toLocaleString()} complaints) - ${(data.elapsed_ms / 1000).toFixed(1)}s.`;
+    tdrRender();
+  } catch (err) {
+    $("#tdr-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#tdr-copy-btn").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText([...new Set(tdrRows.filter((r) => tdrMatch(r)).map((r) => r.rccs))].join("\n")); showToast("RCCS copied."); } catch { showToast("Copy failed.", true); }
+});
+$("#tdr-export-btn").addEventListener("click", () => {
+  const q = (v) => { v = String(v ?? ""); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
+  const keys = TDR_COLS.map(([k]) => k).concat(["rccs_status", "_kind"]);
+  const csv = [keys.map((k) => (k === "_kind" ? "PAIR_KIND" : k.toUpperCase())).join(",")].concat(tdrRows.filter((r) => tdrMatch(r)).map((r) => keys.map((k) => q(r[k])).join(","))).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
+  a.download = `duplicate_rccs_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
+
+// ---- RJ 2026-10-24: Temp Dashboard tab "Sanitary: last bill date > billing date" ----------
+let tslbRows = [], tslbLoaded = false, tslbF = { kpi: null, status: null, bp: null };
+const tslbNum = (v) => { const n = parseFloat(String(v ?? "").replace(/,/g, "")); return Number.isFinite(n) ? n : 0; };
+const tslbMoney = (v) => v.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+const tslbStatus = (r) => r.bill_status || r.billing_status || "?";
+const tslbBp = (r) => r.billing_period || r.id_billing_period || "?";
+const TSLB_KPI = { pending: (r) => tslbNum(r.pending_amount) !== 0, settled: (r) => tslbNum(r.pending_amount) === 0, negative: (r) => tslbNum(r.bill_amount) < 0 };
+function tslbMatch(r, skip) {
+  if (skip !== "kpi" && tslbF.kpi && !TSLB_KPI[tslbF.kpi](r)) return false;
+  if (skip !== "status" && tslbF.status && tslbStatus(r) !== tslbF.status) return false;
+  if (skip !== "bp" && tslbF.bp && tslbBp(r) !== tslbF.bp) return false;
+  const q = ($("#tslb-filter-search").value || "").trim().toLowerCase();
+  if (q && ![r.account, r.niss, r.id_bill, r.bill_number].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+  return true;
+}
+const TSLB_COLS = [["account", "Account", "mono"], ["niss", "NISS", "mono"], ["id_bill", "ID_BILL", "mono"], ["bill_number", "Bill number", "mono"],
+  ["bill_status", "Status", "status"], ["billing_period", "Billing period"], ["billing_date", "Billing date", "date"],
+  ["last_billing_date", "Last billing date", "date"], ["days_after", "Days after", "num"], ["bill_amount", "Bill amount", "money"],
+  ["pending_amount", "Pending amount", "money"], ["bill_type", "Bill type"]];
+function tslbRender() {
+  const base = tslbRows.filter((r) => tslbMatch(r, "kpi"));
+  const sum = (rows, k) => rows.reduce((s, r) => s + tslbNum(r[k]), 0);
+  const acc = (rows) => new Set(rows.map((r) => r.account)).size;
+  const cards = [
+    [null, "total", "🧾", "Sanitary bills", base.length, `${acc(base).toLocaleString()} account(s) · amount ${tslbMoney(sum(base, "bill_amount"))}`],
+    ["pending", "missing", "⏳", "With a pending amount", base.filter(TSLB_KPI.pending).length, `pending ${tslbMoney(sum(base, "pending_amount"))}`],
+    ["settled", "complete", "✅", "Nothing pending", base.filter(TSLB_KPI.settled).length, ""],
+    ["negative", "case0", "➖", "Negative bill amount", base.filter(TSLB_KPI.negative).length, "credit bills"],
+  ];
+  $("#tslb-kpi-row").innerHTML = cards.map(([f, kpi, icon, label, v, sub]) =>
+    `<div class="rbo-kpi${f && tslbF.kpi === f ? " is-active" : ""}" data-kpi="${kpi}" data-tslb-kpi="${f || ""}" title="${escapeHtml(label)} - click to filter, click again to clear">` +
+    `<span class="rbo-kpi-label"><span>${icon}</span>${escapeHtml(label)}</span>` +
+    `<span class="rbo-kpi-value">${v.toLocaleString()}</span><span class="rbo-sub">${escapeHtml(sub)}</span></div>`).join("");
+  const cardsOf = (rows, keyFn, attr, active) => {
+    const m = new Map(); rows.forEach((r) => { const k = keyFn(r); const o = m.get(k) || { n: 0, a: 0, p: 0 }; o.n++; o.a += tslbNum(r.bill_amount); o.p += tslbNum(r.pending_amount); m.set(k, o); });
+    return `<div class="fbc-beh-cards">${[...m.entries()].sort((a, b) => b[1].n - a[1].n).map(([k, o]) =>
+      `<button type="button" class="fbc-beh-card${active === k ? " is-active" : ""}" data-kpi="${/cancel|rebill/i.test(k) ? "missing" : "services"}" ${attr}="${escapeHtml(k)}">` +
+      `<span class="fbc-beh-name">${escapeHtml(k)}</span><span class="fbc-beh-pct">${o.n.toLocaleString()}</span>` +
+      `<span class="fbc-beh-sub">amount ${tslbMoney(o.a)} · pending ${tslbMoney(o.p)}</span></button>`).join("") || "<span class='hint-text'>-</span>"}</div>`;
+  };
+  $("#tslb-status").innerHTML = cardsOf(tslbRows.filter((r) => tslbMatch(r, "status")), tslbStatus, "data-tslb-status", tslbF.status);
+  $("#tslb-bp").innerHTML = cardsOf(tslbRows.filter((r) => tslbMatch(r, "bp")), tslbBp, "data-tslb-bp", tslbF.bp);
+  $("#tslb-table thead tr").innerHTML = TSLB_COLS.map(([, l]) => `<th>${escapeHtml(l)}</th>`).join("");
+  const vis = tslbRows.filter((r) => tslbMatch(r));
+  $("#tslb-table tbody").innerHTML = vis.map((r) => `<tr${TSLB_KPI.pending(r) ? ' class="kpi-tint" data-kpi="pending"' : ""}>` + TSLB_COLS.map(([k, , kind]) => {
+    const raw = k === "bill_status" ? tslbStatus(r) : r[k];
+    if (kind === "date") return `<td>${escapeHtml(String(raw ?? "").slice(0, 10))}</td>`;
+    if (kind === "money") return `<td class="hx-num">${raw === "" || raw == null ? "" : tslbMoney(tslbNum(raw))}</td>`;
+    if (kind === "status") return `<td><span class="rbo-pill" data-kpi="${/cancel|rebill/i.test(raw) ? "missing" : "complete"}">${escapeHtml(String(raw))}</span> <small class="hint-text">${escapeHtml(r.billing_status || "")}</small></td>`;
+    return `<td${kind === "num" ? ' class="hx-num"' : kind === "mono" ? ' class="hx-mono"' : ""}>${escapeHtml(String(raw ?? ""))}</td>`;
+  }).join("") + "</tr>").join("") || `<tr><td colspan="${TSLB_COLS.length}" class="hint-text">No bills match.</td></tr>`;
+  $("#tslb-filtered-count").textContent = `${vis.length.toLocaleString()} of ${tslbRows.length.toLocaleString()} bills · amount ${tslbMoney(sum(vis, "bill_amount"))} · pending ${tslbMoney(sum(vis, "pending_amount"))}`;
+  $("#tslb-active-filters").textContent = [tslbF.kpi ? `KPI: ${tslbF.kpi}` : "", tslbF.status ? `Status: ${tslbF.status}` : "", tslbF.bp ? `Period: ${tslbF.bp}` : ""].filter(Boolean).join(" · ");
+  $("#tslb-copy-btn").disabled = $("#tslb-export-btn").disabled = vis.length === 0;
+}
+$("#tslb-dash").addEventListener("click", (e) => {
+  const k = e.target.closest("[data-tslb-kpi]");
+  if (k) { const f = k.dataset.tslbKpi || null; tslbF.kpi = !f || tslbF.kpi === f ? null : f; tslbRender(); return; }
+  for (const [attr, key] of [["data-tslb-status", "status"], ["data-tslb-bp", "bp"]]) {
+    const t = e.target.closest(`[${attr}]`);
+    if (t) { const v = t.getAttribute(attr); tslbF[key] = tslbF[key] === v ? null : v; tslbRender(); return; }
+  }
+});
+$("#tslb-filter-search").addEventListener("input", () => tslbRender());
+$("#tslb-clear-btn").addEventListener("click", () => { tslbF = { kpi: null, status: null, bp: null }; $("#tslb-filter-search").value = ""; tslbRender(); });
+$("#tslb-detect-btn").addEventListener("click", async () => {
+  const btn = $("#tslb-detect-btn");
+  btn.disabled = true; tslbLoaded = true;
+  $("#tslb-summary").textContent = "Loading…";
+  try {
+    const data = await api("/api/temp-dashboard/sanitary-last-bill-date", { method: "POST" });
+    tslbRows = data.rows || [];
+    $("#tslb-dash").hidden = false; $("#tslb-filter-row").hidden = false;
+    $("#tslb-summary").textContent = `${data.count.toLocaleString()} Sanitary bill(s) with LAST_BILLING_DATE after BILLING_DATE - ${(data.elapsed_ms / 1000).toFixed(1)}s.`;
+    tslbRender();
+  } catch (err) {
+    $("#tslb-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#tslb-copy-btn").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText([...new Set(tslbRows.filter((r) => tslbMatch(r)).map((r) => r.account))].join("\n")); showToast("Accounts copied."); } catch { showToast("Copy failed.", true); }
+});
+$("#tslb-export-btn").addEventListener("click", () => {
+  const q = (v) => { v = String(v ?? ""); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
+  const keys = TSLB_COLS.map(([k]) => k).concat(["billing_status", "id_billing_period"]);
+  const csv = [keys.map((k) => k.toUpperCase()).join(",")].concat(tslbRows.filter((r) => tslbMatch(r)).map((r) => keys.map((k) => q(r[k])).join(","))).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
+  a.download = `sanitary_last_bill_date_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 });
 
 // ---- RJ 2026-10-22: Temp Dashboard tab 6 "RCCS list check" --------------------------
@@ -12024,6 +12232,10 @@ const FBC_KPI_PRED = {
   // RJ 2026-10-18: "add a kpi for more than 1 account in an rccs number"
   sharedRccs: (r) => Number(r.rccs_accounts) > 1,
   notInEwa: (r) => String(r.in_ewa || "").toUpperCase() !== "YES",
+  // RJ 2026-10-25: request has a deductionDay but the wallet's FIXED_DAY (payment day) is null
+  dayNoWalletDay: (r) => String(r.req_deduction_day ?? "").trim() !== "" && r.has_wallet && String(r.wallet_fixed_day ?? "").trim() === "",
+  // RJ 2026-10-25: "no bank with no paymentDAy in credit wallet table"
+  nobankNoWalletDay: (r) => fbcCategory(r) === "No Bank" && r.has_wallet && String(r.wallet_fixed_day ?? "").trim() === "",
 };
 // how many accounts point at the same RCCS reference (latest request per account)
 function fbcMarkShared(rows) {
@@ -12039,14 +12251,14 @@ function fbcMarkShared(rows) {
 const FBC_GROUPS = [
   // RJ 2026-10-21: rows come from the requests; "In EWA" = also in EWA_DDI_ELIGIBILITY (info)
   ["Customer", "#6366f1", [["account", "Account", "mono"], ["id_payment_form", "Payment form", "mono"], ["category", "RCCS group", "cat"], ["req_complaint_type", "Type", "type"], ["in_ewa", "In EWA"], ["link_state", "Link"]]],
-  ["Subsidy wallet", "#10b981", [["wallet_balance", "Credit (balance)", "money"], ["cod_behaviour", "Behaviour", "beh"], ["wallet_updated", "Wallet updated", "date"]]],
+  ["Subsidy wallet", "#10b981", [["wallet_balance", "Credit (balance)", "money"], ["cod_behaviour", "Behaviour", "beh"], ["wallet_fixed_day", "Payment day (wallet FIXED_DAY)", "num"], ["wallet_updated", "Wallet updated", "date"]]],
   // RJ 2026-10-18 v2: "for third table for json, just show 1 column for JSON and just display,
   // request CREDIT, NO_BANK, DEDUCTION" - JSON opens the raw request on demand.
-  ["Request (JSON)", "#0ea5e9", [["req_id", "JSON", "json"], ["req_credit_amount", "CREDIT", "money"],
-    ["req_nobank_amount", "NO_BANK", "money"], ["req_deduction_amount", "DEDUCTION", "money"]]],
+  ["Request (JSON)", "#0ea5e9", [["req_id", "JSON", "json"], ["req_date", "Request date", "date"], ["is_latest", "Latest", "latest"], ["req_count", "Requests (account)", "num"], ["req_credit_amount", "CREDIT", "money"],
+    ["req_nobank_amount", "NO_BANK", "money"], ["req_deduction_amount", "DEDUCTION", "money"], ["req_deduction_day", "Payment day (request deductionDay)", "num"]]],
   ["RCCS (GCCC_COMPLAINT)", "#f59e0b", [["rccs_ref", "RCCS", "mono"], ["rccs_accounts", "Accounts on RCCS", "shared"], ["rccs_status_en", "Status", "rst"], ["rccs_date", "Created", "date"],
     ["att_credit_amt", "CREDITAMT", "money"], ["att_nobank_amt", "NOBANK AMT", "money"], ["att_credit_usage", "Credit usage", "usage"],
-    ["att_deduction_amt", "Deduction amount", "money"]]],
+    ["att_deduction_amt", "Deduction amount", "money"], ["att_deduction_day", "Payment day (RCCS RCCSDEDDAT)", "num"]]],
   ["Checks", "#ef4444", [["issue_text", "Issues", "issues"]]],
 ];
 function fbcColumns() {
@@ -12058,6 +12270,8 @@ function fbcColumns() {
   return groups;
 }
 function fbcMatch(r, skip) {
+  // RJ 2026-10-25: optional "latest request per account only" (the old one-row-per-account view)
+  if ($("#fbc-latest-only")?.checked && r.is_latest === "NO") return false;
   if (skip !== "kpi" && fbcF.kpi && !FBC_KPI_PRED[fbcF.kpi](r)) return false;
   if (skip !== "beh" && fbcF.beh && fbcBehKey(r) !== fbcF.beh) return false;
   if (skip !== "rst" && fbcF.rst && fbcRstKey(r) !== fbcF.rst) return false;
@@ -12200,6 +12414,8 @@ function fbcRenderDash() {
     ["pending", "❓", "Request without RCCS", kBase.filter(FBC_KPI_PRED.noRccs).length, "RCCS reference not found", "noRccs"],
     ["case0", "🗂️", "Not in EWA_DDI_ELIGIBILITY", kBase.filter(FBC_KPI_PRED.notInEwa).length, "request accounts outside the EWA list", "notInEwa"],
     ["stuck", "⚠️", "Customers with issues", kBase.filter(FBC_KPI_PRED.issues).length, "see consistency checks", "issues"],
+    ["missing", "📅", "deductionDay, wallet payment day NULL", kBase.filter(FBC_KPI_PRED.dayNoWalletDay).length, "request deductionDay set, FIXED_DAY empty", "dayNoWalletDay"],
+    ["missing", "🏦", "No Bank, wallet payment day NULL", kBase.filter(FBC_KPI_PRED.nobankNoWalletDay).length, "No Bank customers, FIXED_DAY empty", "nobankNoWalletDay"],
   ];
   $("#fbc-kpi-row").innerHTML = kCards.map(([kpi, icon, label, value, sub, f]) =>
     `<div class="rbo-kpi${fbcF.kpi === f ? " is-active" : ""}" data-kpi="${kpi}" data-fbc-kpi="${f}" title="${escapeHtml(label)} - click to filter, click again to clear">` +
@@ -12268,8 +12484,13 @@ function fbcRender() {
   // table: grouped two-row header
   const groups = fbcColumns();
   const cols = groups.flatMap(([g, color, cs]) => cs.map((c, i) => ({ key: c[0], label: c[1], kind: c[2] || "", color, first: i === 0 })));
+  const rows = fbcVisibleRows();
+  const MAX = 3000;
+  const pageRows = rows.slice(0, MAX);
+  fbcPageRows = pageRows;
+  const pageAllSel = pageRows.length > 0 && pageRows.every((r) => fbcSel.has(fbcKey(r)));
   $("#fbc-table thead").innerHTML =
-    `<tr class="fbc-group-row">${groups.map(([g, color, cs]) => `<th colspan="${cs.length}" style="--g:${color}">${escapeHtml(g)}</th>`).join("")}</tr>` +
+    `<tr class="fbc-group-row"><th rowspan="2" style="width:28px;"><input type="checkbox" id="fbc-sel-head" title="Select / unselect the current page"${pageAllSel ? " checked" : ""} /></th>${groups.map(([g, color, cs]) => `<th colspan="${cs.length}" style="--g:${color}">${escapeHtml(g)}</th>`).join("")}</tr>` +
     `<tr>${cols.map((c) => {
       const arrow = fbcSortKey === c.key ? `<span class="stats-table-sort-arrow">${fbcSortDir === 1 ? "▲" : "▼"}</span>` : "";
       return `<th class="stats-table-th-sortable${c.first ? " fbc-gstart" : ""}" style="--g:${c.color}" data-sort="${c.key}">${escapeHtml(c.label)}${arrow}</th>`;
@@ -12279,11 +12500,10 @@ function fbcRender() {
     fbcSortKey = th.dataset.sort;
     fbcRender();
   }));
-  const rows = fbcVisibleRows();
-  const MAX = 3000;
-  $("#fbc-table tbody").innerHTML = rows.slice(0, MAX).map((r) => {
+  $("#fbc-table tbody").innerHTML = pageRows.map((r) => {
     const tint = (r.issues || []).length ? ' class="kpi-tint" data-kpi="missing"' : "";
-    return `<tr${tint}>` + cols.map((c) => {
+    const k = escapeHtml(fbcKey(r));
+    return `<tr${tint}><td><input type="checkbox" class="fbc-sel-cb" data-fbc-sel="${k}"${fbcSel.has(fbcKey(r)) ? " checked" : ""} /></td>` + cols.map((c) => {
       const raw = r[c.key];
       let v = escapeHtml(raw ?? "");
       if (c.kind === "money") v = fbcMoney(raw);
@@ -12293,6 +12513,7 @@ function fbcRender() {
       else if (c.kind === "rst" && raw) v = `<span class="rbo-pill" data-kpi="${/reject|cancel/i.test(raw) ? "missing" : /solved|approved/i.test(raw) ? "complete" : "pending"}">${escapeHtml(raw)}</span>`;
       else if (c.kind === "type" && raw) v = `<span title="${escapeHtml(FBC_TYPE_NAMES[raw] || raw)}">${escapeHtml(raw)}</span>`;
       else if (c.kind === "issues" && raw) v = `<span style="color:#dc2626;font-weight:600">⚠ ${escapeHtml(raw)}</span>`;
+      else if (c.kind === "latest" && raw) v = `<span class="rbo-pill" data-kpi="${raw === "YES" ? "complete" : "case0"}">${raw === "YES" ? "latest" : `older #${escapeHtml(r.req_seq ?? "")}`}</span>`;
       else if (c.kind === "shared") v = Number(raw) > 1
         ? `<span class="rbo-pill" data-kpi="missing" title="Also on this RCCS: ${escapeHtml(r.rccs_other_accounts || "")}">⚠ ${escapeHtml(raw)} accounts</span>`
         : escapeHtml(raw ?? "");
@@ -12301,12 +12522,57 @@ function fbcRender() {
       if (c.key === "link_state") v = `<span class="rbo-pill" data-kpi="${raw === "Wallet + Request + RCCS" ? "complete" : raw === "Not in campaign" ? "case0" : "pending"}">${v}</span>`;
       return `<td class="${c.first ? "fbc-gstart " : ""}${c.kind === "money" || c.kind === "num" ? "hx-num" : ""}${c.kind === "mono" ? " hx-mono" : ""}" style="--g:${c.color}">${v}</td>`;
     }).join("") + `</tr>`;
-  }).join("") || `<tr><td colspan="${cols.length}" class="hint-text">${fbcRows.length ? "No customers match the current filters." : "No rows."}</td></tr>`;
-  if (rows.length > MAX) $("#fbc-table tbody").insertAdjacentHTML("beforeend", `<tr><td colspan="${cols.length}" class="hint-text">Showing the first ${MAX.toLocaleString()} of ${rows.length.toLocaleString()} - narrow the filters or use Export CSV for all.</td></tr>`);
+  }).join("") || `<tr><td colspan="${cols.length + 1}" class="hint-text">${fbcRows.length ? "No customers match the current filters." : "No rows."}</td></tr>`;
+  if (rows.length > MAX) $("#fbc-table tbody").insertAdjacentHTML("beforeend", `<tr><td colspan="${cols.length + 1}" class="hint-text">Showing the first ${MAX.toLocaleString()} of ${rows.length.toLocaleString()} - narrow the filters, use "Select all filtered" or Export CSV (filtered) for all.</td></tr>`);
   renderFilteredCount("#fbc-filtered-count", rows.length, fbcRows.length);
   $("#fbc-export-btn").disabled = rows.length === 0;
   $("#fbc-copy-btn").disabled = rows.length === 0;
+  $("#fbc-sel-row").hidden = fbcRows.length === 0;
+  fbcSelInfo();
 }
+// ---- RJ 2026-10-25: "add to export only selected rows, also add select in current page,
+// select all filtered" - row selection kept across filters/sorts (key = account + request id).
+let fbcSel = new Set(), fbcPageRows = [];
+const fbcKey = (r) => `${r.account ?? ""}|${r.req_id ?? ""}`;
+function fbcSelInfo() {
+  const filteredKeys = new Set(fbcVisibleRows().map(fbcKey));
+  const inFilter = [...fbcSel].filter((k) => filteredKeys.has(k)).length;
+  $("#fbc-sel-count").textContent = fbcSel.size
+    ? `${fbcSel.size.toLocaleString()} selected${inFilter !== fbcSel.size ? ` (${inFilter.toLocaleString()} in the current filter)` : ""}`
+    : "No rows selected";
+  $("#fbc-export-sel-btn").disabled = fbcSel.size === 0;
+  $("#fbc-export-sel-btn").textContent = fbcSel.size ? `⬇ Export selected (${fbcSel.size.toLocaleString()})` : "⬇ Export selected";
+  const head = $("#fbc-sel-head");
+  if (head) {
+    const n = fbcPageRows.filter((r) => fbcSel.has(fbcKey(r))).length;
+    head.checked = n > 0 && n === fbcPageRows.length;
+    head.indeterminate = n > 0 && n < fbcPageRows.length;
+  }
+}
+$("#fbc-table").addEventListener("change", (e) => {
+  if (e.target.id === "fbc-sel-head") {
+    fbcPageRows.forEach((r) => (e.target.checked ? fbcSel.add(fbcKey(r)) : fbcSel.delete(fbcKey(r))));
+    $$("#fbc-table .fbc-sel-cb").forEach((cb) => { cb.checked = e.target.checked; });
+    fbcSelInfo(); return;
+  }
+  const cb = e.target.closest(".fbc-sel-cb");
+  if (cb) { cb.checked ? fbcSel.add(cb.dataset.fbcSel) : fbcSel.delete(cb.dataset.fbcSel); fbcSelInfo(); }
+});
+$("#fbc-sel-page-btn").addEventListener("click", () => {
+  fbcPageRows.forEach((r) => fbcSel.add(fbcKey(r)));
+  $$("#fbc-table .fbc-sel-cb").forEach((cb) => { cb.checked = true; });
+  fbcSelInfo();
+});
+$("#fbc-sel-all-btn").addEventListener("click", () => {
+  fbcVisibleRows().forEach((r) => fbcSel.add(fbcKey(r)));
+  $$("#fbc-table .fbc-sel-cb").forEach((cb) => { cb.checked = true; });
+  fbcSelInfo();
+});
+$("#fbc-sel-clear-btn").addEventListener("click", () => {
+  fbcSel.clear();
+  $$("#fbc-table .fbc-sel-cb").forEach((cb) => { cb.checked = false; });
+  fbcSelInfo();
+});
 $("#fbc-dash").addEventListener("click", (e) => {
   if (e.target.closest("[data-fbc-rtype-all]")) { fbcF.rtype = null; fbcF.rst = null; fbcRender(); return; }
   const cellEl = e.target.closest("[data-fbc-cell]");
@@ -12333,6 +12599,7 @@ $("#fbc-filter-search").addEventListener("input", () => {
   }, 250);
 });
 $("#fbc-ewa-cols").addEventListener("change", fbcRender);
+$("#fbc-latest-only").addEventListener("change", fbcRender);
 // request JSON viewer (fetched on demand: GET /api/fix-billing-campaign/request/{id})
 $("#fbc-table").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-fbc-json]");
@@ -12376,12 +12643,15 @@ $$(".da-subnav-btn[data-fbc-sub]").forEach((btn) => btn.addEventListener("click"
   $$(".da-subnav-btn[data-fbc-sub]").forEach((b) => b.classList.toggle("is-active", b === btn));
   $$(".da-subpage[data-fbc-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.fbcSub === sub));
   if (sub === "planned" && !fspLoaded) $("#fsp-detect-btn").click();
+  if (sub === "subsidy" && !tsubLoaded) $("#tsub-detect-btn").click();   // RJ 2026-10-23: moved from Temp Dashboard
 }));
 let fspRows = [], fspLoaded = false, fspF = { kpi: null, day: null, beh: null, tariff: null }, fspTerms = null;
 const fspToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const fspNum = (v) => { const n = parseFloat(String(v ?? "").replace(/,/g, "")); return Number.isFinite(n) ? n : 0; };
 const fspMoney = (v) => v.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-const fspDay = (r) => (r.first_planned_billing_date ? String(r.first_planned_billing_date).slice(0, 10) : "No reading");
+// RJ 2026-10-23 (later): cycle readings only; the account's planned billing date = the HIGHEST
+// planned date of its cycle readings (electricity / water) - one record per account.
+const fspDay = (r) => (r.planned_billing_date ? String(r.planned_billing_date).slice(0, 10) : "No reading");
 const fspBeh = (r) => (r.id_wallet ? (r.behaviour_desc || r.cod_behaviour || "?") : "No wallet");
 const fspState = (r) => (!Number(r.readings) ? "No reading" : Number(r.not_billed_readings) ? "Not billed" : "Billed");
 const FSP_KPI = {
@@ -12408,8 +12678,9 @@ function fspMatch(r, skip) {
 }
 const FSP_COLS = [
   ["account", "Account", "mono"], ["id_payment_form", "Payment form", "mono"], ["tariffs", "Tariff"], ["state", "Sept state", "state"],
-  ["first_planned_billing_date", "Planned billing (first)", "date"], ["last_planned_billing_date", "Planned billing (last)", "date"],
-  ["unbilled_planned_date", "Planned - not billed", "date"], ["readings", "Readings", "num"], ["billed_readings", "Billed", "num"],
+  ["planned_billing_date", "Planned billing date", "date"], ["elec_planned_date", "Electricity planned", "date"],
+  ["water_planned_date", "Water planned", "date"],
+  ["unbilled_planned_date", "Planned - not billed", "date"], ["readings", "Cycle readings", "num"], ["billed_readings", "Billed", "num"],
   ["not_billed_readings", "Not billed", "num"], ["id_wallet", "ID_WALLET", "mono"], ["wallet_amount", "Wallet amount", "money"],
   ["behaviour_desc", "Behaviour", "beh"], ["readings_detail", "Readings (reading date -> planned billing date, status)", "detail"],
 ];
@@ -12421,10 +12692,10 @@ function fspRender() {
   const tot = Math.max(1, base.length);
   const cards = [
     [null, "total", "🏠", "Subsidized accounts", base.length, "E-D2 / W-D2 / E-D2-NM active"],
-    ["reading", "services", "📖", "With a reading in the period", cnt("reading"), `${(100 * cnt("reading") / tot).toFixed(1)}%`],
-    ["noreading", "case0", "∅", "No reading in the period", cnt("noreading"), `${(100 * cnt("noreading") / tot).toFixed(1)}%`],
-    ["billed", "complete", "✅", "All readings billed", cnt("billed"), `${(100 * cnt("billed") / tot).toFixed(1)}%`],
-    ["pending", "pending", "⏳", "Has a not-billed reading", cnt("pending"), `${(100 * cnt("pending") / tot).toFixed(1)}%`],
+    ["reading", "services", "📖", "With a cycle reading in the period", cnt("reading"), `${(100 * cnt("reading") / tot).toFixed(1)}%`],
+    ["noreading", "case0", "∅", "No cycle reading in the period", cnt("noreading"), `${(100 * cnt("noreading") / tot).toFixed(1)}%`],
+    ["billed", "complete", "✅", "All cycle readings billed", cnt("billed"), `${(100 * cnt("billed") / tot).toFixed(1)}%`],
+    ["pending", "pending", "⏳", "Has a not-billed cycle reading", cnt("pending"), `${(100 * cnt("pending") / tot).toFixed(1)}%`],
     ["overdue", "missing", "🚨", "Planned date passed, not billed", cnt("overdue"), `planned before ${today}`],
     ["upcoming", "pending", "📅", "Not billed, planned today or later", cnt("upcoming"), ""],
     ["wallet", "complete", "👛", "With a subsidy wallet", cnt("wallet"), `amount ${fspMoney(sumAmt(base.filter(FSP_KPI.wallet)))}`],
@@ -12444,7 +12715,7 @@ function fspRender() {
     return `<button type="button" class="fsp-day${fspF.day === k ? " is-active" : ""}" data-fsp-day="${escapeHtml(k)}" title="${escapeHtml(k)}: ${o.n.toLocaleString()} account(s), ${o.nb.toLocaleString()} with a not-billed reading - click to filter">` +
       `<span class="fsp-day-bar"><span style="height:${Math.max(2, 100 * o.n / max)}%"></span><span class="fsp-day-nb" style="height:${100 * o.nb / max}%"></span></span>` +
       `<span class="fsp-day-n">${o.n.toLocaleString()}</span><span class="fsp-day-lbl${past ? "" : " is-future"}">${k === "No reading" ? "none" : escapeHtml(k.slice(5))}</span></button>`;
-  }).join("") + `<div class="hint-text" style="width:100%;font-size:11px;">Bar = accounts whose first planned billing date is that day; red part = accounts with a not-billed reading.</div>`;
+  }).join("") + `<div class="hint-text" style="width:100%;font-size:11px;">Bar = accounts whose planned billing date (highest of its cycle readings) is that day; red part = accounts with a not-billed cycle reading.</div>`;
   // wallet behaviour cards + tariff
   const bRows = fspRows.filter((r) => fspMatch(r, "beh"));
   const bMap = new Map(); bRows.forEach((r) => { const k = fspBeh(r); const o = bMap.get(k) || { n: 0, a: 0 }; o.n++; o.a += fspNum(r.wallet_amount); bMap.set(k, o); });
@@ -12527,6 +12798,117 @@ $("#fsp-export-btn").addEventListener("click", () => {
   a.download = `subsidized_planned_billing_${new Date().toISOString().slice(0, 10)}.csv`;
   a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 });
+
+// ---- RJ 2026-10-24: DOUBLE ITB tab 2 "Double ITB - Sanitary only" ---------------------------
+// "double ITB sanitary only (means the water is ok, but still have in sanitary)" -
+// /api/double-itb/sanitary-only (double_itb.build_sanitary_only_query). KPI / period / reading
+// type cards filter the table.
+$$(".da-subnav-btn[data-ditb-sub]").forEach((btn) => btn.addEventListener("click", () => {
+  const sub = btn.dataset.ditbSub;
+  $$(".da-subnav-btn[data-ditb-sub]").forEach((b) => b.classList.toggle("is-active", b === btn));
+  $$(".da-subpage[data-ditb-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.ditbSub === sub));
+  if (sub === "sanonly" && !dsanLoaded) $("#dsan-detect-btn").click();
+}));
+let dsanRows = [], dsanLoaded = false, dsanF = { kpi: null, bp: null, rt: null };
+const dsanWater = (r) => (!r.water_niss ? "No water service" : Number(r.water_billed_count) > 0 ? "Water billed" : r.water_itbs ? "Water not billed yet" : "No water item for these dates");
+const DSAN_KPI = {
+  rebill: (r) => r.needs_rebilling === "1",
+  zero: (r) => r.needs_rebilling !== "1",
+  wbilled: (r) => dsanWater(r) === "Water billed",
+  wother: (r) => dsanWater(r) !== "Water billed",
+};
+const dsanRt = (r) => r.reading_types || "(no reading)";
+function dsanMatch(r, skip) {
+  if (skip !== "kpi" && dsanF.kpi && !DSAN_KPI[dsanF.kpi](r)) return false;
+  if (skip !== "bp" && dsanF.bp && (r.billing_period || r.id_billing_period) !== dsanF.bp) return false;
+  if (skip !== "rt" && dsanF.rt && dsanRt(r) !== dsanF.rt) return false;
+  const q = ($("#dsan-filter-search").value || "").trim().toLowerCase();
+  if (q && ![r.niss, r.account, r.anom_id_item_to_bill, r.billed_id_item_to_bill, r.billed_id_bill, r.water_niss].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+  return true;
+}
+const DSAN_COLS = [
+  ["niss", "Sanitary NISS", "mono"], ["account", "Account", "mono"], ["billing_period", "Billing period"],
+  ["ini_date", "INI_DATE", "date"], ["end_date", "END_DATE", "date"],
+  ["anom_id_item_to_bill", "Anomalous ITB (duplicate)", "mono"], ["billed_id_item_to_bill", "Billed ITB", "mono"],
+  ["billed_id_bill", "Billed bill", "mono"], ["anom_ready_usage", "Ready usage", "num"], ["needs_rebilling", "Rebilling", "reb"],
+  ["reading_types", "Reading type"], ["water_niss", "Water NISS", "mono"], ["water", "Water (same dates)", "water"], ["water_itbs", "Water ITB(s)"],
+];
+function dsanRender() {
+  const base = dsanRows.filter((r) => dsanMatch(r, "kpi"));
+  const acc = (rows) => new Set(rows.map((r) => r.account)).size;
+  const cards = [
+    [null, "total", "🚿", "Sanitary duplicates (water OK)", base.length, `${acc(base).toLocaleString()} account(s)`],
+    ["rebill", "missing", "💰", "Needs rebilling (usage ≠ 0)", base.filter(DSAN_KPI.rebill).length, "ready usage of the duplicate"],
+    ["zero", "complete", "0️⃣", "Zero usage", base.filter(DSAN_KPI.zero).length, "cancel only"],
+    ["wbilled", "services", "💧", "Water billed for these dates", base.filter(DSAN_KPI.wbilled).length, ""],
+    ["wother", "case0", "❔", "Water not billed / no water", base.filter(DSAN_KPI.wother).length, "check the water side"],
+  ];
+  $("#dsan-kpi-row").innerHTML = cards.map(([f, kpi, icon, label, v, sub]) =>
+    `<div class="rbo-kpi${f && dsanF.kpi === f ? " is-active" : ""}" data-kpi="${kpi}" data-dsan-kpi="${f || ""}" title="${escapeHtml(label)} - click to filter, click again to clear">` +
+    `<span class="rbo-kpi-label"><span>${icon}</span>${escapeHtml(label)}</span>` +
+    `<span class="rbo-kpi-value">${v.toLocaleString()}</span><span class="rbo-sub">${escapeHtml(sub)}</span></div>`).join("");
+  const cardsOf = (rows, keyFn, attr, active) => {
+    const m = new Map(); rows.forEach((r) => m.set(keyFn(r), (m.get(keyFn(r)) || 0) + 1));
+    return `<div class="fbc-beh-cards">${[...m.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) =>
+      `<button type="button" class="fbc-beh-card${active === k ? " is-active" : ""}" data-kpi="${/Removal|Disconnection/.test(k) ? "missing" : "services"}" ${attr}="${escapeHtml(k)}">` +
+      `<span class="fbc-beh-name">${escapeHtml(k)}</span><span class="fbc-beh-pct">${n.toLocaleString()}</span>` +
+      `<span class="fbc-beh-sub">${(100 * n / Math.max(1, rows.length)).toFixed(1)}%</span></button>`).join("") || "<span class='hint-text'>-</span>"}</div>`;
+  };
+  $("#dsan-bp").innerHTML = cardsOf(dsanRows.filter((r) => dsanMatch(r, "bp")), (r) => r.billing_period || r.id_billing_period, "data-dsan-bp", dsanF.bp);
+  $("#dsan-rt").innerHTML = cardsOf(dsanRows.filter((r) => dsanMatch(r, "rt")), dsanRt, "data-dsan-rt", dsanF.rt);
+  $("#dsan-table thead tr").innerHTML = DSAN_COLS.map(([, l]) => `<th>${escapeHtml(l)}</th>`).join("");
+  const vis = dsanRows.filter((r) => dsanMatch(r));
+  $("#dsan-table tbody").innerHTML = vis.slice(0, 3000).map((r) =>
+    `<tr${r.needs_rebilling === "1" ? ' class="kpi-tint" data-kpi="missing"' : ""}>` + DSAN_COLS.map(([k, , kind]) => {
+      const raw = r[k];
+      if (kind === "date") return `<td>${escapeHtml(String(raw ?? "").slice(0, 10))}</td>`;
+      if (kind === "reb") return `<td>${raw === "1" ? '<span class="rbo-pill" data-kpi="missing">Rebill</span>' : '<span class="rbo-pill" data-kpi="complete">Zero</span>'}</td>`;
+      if (kind === "water") { const w = dsanWater(r); return `<td><span class="rbo-pill" data-kpi="${w === "Water billed" ? "complete" : "case0"}">${escapeHtml(w)}</span></td>`; }
+      return `<td${kind === "num" ? ' class="hx-num"' : kind === "mono" ? ' class="hx-mono"' : ""}>${escapeHtml(String(raw ?? ""))}</td>`;
+    }).join("") + "</tr>").join("") || `<tr><td colspan="${DSAN_COLS.length}" class="hint-text">${dsanRows.length ? "No rows match." : "No Sanitary-only double ITB found."}</td></tr>`;
+  $("#dsan-filtered-count").textContent = `${vis.length.toLocaleString()} of ${dsanRows.length.toLocaleString()} rows · ${acc(vis).toLocaleString()} account(s)`;
+  $("#dsan-active-filters").textContent = [dsanF.kpi ? `KPI: ${dsanF.kpi}` : "", dsanF.bp ? `Period: ${dsanF.bp}` : "", dsanF.rt ? `Reading: ${dsanF.rt}` : ""].filter(Boolean).join(" · ");
+  $("#dsan-copy-btn").disabled = $("#dsan-export-btn").disabled = vis.length === 0;
+}
+$("#dsan-dash").addEventListener("click", (e) => {
+  const k = e.target.closest("[data-dsan-kpi]");
+  if (k) { const f = k.dataset.dsanKpi || null; dsanF.kpi = !f || dsanF.kpi === f ? null : f; dsanRender(); return; }
+  for (const [attr, key] of [["data-dsan-bp", "bp"], ["data-dsan-rt", "rt"]]) {
+    const t = e.target.closest(`[${attr}]`);
+    if (t) { const v = t.getAttribute(attr); dsanF[key] = dsanF[key] === v ? null : v; dsanRender(); return; }
+  }
+});
+$("#dsan-filter-search").addEventListener("input", () => dsanRender());
+$("#dsan-clear-btn").addEventListener("click", () => { dsanF = { kpi: null, bp: null, rt: null }; $("#dsan-filter-search").value = ""; dsanRender(); });
+$("#dsan-detect-btn").addEventListener("click", async () => {
+  const btn = $("#dsan-detect-btn");
+  btn.disabled = true; dsanLoaded = true;
+  $("#dsan-summary").textContent = "Loading…";
+  try {
+    const data = await api("/api/double-itb/sanitary-only", { method: "POST" });
+    dsanRows = data.rows || [];
+    $("#dsan-dash").hidden = false; $("#dsan-filter-row").hidden = false;
+    $("#dsan-summary").textContent = `${data.count.toLocaleString()} Sanitary duplicate item(s) where the Water is OK - ${data.account_count.toLocaleString()} account(s), ${data.needs_rebilling_count.toLocaleString()} need rebilling - ${(data.elapsed_ms / 1000).toFixed(1)}s.`;
+    dsanRender();
+  } catch (err) {
+    $("#dsan-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#dsan-copy-btn").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText([...new Set(dsanRows.filter((r) => dsanMatch(r)).map((r) => r.account))].join("\n")); showToast("Accounts copied."); } catch { showToast("Copy failed.", true); }
+});
+$("#dsan-export-btn").addEventListener("click", () => {
+  const q = (v) => { v = String(v ?? ""); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
+  const keys = DSAN_COLS.map(([k]) => k).concat(["id_billing_service", "id_billing_period", "anom_reading_count", "anom_creation_date", "billed_id_billing_period"]);
+  const csv = [keys.map((k) => k.toUpperCase()).join(",")].concat(dsanRows.filter((r) => dsanMatch(r)).map((r) => keys.map((k) => q(k === "water" ? dsanWater(r) : r[k])).join(","))).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
+  a.download = `double_itb_sanitary_only_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
 $("#fbc-detect-btn").addEventListener("click", async () => {
   const btn = $("#fbc-detect-btn");
   btn.disabled = true;
@@ -12534,6 +12916,7 @@ $("#fbc-detect-btn").addEventListener("click", async () => {
   try {
     const data = await api("/api/fix-billing-campaign/detect", { method: "POST", body: { scope: $("#fbc-scope").value, since: $("#fbc-since").value || "2026-10-16" } });
     fbcRows = data.rows || [];
+    fbcSel.clear();   // RJ 2026-10-25: a new Scan starts with no rows selected
     fbcRows.forEach((r) => { r.category = fbcCategory(r); });
     fbcMarkShared(fbcRows);
     fbcUpdateTerms();
@@ -12541,7 +12924,9 @@ $("#fbc-detect-btn").addEventListener("click", async () => {
     fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null };
     $("#fbc-dash").hidden = false; $("#fbc-filter-row").hidden = false; $("#fbc-acts-title").hidden = false;
     const capped = data.row_cap && data.count >= data.row_cap ? ` (capped at ${Number(data.row_cap).toLocaleString()})` : "";
-    $("#fbc-summary").textContent = `${data.count.toLocaleString()} customer(s)${capped} - requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
+    // RJ 2026-10-25: rows = every MESSAGES_IN request (not only the latest per account)
+    const accN = new Set(fbcRows.map((r) => r.account)).size;
+    $("#fbc-summary").textContent = `${data.count.toLocaleString()} request(s) from ${accN.toLocaleString()} account(s)${capped} - requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
     fbcRender();
   } catch (err) {
     $("#fbc-summary").textContent = "";
@@ -12552,20 +12937,30 @@ $("#fbc-detect-btn").addEventListener("click", async () => {
 });
 $("#fbc-copy-btn").addEventListener("click", async () => {
   const rows = fbcVisibleRows();
-  try { await navigator.clipboard.writeText(rows.map((r) => r.account).join("\n")); showToast(`Copied ${rows.length} account(s).`); }
+  const accs = [...new Set(rows.map((r) => r.account))];   // RJ 2026-10-25: rows are requests now - one line per account
+  try { await navigator.clipboard.writeText(accs.join("\n")); showToast(`Copied ${accs.length} account(s).`); }
   catch { showToast("Copy failed - use Export CSV.", true); }
 });
-$("#fbc-export-btn").addEventListener("click", () => {
-  const rows = fbcVisibleRows();
+function fbcExportCsv(rows, fileName) {
   if (!rows.length) return;
   const keys = FBC_GROUPS.flatMap((g) => g[2].map((c) => c[0])).concat(["behaviour_desc", "att_credit_usage_desc", "id_wallet", "id_complaint", "req_id", "req_status"])
     .concat(fbcEwaCols.filter((c) => c !== "account" && c !== "id_payment_form"));
   const lines = [keys.join(",")].concat(rows.map((r) => keys.map((k) => `"${String(r[k] ?? "").replace(/"/g, '""')}"`).join(",")));
   const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
   const a = document.createElement("a");
-  a.href = url; a.download = "fix_billing_campaign_2026.csv";
+  a.href = url; a.download = fileName;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
+}
+$("#fbc-export-btn").addEventListener("click", () => fbcExportCsv(fbcVisibleRows(), "fix_billing_campaign_2026.csv"));
+// RJ 2026-10-25: export only the ticked rows (in the table's current sort order; selected rows
+// hidden by a later filter are still exported - the counter shows how many are outside the filter)
+$("#fbc-export-sel-btn").addEventListener("click", () => {
+  const visible = fbcVisibleRows();
+  const seen = new Set(visible.map(fbcKey));
+  const rows = visible.filter((r) => fbcSel.has(fbcKey(r))).concat(fbcRows.filter((r) => fbcSel.has(fbcKey(r)) && !seen.has(fbcKey(r))));
+  fbcExportCsv(rows, "fix_billing_campaign_2026_selected.csv");
+  showToast(`Exported ${rows.length.toLocaleString()} selected row(s).`);
 });
 
 // ---- Clear the old script before every Generate (RJ 2026-10-08: "in all

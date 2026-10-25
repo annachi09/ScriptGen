@@ -531,6 +531,116 @@ def rccs_list_note(r: dict) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Tab 7 "Sanitary: last bill date > billing date" (RJ 2026-10-24): "find me all sanitary
+# service bill where the last bill date is > billing date, show me status billing period
+# account bill number and bill amount and pending amount".
+#   GCCOM_BILL with ID_OFFERED_SERVICE = 190 (Sanitary) and LAST_BILLING_DATE > BILLING_DATE.
+#   Status EN = OUC_ADMIN.GCCOM_BILL_STATUS via GCTS_DICTIONARY. Live 2026-10-24: 139 bills, ~3 s.
+# ---------------------------------------------------------------------------
+def build_sanitary_last_bill_date_query() -> str:
+    return f"""
+SELECT pf.REFERENCE AS ACCOUNT, ss.NISS, b.ID_BILL, b.BILL_NUMBER,
+       b.BILLING_STATUS, COALESCE(dst.TEXT, st.NAME_TYPE) AS BILL_STATUS,
+       b.BILL_TYPE, b.ID_BILLING_PERIOD, COALESCE(dbp.TEXT, bp.DESCRIPTION) AS BILLING_PERIOD,
+       b.BILLING_DATE, b.LAST_BILLING_DATE,
+       DATEDIFF(day, b.BILLING_DATE, b.LAST_BILLING_DATE) AS DAYS_AFTER,
+       b.TOTAL_AMOUNT AS BILL_AMOUNT, b.PENDING_AMOUNT
+FROM OUC_COMMON_ADMIN.GCCOM_BILL b WITH (NOLOCK)
+LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = b.ID_PAYMENT_FORM
+LEFT JOIN GCCOM_CONTRACTED_SERVICE cs WITH (NOLOCK) ON cs.ID_CONTRACTED_SERVICE = b.ID_CONTRACTED_SERVICE
+LEFT JOIN GCCOM_SECTOR_SUPPLY ss WITH (NOLOCK) ON ss.ID_SECTOR_SUPPLY = cs.ID_SECTOR_SUPPLY
+LEFT JOIN OUC_ADMIN.GCCOM_BILL_STATUS st ON st.COD_DEVELOP = b.BILLING_STATUS
+LEFT JOIN GCTS_DICTIONARY dst ON dst.ID = st.NAME_TYPE_XI18N AND dst.LOCALE = 'EN'
+LEFT JOIN GCCOM_BILLING_PERIOD bp ON bp.ID_BILLING_PERIOD = b.ID_BILLING_PERIOD
+LEFT JOIN GCTS_DICTIONARY dbp ON dbp.ID = bp.PERIOD_NAME_XI18N AND dbp.LOCALE = 'EN'
+WHERE b.ID_OFFERED_SERVICE = {OFFERED_SANITARY}
+  AND b.LAST_BILLING_DATE > b.BILLING_DATE
+ORDER BY b.ID_BILLING_PERIOD DESC, pf.REFERENCE;
+"""
+
+
+def build_duplicate_rccs_query(since: str | None = None) -> str:
+    """RJ 2026-10-25: "Duplicate RCCS, this will be the ones that we use in FIX Billing campaign,
+    vs the one from the non campaign.. list them down with the dates. the idea is they have
+    same cod_complaint".
+
+    Campaign RCCS = the RCCS reference of the FIX BILLING CAMPAIGN 2026 requests
+    (GCGE_EXTERNAL_MESSAGES_IN, '/mobileapp/complaint', since the campaign date - same parsing
+    as fix_billing_campaign.build_query). Every GCCC_COMPLAINT sharing that COD_REF_COMPLAINT is
+    listed when the reference exists as 2+ complaints. RCCS_ROLE per complaint:
+      CAMPAIGN                - (reference, account) = the account's latest campaign request
+      CAMPAIGN (older request)- an earlier campaign request of that account used this reference
+      NON-CAMPAIGN            - no campaign request of that account used this reference
+    RJ 2026-10-25 (later): "the duplicating RCCS should be not from campaign" / "the main rccs is
+    the campaign, but the duplicationg should be non camapaign" - only references with at least
+    one NON-CAMPAIGN complaint are returned (main = campaign, duplicate = non-campaign).
+    Live 2026-10-25: 4 references / 8 complaints (all duplicates 3084COMTYP "Resolved (Applicable)",
+    created before the campaign request), ~20-50s.
+    """
+    from app.core import fix_billing_campaign as fbc
+    since = fbc._since(since)
+    return f"""
+SET NOCOUNT ON;
+IF OBJECT_ID('tempdb..#r') IS NOT NULL DROP TABLE #r;
+IF OBJECT_ID('tempdb..#c') IS NOT NULL DROP TABLE #c;
+
+-- all campaign requests since the date (RN = 1 = latest per account)
+SELECT mi.ID_SEQ, mi.CREATE_DATE AS REQ_DATE, j.ID_ACCOUNT_REF, j.RCCS_REF,
+       ROW_NUMBER() OVER (PARTITION BY j.ID_ACCOUNT_REF ORDER BY mi.CREATE_DATE DESC, mi.ID_SEQ DESC) AS RN
+INTO #r
+FROM {fbc.MESSAGES_TABLE} mi WITH (NOLOCK)
+CROSS APPLY (SELECT
+    CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.idAccount') END AS ID_ACCOUNT_REF,
+    COALESCE(CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.rccsReference') END,
+             LEFT(mi.RESPONSEENTITY, 60)) AS RCCS_REF
+) j
+WHERE mi.REQUESTURL = '{fbc.REQUEST_URL}' AND mi.CREATE_DATE > '{since}'
+  AND {fbc.REQUEST_OK_SQL};   -- RJ 2026-10-25: error responses (RESPONSEHEADER filled) left out
+
+-- every complaint carrying a campaign RCCS reference + how many complaints share it
+SELECT c.COD_REF_COMPLAINT, c.ID_COMPLAINT, c.ID_ACCOUNT, c.CREATE_DATE, c.UPDATE_DATE, c.UPDATE_USER,
+       c.COD_STATUS_COMPLAINT, c.ID_COMPLAINT_TYPE, c.COD_ORIGIN,
+       COUNT(*) OVER (PARTITION BY c.COD_REF_COMPLAINT) AS N_COMPLAINTS
+INTO #c
+FROM OUC_ADMIN.GCCC_COMPLAINT c WITH (NOLOCK)
+WHERE c.COD_REF_COMPLAINT IN (SELECT RCCS_REF FROM #r WHERE RN = 1);
+
+IF OBJECT_ID('tempdb..#x') IS NOT NULL DROP TABLE #x;
+SELECT c.COD_REF_COMPLAINT AS RCCS, c.N_COMPLAINTS,
+       CASE WHEN rq.RN = 1 THEN 'CAMPAIGN' WHEN rq.RN > 1 THEN 'CAMPAIGN (older request)'
+            ELSE 'NON-CAMPAIGN' END AS RCCS_ROLE,
+       pf.REFERENCE AS ACCOUNT, c.ID_COMPLAINT,
+       c.CREATE_DATE AS RCCS_DATE, c.UPDATE_DATE AS RCCS_UPDATED, c.UPDATE_USER,
+       rq.REQ_DATE, rq.ID_SEQ AS REQ_ID,
+       c.COD_STATUS_COMPLAINT AS RCCS_STATUS, COALESCE(ds.TEXT, st.NAME_TYPE) AS RCCS_STATUS_EN,
+       ct.COD_DEVELOP AS RCCS_TYPE, c.COD_ORIGIN,
+       lr.RCCS_REF AS ACCOUNT_LATEST_CAMPAIGN_RCCS, lr.REQ_DATE AS ACCOUNT_LATEST_REQ_DATE,
+       c.CREATE_DATE AS SORT_DATE
+INTO #x
+FROM #c c
+LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = c.ID_ACCOUNT
+OUTER APPLY (SELECT TOP 1 r.RN, r.REQ_DATE, r.ID_SEQ FROM #r r
+             WHERE r.RCCS_REF = c.COD_REF_COMPLAINT AND r.ID_ACCOUNT_REF = pf.REFERENCE ORDER BY r.RN) rq
+LEFT JOIN #r lr ON lr.ID_ACCOUNT_REF = pf.REFERENCE AND lr.RN = 1
+LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_TYPE ct ON ct.ID_COMPLAINT_TYPE = c.ID_COMPLAINT_TYPE
+LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_STATUS st ON st.COD_DEVELOP = c.COD_STATUS_COMPLAINT
+LEFT JOIN GCTS_DICTIONARY ds ON ds.ID = st.NAME_TYPE_XI18N AND ds.LOCALE = 'EN'
+WHERE c.N_COMPLAINTS > 1;
+
+-- RJ 2026-10-25 (later): "the duplicating RCCS should be not from campaign" - keep only the
+-- references where at least one complaint is NON-CAMPAIGN (campaign-vs-campaign pairs dropped).
+SELECT RCCS, N_COMPLAINTS, RCCS_ROLE, ACCOUNT, ID_COMPLAINT, RCCS_DATE, RCCS_UPDATED, UPDATE_USER,
+       REQ_DATE, REQ_ID, RCCS_STATUS, RCCS_STATUS_EN, RCCS_TYPE, COD_ORIGIN,
+       ACCOUNT_LATEST_CAMPAIGN_RCCS, ACCOUNT_LATEST_REQ_DATE
+FROM #x
+WHERE RCCS IN (SELECT RCCS FROM #x WHERE RCCS_ROLE = 'NON-CAMPAIGN')
+ORDER BY RCCS, SORT_DATE, ID_COMPLAINT;
+
+DROP TABLE #r; DROP TABLE #c; DROP TABLE #x;
+"""
+
+
 def parse_accounts(text: str | None) -> list[str]:
     """Accounts pasted as one per line / comma / space separated -> unique list
     (RJ 2026-10-11: "let's focus on this accounts for now" - 387 pasted)."""

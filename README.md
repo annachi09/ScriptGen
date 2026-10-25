@@ -3059,6 +3059,45 @@ count was compared live with the number its page shows after Scan:
   cards) execute in worker threads, which did not inherit the capture context. Workers now run
   in `contextvars.copy_context()`, so those statements are captured too.
 
+### DOUBLE ITB tab 2: Double ITB - Sanitary only (2026-10-24)
+
+RJ: "in the double itb menu, add a new tab, double ITB sanitary only (means the water is ok, but
+still have in sanitary)". The main list only scans Water / Electricity (a Sanitary duplicate only rides
+along as the twin of a Water duplicate), so a Sanitary duplicate whose Water is fine never showed.
+- `POST /api/double-itb/sanitary-only` -> `double_itb.build_sanitary_only_query()`: a Sanitary (190)
+  item to bill Anomalous (STTOBILL00) with a Billed (STTOBILL07) twin on the same billing service and
+  the same INI_DATE / END_DATE; Water = the Water (19) service of the same payment form and the same
+  supply (GCCOM_SECTOR_SUPPLY.ID_SUPPLY); kept only when that Water has NO Anomalous item for those
+  dates. Shows ready usage / needs rebilling, reading types, the Water NISS and its items for the dates.
+- Page: DOUBLE ITB now has tabs "Water & Electricity" (existing) and "Double ITB - Sanitary only":
+  KPI cards (duplicates + accounts, needs rebilling, zero usage, water billed, water not billed / no
+  water), billing-period and reading-type cards, all click-to-filter; search, copy accounts, CSV.
+- Read-only list for now (no fix script on this tab). Restart needed (new route), then Ctrl+F5.
+
+### run_web.py restarts automatically (2026-10-23)
+
+RJ: "why we cannot auto close the pid now? before it is not a problem". run_web.py now restarts
+instead of reattaching: if port 8420 is busy it asks that server for its PID (`/api/server-info`,
+unauthenticated), stops ONLY that ScriptGen process (`taskkill /PID <pid> /F`), waits for the port to
+free, and starts a fresh server with the current code. Something else on the port (no ScriptGen
+server-info answer) is never killed - the old "already running" message is shown instead.
+`python run_web.py --attach` keeps the old behaviour (just open the running one).
+Note: the packaged ScriptGen-Web.exe gets this only after rebuilding with build_web.bat.
+
+### FIX BILLING: cycle readings only, highest date per account + subsidy tab moved (2026-10-23, later)
+
+RJ: "only consider cycle readings, and should only be by account, mostly will have water and
+electricity, get the highest per account to show only 1 record per account also merge here as new
+tab the tmp dashboard for unbilled subsidized".
+- Subsidized - planned billing: readings limited to Cycle (TIPTL00003). The account's PLANNED BILLING
+  DATE = the highest planned date (reading date + 3) of its cycle readings; Electricity planned and
+  Water planned are shown as separate columns. Day bars use that date. Live: 166,819 accounts with a
+  cycle reading, 166,364 fully billed, 455 with a not-billed cycle reading, dates 08-19 .. 10-03.
+- Temp Dashboard "Subsidized, bill not generated" moved to FIX BILLING CAMPAIGN 2026 as tab 3 (same
+  ids, same route `/api/temp-dashboard/subsidy-missing-bill`; Query used / Refresh now filed under
+  FIX BILLING). Removed from Temp Dashboard.
+- Restart needed (query change), then Ctrl+F5.
+
 ### FIX BILLING CAMPAIGN tab 2: Subsidized - planned billing (2026-10-23)
 
 RJ: "for all the subsidized account, i want to see the planned billing date on their readings for
@@ -3079,6 +3118,115 @@ description" + "use GCGT_RE_READING.reading_date +3".
   Day bars (first planned date per account, red = not billed), wallet-behaviour and tariff cards.
 - Live 2026-10-23: 166,833 accounts, 160,003 fully billed, 6,824 with a not-billed reading (all past
   their planned date), 21,974 with a wallet (2,535,511.619). ~52 s. Restart needed (new route).
+
+### FIX BILLING CAMPAIGN: payment day filter (2026-10-25)
+
+RJ: "we added paymentday in the credit wallet and the rccs attribute, and the request in external
+messages in is deductionDay ... i need a filter for those with payemnt day (deductionDay on the
+request) and the paymentday in the wallet table is null".
+
+- Live schema: wallet payment day = `EWA_GCCOM_SUBSIDY_WALLET.FIXED_DAY`; RCCS attribute =
+  `GCCC_COMPLAINT_ATT` `RCCSDEDDAT`; request = JSON `$.deductionDay`.
+- New columns: Payment day (FIXED_DAY) in the wallet group, deductionDay in the request group,
+  Deduction day (RCCSDEDDAT) in the RCCS group.
+- New scope `day_no_wallet_day` ("Requests - deductionDay set, wallet payment day NULL"): request
+  has a deductionDay, the wallet exists, `FIXED_DAY IS NULL`. Plus a clickable KPI card with the
+  same rule (works on any scope). Python change - restart needed.
+- Live 2026-10-25 (credit requests since 10-16): 24,603 requests, 14,908 with deductionDay,
+  14,843 of them have a wallet, **14,377 with FIXED_DAY NULL**, 65 have no wallet; where FIXED_DAY
+  is filled it always equals deductionDay. Note: 11,001 of the 14,908 have no noBankAmount in the
+  request.
+
+### FIX BILLING CAMPAIGN: only successful requests (2026-10-25)
+
+RJ: "only messages_in and responseheader is not an error : InCMS-BL-SS000009. Invalid system
+configuration detected: Wallet already exists for that account."
+
+- `fix_billing_campaign.REQUEST_OK_SQL`: a request is kept only when
+  `GCGE_EXTERNAL_MESSAGES_IN.RESPONSEHEADER` is empty. Every filled header live is an InCMS-BL error
+  (wallet already exists, DD process on going, deadlocks, CB100009 ...). Applied to the campaign
+  table and the Duplicate RCCS tab. Python change - restart needed.
+- Live 2026-10-25: 25,645 successful requests / 25,455 accounts (about 100 error requests dropped);
+  25,405 with a creditAmount and **every one of them has its RCCS in GCCC_COMPLAINT**.
+  1071736746 now = 1 row (04:55, RCCS1791910892) - its 4 later requests were "Wallet already exists".
+- Re-count on this base (rows = requests with credit): deductionDay set + wallet payment day NULL
+  11,310; No Bank 14,051, of which 9,615 with wallet payment day NULL; 9,693 No Bank requests have
+  no deductionDay.
+
+### FIX BILLING CAMPAIGN: one row per MESSAGES_IN request (2026-10-25)
+
+RJ: "the main table will be the MESSAGES_IN, check this account it has multiple rccs but why we only
+show it once? 1071736746".
+
+- Cause: `#m` kept only the latest request per account (`RN = 1`). Now every
+  `GCGE_EXTERNAL_MESSAGES_IN` '/mobileapp/complaint' request is a row (each matched to its own RCCS);
+  new columns Request date, Latest (`IS_LATEST` / `REQ_SEQ`, 1 = latest), Requests (account).
+- Checkbox "Latest request per account only" brings back the old one-row-per-account view.
+  Copy accounts de-duplicates. Overview card renamed "FIX BILLING CAMPAIGN 2026 requests" (= the
+  page's count). Python change - restart needed.
+- Live: 25,743 requests / 25,434 accounts since 10-16 (25,495 with a creditAmount).
+  1071736746 = 5 requests: 04:55 RCCS1791910892 (complaint 21453243, deductionDay 27, no noBank)
+  then 4 requests 12:44-19:09 all RCCS1792311508 (noBank 54, no deductionDay) - RCCS1792311508
+  does **not exist in GCCC_COMPLAINT**, so those 4 rows show "Request without RCCS".
+- Note: the other tabs that read the requests (Duplicate RCCS) still use the latest per account.
+
+### FIX BILLING CAMPAIGN: "No Bank - wallet payment day NULL" filter (2026-10-25)
+
+RJ: "another filter, no bank with no paymentDAy in credit wallet table".
+
+- Scope `nobank_no_wallet_day` + KPI card: RCCS group "No Bank" (4103COMTYP with a No Bank Amount -
+  RCCS attribute RCCSNOBAMT when the RCCS is found, else the request's noBankAmount; same rule as
+  `category()`), wallet exists, `FIXED_DAY IS NULL`. Python change - restart needed.
+- Live 2026-10-25 (credit requests since 10-16): 14,014 No Bank, 13,933 with a wallet,
+  **9,617 with FIXED_DAY NULL** (none of them has a deductionDay in the request), 81 without a wallet.
+
+### FIX BILLING CAMPAIGN: row selection + export selected, payment day columns (2026-10-25)
+
+RJ: "add to export only selected rows, also add select in current page, select all filtered" /
+"add the paymentDay also in the result".
+
+- Checkbox column (header box = current page), buttons "Select current page" (rows shown, max
+  3,000), "Select all filtered" (every row matching the filters, beyond the 3,000 shown), "Clear
+  selection" + counter. Selection survives filter/sort changes; a new Scan clears it.
+- "Export CSV (filtered)" (as before) and new "Export selected (n)" ->
+  `fix_billing_campaign_2026_selected.csv`.
+- Payment day shown three ways in the table and both CSVs: request `deductionDay` (the request JSON
+  has no `paymentDay` key - checked live), wallet `FIXED_DAY`, RCCS attribute `RCCSDEDDAT`.
+- Static change only (Ctrl+F5); the payment-day columns need the restart from the filter change.
+
+### Temp Dashboard tab: Duplicate RCCS (2026-10-25)
+
+RJ: "Duplicate RCCS, this will be the ones that we use in FIX Billing campaign, vs the one from the
+non campaign.. list them down with the dates. the idea is they have same cod_complaint".
+
+- `temp_dashboard.build_duplicate_rccs_query()`: campaign RCCS = reference of the FBC 2026 requests
+  (`GCGE_EXTERNAL_MESSAGES_IN`, `/mobileapp/complaint`, since 2026-10-16, same JSON parsing as FBC).
+  Lists every `GCCC_COMPLAINT` whose `COD_REF_COMPLAINT` is such a reference and exists 2+ times.
+  Role per complaint: CAMPAIGN (account's latest request), CAMPAIGN (older request), NON-CAMPAIGN.
+  Dates: RCCS created / updated, campaign request date, account's latest request date.
+- Route `POST /api/temp-dashboard/duplicate-rccs` (new route - restart needed).
+- UI groups rows per RCCS (alternate shading), pair-kind cards (Campaign vs Non-campaign /
+  vs older request / on 2+ accounts), status cards, search, copy RCCS, CSV, "ℹ Query used".
+- RJ 2026-10-25 (later): "the main rccs is the campaign, but the duplicationg should be non
+  camapaign" - only references with a NON-CAMPAIGN complaint are kept (campaign-vs-campaign
+  collisions, 268 refs, dropped). UI: MAIN (campaign) vs DUPLICATE (non-campaign).
+- Live 2026-10-25: 4 references / 8 complaints. Every duplicate is 3084COMTYP "Resolved
+  (Applicable)" created before the campaign complaint (2026-02-23, 10-04, 10-07, 10-14).
+
+### Temp Dashboard tab: Sanitary - last bill date > billing date (2026-10-24)
+
+RJ: "find me all sanitary service bill where the last bill date is > billing date, show me status
+billing period account bill number and bill amount and pending amount".
+
+- `temp_dashboard.build_sanitary_last_bill_date_query()`: `GCCOM_BILL` with `ID_OFFERED_SERVICE = 190`
+  and `LAST_BILLING_DATE > BILLING_DATE`, plus account (payment-form REFERENCE), NISS, status
+  (English, `OUC_ADMIN.GCCOM_BILL_STATUS`), billing period description, days between the two dates,
+  `TOTAL_AMOUNT` and `PENDING_AMOUNT`. Read-only, no script.
+- Route `POST /api/temp-dashboard/sanitary-last-bill-date` (new route - server restart needed).
+- UI: KPI cards (bills / with pending / nothing pending / negative amount), status and billing-period
+  cards (click to filter), search, copy accounts, CSV export, "ℹ Query used".
+- Live 2026-10-24: 139 bills / 95 accounts (Invoiced 112, Rebilled 12, Invoicing 11, Cancelled 4);
+  14 with a pending amount (total pending 265.730); April 2026 period has the most (61).
 
 ### Temp Dashboard tab 6: RCCS list check (2026-10-22)
 

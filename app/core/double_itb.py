@@ -450,6 +450,99 @@ def rollback_header(what: str, user: str, program: str) -> str:
     ]) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# Tab 2 "Double ITB - Sanitary only" (RJ 2026-10-24): "double ITB sanitary only (means the
+# water is ok, but still have in sanitary)". The main list only scans Water / Electricity
+# (Sanitary rides along as the twin of a Water duplicate), so a Sanitary duplicate whose
+# Water is fine never shows there. Here:
+#   - a SANITARY (190) item to bill Anomalous (STTOBILL00) with a Billed (STTOBILL07) twin on
+#     the same billing service and the same INI_DATE / END_DATE (same rule as the main list)
+#   - its Water = the Water (19) contracted service of the SAME payment form and the SAME
+#     supply (GCCOM_SECTOR_SUPPLY.ID_SUPPLY - Water 10221619-301 / Sanitary 10221619-701)
+#   - "water is ok" = that Water service has NO Anomalous item to bill for the same dates
+#     (no Water double ITB). Rows without any Water service are kept and flagged.
+# ---------------------------------------------------------------------------
+def build_sanitary_only_query() -> str:
+    billed = format_sql_literal(ITB_STATUS_BILLED)
+    anomalous = format_sql_literal(ITB_STATUS_ANOMALOUS)
+    return f"""
+SELECT * FROM (
+SELECT
+    ss.NISS AS NISS,
+    pf.REFERENCE AS ACCOUNT,
+    a.ID_BILLING_SERVICE AS ID_BILLING_SERVICE,
+    a.ID_BILLING_PERIOD AS ID_BILLING_PERIOD,
+    COALESCE(dict_bp.text, bp.DESCRIPTION) AS BILLING_PERIOD,
+    a.INI_DATE AS INI_DATE,
+    a.END_DATE AS END_DATE,
+    a.ID_ITEM_TO_BILL AS ANOM_ID_ITEM_TO_BILL,
+    a.CREATION_DATE AS ANOM_CREATION_DATE,
+    b.ID_ITEM_TO_BILL AS BILLED_ID_ITEM_TO_BILL,
+    b.ID_BILL AS BILLED_ID_BILL,
+    b.ID_BILLING_PERIOD AS BILLED_ID_BILLING_PERIOD,
+    ru.READY_USAGE AS ANOM_READY_USAGE,
+    ru.READING_COUNT AS ANOM_READING_COUNT,
+    CASE WHEN ISNULL(ru.READY_USAGE, 0) <> 0 THEN 1 ELSE 0 END AS NEEDS_REBILLING,
+    rtp.READING_TYPES AS READING_TYPES,
+    wss.NISS AS WATER_NISS,
+    wi.WATER_ITBS AS WATER_ITBS,
+    ISNULL(wi.WATER_ANOM_COUNT, 0) AS WATER_ANOM_COUNT,
+    ISNULL(wi.WATER_BILLED_COUNT, 0) AS WATER_BILLED_COUNT
+FROM GCCOM_ITEMS_TO_BILL a WITH (NOLOCK)
+JOIN GCCOM_ITEMS_TO_BILL b WITH (NOLOCK) ON b.ID_BILLING_SERVICE = a.ID_BILLING_SERVICE
+    AND b.STATUS = {billed}
+    AND b.INI_DATE = a.INI_DATE
+    AND b.END_DATE = a.END_DATE
+    AND b.ID_ITEM_TO_BILL <> a.ID_ITEM_TO_BILL
+JOIN GCCOM_BILLING_SERVICE bs WITH (NOLOCK) ON bs.ID_BILLING_SERVICE = a.ID_BILLING_SERVICE
+JOIN GCCOM_CONTRACTED_SERVICE cs WITH (NOLOCK) ON cs.ID_CONTRACTED_SERVICE = bs.ID_CONTRACTED_SERVICE
+LEFT JOIN GCCOM_SECTOR_SUPPLY ss WITH (NOLOCK) ON ss.ID_SECTOR_SUPPLY = cs.ID_SECTOR_SUPPLY
+LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = cs.ID_PAYMENT_FORM
+LEFT JOIN GCCOM_BILLING_PERIOD bp ON bp.ID_BILLING_PERIOD = a.ID_BILLING_PERIOD
+LEFT JOIN GCTS_DICTIONARY dict_bp ON dict_bp.id = bp.PERIOD_NAME_XI18N AND dict_bp.locale = 'EN'
+OUTER APPLY (
+    SELECT SUM(rit.READY_USAGE) AS READY_USAGE, COUNT(*) AS READING_COUNT
+    FROM {READINGS_ITEMS_TO_BILL_TABLE} rit
+    WHERE rit.ID_ITEM_TO_BILL = a.ID_ITEM_TO_BILL
+) ru
+OUTER APPLY (
+    SELECT STRING_AGG(y.RT, ', ') AS READING_TYPES FROM (
+      SELECT DISTINCT COALESCE(drt.TEXT, rt.DESCRIPTION, rd.READING_TYPE) AS RT
+      FROM {READINGS_ITEMS_TO_BILL_TABLE} rit2
+      JOIN OUC_COMMON_ADMIN.GCGT_RE_READING rd ON rd.ID_READING = rit2.ID_READING
+      LEFT JOIN OUC_COMMON_ADMIN.GCGT_RE_READING_TYPE rt ON rt.COD_DEVELOP = rd.READING_TYPE
+      LEFT JOIN GCTS_DICTIONARY drt ON drt.ID = rt.DESCRIPTION_XI18N AND drt.LOCALE = 'EN'
+      WHERE rit2.ID_ITEM_TO_BILL = a.ID_ITEM_TO_BILL) y
+) rtp
+-- the Water service of the same account and the same supply
+OUTER APPLY (
+    SELECT TOP 1 wcs.ID_CONTRACTED_SERVICE, wcs.ID_SECTOR_SUPPLY
+    FROM GCCOM_CONTRACTED_SERVICE wcs WITH (NOLOCK)
+    JOIN GCCOM_SECTOR_SUPPLY wss2 WITH (NOLOCK) ON wss2.ID_SECTOR_SUPPLY = wcs.ID_SECTOR_SUPPLY
+    WHERE wcs.ID_PAYMENT_FORM = cs.ID_PAYMENT_FORM AND wcs.ID_OFFERED_SERVICE = {OFFERED_WATER}
+      AND wss2.ID_SUPPLY = ss.ID_SUPPLY
+    ORDER BY wcs.ID_CONTRACTED_SERVICE DESC
+) w
+LEFT JOIN GCCOM_SECTOR_SUPPLY wss WITH (NOLOCK) ON wss.ID_SECTOR_SUPPLY = w.ID_SECTOR_SUPPLY
+-- that Water service's items to bill for the same dates
+OUTER APPLY (
+    SELECT STRING_AGG(CAST(wt.ID_ITEM_TO_BILL AS varchar(20)) + ' ' + wt.STATUS, ', ') AS WATER_ITBS,
+           SUM(CASE WHEN wt.STATUS = {anomalous} THEN 1 ELSE 0 END) AS WATER_ANOM_COUNT,
+           SUM(CASE WHEN wt.STATUS = {billed} THEN 1 ELSE 0 END) AS WATER_BILLED_COUNT
+    FROM GCCOM_ITEMS_TO_BILL wt WITH (NOLOCK)
+    JOIN GCCOM_BILLING_SERVICE wbs WITH (NOLOCK) ON wbs.ID_BILLING_SERVICE = wt.ID_BILLING_SERVICE
+    WHERE wbs.ID_CONTRACTED_SERVICE = w.ID_CONTRACTED_SERVICE
+      AND wt.INI_DATE = a.INI_DATE AND wt.END_DATE = a.END_DATE
+) wi
+WHERE a.STATUS = {anomalous}
+  AND cs.ID_OFFERED_SERVICE = {OFFERED_SANITARY}
+) q
+-- "water is ok": no Anomalous Water item to bill for the same dates
+WHERE q.WATER_ANOM_COUNT = 0
+ORDER BY q.ID_BILLING_PERIOD DESC, q.NISS
+"""
+
+
 def build_double_itb_query() -> str:
     billed = format_sql_literal(ITB_STATUS_BILLED)
     anomalous = format_sql_literal(ITB_STATUS_ANOMALOUS)

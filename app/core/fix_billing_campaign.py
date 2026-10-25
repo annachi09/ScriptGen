@@ -51,7 +51,18 @@ ATTRS = {"RCCSCRDAMT": "Credit Amount", "RCCSNOBAMT": "No Bank Amount",
 # external messages_in" - the requests (GCGE_EXTERNAL_MESSAGES_IN, latest per account)
 # are now the base; EWA_DDI_ELIGIBILITY is optional extra info (LEFT JOIN) and the
 # payment form comes from GCCOM_PAYMENT_FORM.REFERENCE = the request's idAccount.
-SCOPES = ("all", "in_ewa", "not_in_ewa", "with_wallet", "no_wallet")
+SCOPES = ("all", "in_ewa", "not_in_ewa", "with_wallet", "no_wallet", "day_no_wallet_day", "nobank_no_wallet_day")
+# RJ 2026-10-25: "we added paymentday in the credit wallet and the rccs attribute, and the request
+# in external messages in is deductionDay, so for no Bank only there will be deduction day, i need
+# a filter for those with payemnt day (deductionDay on the request) and the paymentday in the
+# wallet table is null". Live schema: wallet = EWA_GCCOM_SUBSIDY_WALLET.FIXED_DAY, RCCS attribute
+# = GCCC_COMPLAINT_ATT 'RCCSDEDDAT' (e.g. 22), request = JSON $.deductionDay.
+RCCS_DAY_ATTR = "RCCSDEDDAT"
+# RJ 2026-10-25: "only messages_in and responseheader is not an error : InCMS-BL-SS000009. Invalid
+# system configuration detected: Wallet already exists for that account." - a request whose
+# RESPONSEHEADER carries an error (all live ones start "InCMS-BL-...": wallet already exists, DD
+# process on going, deadlocks, ...) created no RCCS, so it is left out. Success = empty header.
+REQUEST_OK_SQL = "NULLIF(LTRIM(RTRIM(mi.RESPONSEHEADER)), '') IS NULL"
 EWA_COLUMNS = ("outstanding_as_of_now", "bill_amount_may", "bill_amount_jun", "bill_amount_jul",
                "bill_amount_aug", "bill_amount_set", "bill_amount_oct", "debt_as_of_cutoff_date",
                "credit_as_of_cutoff_date", "payment_method", "calculated_ddi", "credit", "ind_processed")
@@ -78,6 +89,16 @@ def build_query(scope: str = "all", since: str | None = None) -> str:
         "not_in_ewa": " AND e.id_payment_form IS NULL",
         "with_wallet": " AND w.ID_PAYMENT_FORM IS NOT NULL",
         "no_wallet": " AND w.ID_PAYMENT_FORM IS NULL",
+        # request has a deductionDay, the wallet exists but its FIXED_DAY (payment day) is null
+        "day_no_wallet_day": (" AND NULLIF(LTRIM(RTRIM(m.DEDUCTION_DAY)), '') IS NOT NULL"
+                              " AND w.ID_PAYMENT_FORM IS NOT NULL AND w.FIXED_DAY IS NULL"),
+        # RJ 2026-10-25: "no bank with no paymentDAy in credit wallet table" - same "No Bank" rule
+        # as the page's RCCS group (4103COMTYP + a No Bank Amount: the RCCS attribute when the
+        # RCCS is found, else the request's noBankAmount); wallet exists, FIXED_DAY null.
+        "nobank_no_wallet_day": (" AND m.COMPLAINT_TYPE = '4103COMTYP'"
+                                 " AND NULLIF(LTRIM(RTRIM(CASE WHEN c.ID_COMPLAINT IS NOT NULL THEN c.ATT_NOBANK_AMT"
+                                 " ELSE m.NO_BANK_AMOUNT END)), '') IS NOT NULL"
+                                 " AND w.ID_PAYMENT_FORM IS NOT NULL AND w.FIXED_DAY IS NULL"),
     }[scope]
     where = f"WHERE {has_credit}{extra}"
     ewa_cols = ",\n       ".join(f"e.{c} AS EWA_{c.upper()}" for c in EWA_COLUMNS)
@@ -115,8 +136,11 @@ SELECT x.* INTO #m FROM (
         CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.deductionDay') END AS DEDUCTION_DAY
     ) j
     WHERE mi.REQUESTURL = '{REQUEST_URL}' AND mi.CREATE_DATE > '{since}'
-) x
-WHERE x.RN = 1;
+      AND {REQUEST_OK_SQL}
+) x;
+-- RJ 2026-10-25: "the main table will be the MESSAGES_IN, check this account it has multiple rccs
+-- but why we only show it once? 1071736746" - every request is now a row (was: latest per
+-- account only, RN = 1). RN stays as REQ_SEQ (1 = the account's latest request).
 
 -- complaint + its 4 attributes for the RCCS of each request
 -- RJ 2026-10-18 fix: one RCCS reference can exist as SEVERAL complaints, one per account
@@ -128,13 +152,14 @@ SELECT c.COD_REF_COMPLAINT, c.ID_ACCOUNT, c.ID_COMPLAINT, c.COD_STATUS_COMPLAINT
        MAX(CASE WHEN a.COD_MASTER_ATTRIBUTE = 'RCCSCRDAMT' THEN a.ATT_VALUE END) AS ATT_CREDIT_AMT,
        MAX(CASE WHEN a.COD_MASTER_ATTRIBUTE = 'RCCSNOBAMT' THEN a.ATT_VALUE END) AS ATT_NOBANK_AMT,
        MAX(CASE WHEN a.COD_MASTER_ATTRIBUTE = 'RCCSCRDUSG' THEN a.ATT_VALUE END) AS ATT_CREDIT_USAGE,
-       MAX(CASE WHEN a.COD_MASTER_ATTRIBUTE = 'FIXAMTYP' THEN a.ATT_VALUE END) AS ATT_DEDUCTION_AMT
+       MAX(CASE WHEN a.COD_MASTER_ATTRIBUTE = 'FIXAMTYP' THEN a.ATT_VALUE END) AS ATT_DEDUCTION_AMT,
+       MAX(CASE WHEN a.COD_MASTER_ATTRIBUTE = '{RCCS_DAY_ATTR}' THEN a.ATT_VALUE END) AS ATT_DEDUCTION_DAY
 INTO #c
 FROM #m m
 JOIN OUC_ADMIN.GCCC_COMPLAINT c WITH (NOLOCK) ON c.COD_REF_COMPLAINT = m.RCCS_REF
 LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_TYPE ct ON ct.ID_COMPLAINT_TYPE = c.ID_COMPLAINT_TYPE
 LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_ATT a WITH (NOLOCK)
-     ON a.ID_COMPLAINT = c.ID_COMPLAINT AND a.COD_MASTER_ATTRIBUTE IN ('RCCSCRDAMT', 'RCCSNOBAMT', 'RCCSCRDUSG', 'FIXAMTYP')
+     ON a.ID_COMPLAINT = c.ID_COMPLAINT AND a.COD_MASTER_ATTRIBUTE IN ('RCCSCRDAMT', 'RCCSNOBAMT', 'RCCSCRDUSG', 'FIXAMTYP', '{RCCS_DAY_ATTR}')
 GROUP BY c.COD_REF_COMPLAINT, c.ID_ACCOUNT, c.ID_COMPLAINT, c.COD_STATUS_COMPLAINT, c.CREATE_DATE, ct.COD_DEVELOP;
 
 -- RJ 2026-10-21: no TOP - "do not limit top 60k, we are expecting 163k customers".
@@ -143,14 +168,15 @@ SELECT m.ID_ACCOUNT_REF AS ACCOUNT,
        pf.ID_PAYMENT_FORM,
        CASE WHEN e.id_payment_form IS NOT NULL THEN 'YES' ELSE 'NO' END AS IN_EWA,
        w.ID_WALLET, w.IND_ACTIVE AS WALLET_ACTIVE, w.BALANCE AS WALLET_BALANCE, w.COD_BEHAVIOUR,
-       bvw.TXT AS BEHAVIOUR_DESC, w.UPDATE_DATE AS WALLET_UPDATED,
-       m.ID_SEQ AS REQ_ID, m.REQ_DATE, m.REQ_STATUS, m.REQ_COUNT, m.COMPLAINT_TYPE AS REQ_COMPLAINT_TYPE,
+       bvw.TXT AS BEHAVIOUR_DESC, w.UPDATE_DATE AS WALLET_UPDATED, w.FIXED_DAY AS WALLET_FIXED_DAY,
+       m.ID_SEQ AS REQ_ID, m.REQ_DATE, m.REQ_STATUS, m.REQ_COUNT, m.RN AS REQ_SEQ,
+       CASE WHEN m.RN = 1 THEN 'YES' ELSE 'NO' END AS IS_LATEST, m.COMPLAINT_TYPE AS REQ_COMPLAINT_TYPE,
        m.RCCS_REF, m.CREDIT_AMOUNT AS REQ_CREDIT_AMOUNT, m.NO_BANK_AMOUNT AS REQ_NOBANK_AMOUNT,
        m.CREDIT_USAGE AS REQ_CREDIT_USAGE, m.DEDUCTION_AMOUNT AS REQ_DEDUCTION_AMOUNT,
        m.AMOUNT_TYPE AS REQ_AMOUNT_TYPE, m.DEDUCTION_DAY AS REQ_DEDUCTION_DAY,
        c.ID_COMPLAINT, c.RCCS_DATE, c.RCCS_TYPE_CODE, c.COD_STATUS_COMPLAINT AS RCCS_STATUS,
        COALESCE(ds.TEXT, st.NAME_TYPE) AS RCCS_STATUS_EN,
-       c.ATT_CREDIT_AMT, c.ATT_NOBANK_AMT, c.ATT_CREDIT_USAGE, bva.TXT AS ATT_CREDIT_USAGE_DESC, c.ATT_DEDUCTION_AMT,
+       c.ATT_CREDIT_AMT, c.ATT_NOBANK_AMT, c.ATT_CREDIT_USAGE, bva.TXT AS ATT_CREDIT_USAGE_DESC, c.ATT_DEDUCTION_AMT, c.ATT_DEDUCTION_DAY,
        {ewa_cols}
 FROM #m m
 LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.REFERENCE = m.ID_ACCOUNT_REF
@@ -162,7 +188,7 @@ LEFT JOIN #bv bva ON bva.COD_DEVELOP = c.ATT_CREDIT_USAGE
 LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_STATUS st ON st.COD_DEVELOP = c.COD_STATUS_COMPLAINT
 LEFT JOIN GCTS_DICTIONARY ds ON ds.ID = st.NAME_TYPE_XI18N AND ds.LOCALE = 'EN'
 {where}
-ORDER BY m.ID_ACCOUNT_REF;
+ORDER BY m.ID_ACCOUNT_REF, m.REQ_DATE DESC, m.ID_SEQ DESC;
 
 DROP TABLE #m; DROP TABLE #c; DROP TABLE #bv;
 """
@@ -181,11 +207,17 @@ DROP TABLE #m; DROP TABLE #c; DROP TABLE #bv;
 #   billed = READ_STATUS 7000STSRED Billed / 7001STSRED UAU - Billed
 # One row per subsidized account (accounts without a reading in the period included).
 # Live 2026-10-23 (period 10000000237 = September 2026): 166,833 accounts, ~52 s.
+# RJ 2026-10-23 (later): "only consider cycle readings, and should only be by account, mostly
+# will have water and electricity, get the highest per account to show only 1 record per
+# account" - readings limited to READING_TYPE TIPTL00003 (Cycle); the account's PLANNED
+# BILLING DATE = the HIGHEST planned date of its cycle readings (electricity / water dates
+# are also shown separately).
 # ---------------------------------------------------------------------------
 SUBSIDY_FARES = {10000000003: "E-D2", 10000000004: "W-D2", 10000000006: "E-D2-NM"}
 SUBSIDY_PERIOD_DEFAULT = 10000000237
 PLANNED_BILLING_DAYS = 3
 BILLED_READ_STATUSES = ("7000STSRED", "7001STSRED")
+CYCLE_READING_TYPE = "TIPTL00003"
 
 
 def build_subsidy_planned_query(billing_period: int = SUBSIDY_PERIOD_DEFAULT) -> str:
@@ -219,13 +251,16 @@ SELECT s.ID_PAYMENT_FORM, r.ID_READING, r.READ_STATUS, r.READING_TYPE,
             ELSE CAST(s.ID_OFFERED_SERVICE AS varchar(10)) END AS SVC
 INTO #rd
 FROM #sub s
-JOIN GCGT_RE_READING r WITH (NOLOCK) ON r.ID_SECTOR_SUPPLY = s.ID_SECTOR_SUPPLY AND r.ID_BILLING_PERIOD = {bp};
+JOIN GCGT_RE_READING r WITH (NOLOCK) ON r.ID_SECTOR_SUPPLY = s.ID_SECTOR_SUPPLY AND r.ID_BILLING_PERIOD = {bp}
+ AND r.READING_TYPE = '{CYCLE_READING_TYPE}';
 
 SELECT pf.REFERENCE AS ACCOUNT, a.ID_PAYMENT_FORM,
   (SELECT STRING_AGG(x.F, ', ') FROM (SELECT DISTINCT {fare_name} AS F FROM #sub s2
      WHERE s2.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM) x) AS TARIFFS,
   a.SUB_SERVICES,
   ISNULL(rs.READINGS, 0) AS READINGS,
+  rs.LAST_PLANNED_BILLING_DATE AS PLANNED_BILLING_DATE,
+  rs.ELEC_PLANNED_DATE, rs.WATER_PLANNED_DATE,
   rs.FIRST_PLANNED_BILLING_DATE, rs.LAST_PLANNED_BILLING_DATE, rs.UNBILLED_PLANNED_DATE,
   ISNULL(rs.BILLED, 0) AS BILLED_READINGS, ISNULL(rs.READINGS, 0) - ISNULL(rs.BILLED, 0) AS NOT_BILLED_READINGS,
   (SELECT STRING_AGG(r2.SVC + ' ' + CONVERT(varchar(10), r2.READING_DATE, 23) + ' -> '
@@ -241,6 +276,8 @@ LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = a.ID_PAYME
 LEFT JOIN (SELECT ID_PAYMENT_FORM, COUNT(*) AS READINGS,
                   MIN(PLANNED_BILLING_DATE) AS FIRST_PLANNED_BILLING_DATE,
                   MAX(PLANNED_BILLING_DATE) AS LAST_PLANNED_BILLING_DATE,
+                  MAX(CASE WHEN SVC = 'Electricity' THEN PLANNED_BILLING_DATE END) AS ELEC_PLANNED_DATE,
+                  MAX(CASE WHEN SVC = 'Water' THEN PLANNED_BILLING_DATE END) AS WATER_PLANNED_DATE,
                   MIN(CASE WHEN READ_STATUS NOT IN ({billed}) THEN PLANNED_BILLING_DATE END) AS UNBILLED_PLANNED_DATE,
                   SUM(CASE WHEN READ_STATUS IN ({billed}) THEN 1 ELSE 0 END) AS BILLED
            FROM #rd GROUP BY ID_PAYMENT_FORM) rs ON rs.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM
@@ -249,7 +286,7 @@ LEFT JOIN (SELECT v.COD_DEVELOP, COALESCE(d.TEXT, v.NAME_TYPE) AS TXT
            FROM OUC_COMMON_ADMIN.GCGT_ATTRIBUTE_VALUES v
            LEFT JOIN GCTS_DICTIONARY d ON d.ID = v.NAME_TYPE_XI18N AND d.LOCALE = 'EN'
            WHERE v.COD_MASTER_ATTRIBUTE = '{BEHAVIOUR_MASTER}') bv ON bv.COD_DEVELOP = w.COD_BEHAVIOUR
-ORDER BY rs.FIRST_PLANNED_BILLING_DATE, pf.REFERENCE;
+ORDER BY rs.LAST_PLANNED_BILLING_DATE, pf.REFERENCE;
 
 DROP TABLE #sub; DROP TABLE #rd; DROP TABLE #st;
 """

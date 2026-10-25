@@ -1526,6 +1526,13 @@
           <p class="page-subtitle">Billing services with an Anomalous item to bill and a Billed twin for the same INI_DATE / END_DATE.</p>
         </header>
 
+        <!-- RJ 2026-10-24: tab 2 "Double ITB - Sanitary only" (water ok, sanitary duplicate remains) -->
+        <nav class="da-subnav" aria-label="DOUBLE ITB tabs">
+          <button type="button" class="da-subnav-btn is-active" data-ditb-sub="main">Water &amp; Electricity</button>
+          <button type="button" class="da-subnav-btn" data-ditb-sub="sanonly">Double ITB - Sanitary only</button>
+        </nav>
+        <div class="da-subpage is-active" data-ditb-sub="main">
+
         <details class="hx-info">
           <summary>ℹ️ About this page</summary>
           <div class="hx-info-body">
@@ -1632,6 +1639,40 @@
             </div>
             <pre class="script-output" id="ditb-rollback"></pre>
           </details>
+        </div>
+        </div>
+
+        <!-- RJ 2026-10-24: "double ITB sanitary only (means the water is ok, but still have in sanitary)" -->
+        <div class="da-subpage" data-ditb-sub="sanonly">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">A <b>Sanitary</b> item to bill stuck <b>Anomalous</b> (STTOBILL00) with a <b>Billed</b> twin (STTOBILL07) on the same billing service and the same INI_DATE / END_DATE, where the <b>Water</b> of the same account and the same supply has <b>no Anomalous item</b> for those dates (Water is OK). These never show in the Water &amp; Electricity tab, because there a Sanitary duplicate is only picked up together with a Water duplicate.</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Double ITB - Sanitary only</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="dsan-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="dsan-copy-btn" disabled title="Copy the visible accounts (one per line)">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="dsan-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="dsan-summary">Click Scan to load.</div>
+          <div class="rbo-dash" id="dsan-dash" hidden>
+            <div class="rbo-kpis fbc-kpis" id="dsan-kpi-row"></div>
+            <div class="fsp-panels" style="margin-top:10px;">
+              <section class="rbo-panel"><header><h3>📅 By billing period</h3><span class="rbo-sub">click to filter</span></header><div id="dsan-bp"></div></section>
+              <section class="rbo-panel"><header><h3>📖 Reading type sent to bill</h3><span class="rbo-sub">click to filter</span></header><div id="dsan-rt"></div></section>
+            </div>
+          </div>
+          <div class="key-panel-row" id="dsan-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <input id="dsan-filter-search" class="text-input text-input-sm" placeholder="NISS, account, ITB id…" style="width:240px;" />
+            <span class="hint-text" id="dsan-active-filters" style="margin-left:auto;"></span>
+            <button type="button" class="btn btn-pill btn-sm" id="dsan-clear-btn">Clear filters</button>
+          </div>
+          <div class="hint-text" id="dsan-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="dsan-table"><thead><tr></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
         </div>
       </section>
 
@@ -1772,11 +1813,81 @@
         <nav class="da-subnav" aria-label="Temp Dashboard tabs">
           <button type="button" class="da-subnav-btn is-active" data-tmpd-sub="accounts">Accounts &amp; readings</button>
           <button type="button" class="da-subnav-btn" data-tmpd-sub="sanitary">SANITARY not Match Water Status</button>
-          <button type="button" class="da-subnav-btn" data-tmpd-sub="subsidy">Subsidized, bill not generated</button>
+          <!-- RJ 2026-10-23: "Subsidized, bill not generated" moved to FIX BILLING CAMPAIGN 2026 -->
           <button type="button" class="da-subnav-btn" data-tmpd-sub="wsstatus">Water vs Sanitary status</button>
           <button type="button" class="da-subnav-btn" data-tmpd-sub="ddi">DDI eligibility × complaints</button>
           <button type="button" class="da-subnav-btn" data-tmpd-sub="rccslist">RCCS list check</button>
+          <button type="button" class="da-subnav-btn" data-tmpd-sub="sanlbd">Sanitary: last bill date &gt; billing date</button>
+          <button type="button" class="da-subnav-btn" data-tmpd-sub="duprccs">Duplicate RCCS</button>
         </nav>
+
+        <!-- RJ 2026-10-25: "Duplicate RCCS, this will be the ones that we use in FIX Billing campaign,
+             vs the one from the non campaign.. list them down with the dates. the idea is they have same cod_complaint" -->
+        <div class="da-subpage" data-tmpd-sub="duprccs">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">RCCS references used by the <b>FIX BILLING CAMPAIGN 2026</b> requests (GCGE_EXTERNAL_MESSAGES_IN, since 2026-10-16) that are <b>also used by a non-campaign complaint</b> (same GCCC_COMPLAINT.COD_REF_COMPLAINT). <b>MAIN</b> = the campaign complaint, <b>DUPLICATE</b> = the non-campaign complaint (no campaign request of that account used this RCCS).</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Duplicate RCCS</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="tdr-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="tdr-copy-btn" disabled title="Copy the visible RCCS references (one per line)">📋 Copy RCCS</button>
+              <button type="button" class="btn btn-pill" id="tdr-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="tdr-summary">Click Scan to load (~20s).</div>
+          <div class="rbo-dash" id="tdr-dash" hidden>
+            <div class="rbo-kpis fbc-kpis" id="tdr-kpi-row"></div>
+            <div class="fsp-panels" style="margin-top:10px;">
+              <section class="rbo-panel"><header><h3>🧩 Pair kind (per RCCS)</h3><span class="rbo-sub">click to filter</span></header><div id="tdr-kind"></div></section>
+              <section class="rbo-panel"><header><h3>🏷 RCCS status</h3><span class="rbo-sub">click to filter</span></header><div id="tdr-status"></div></section>
+            </div>
+          </div>
+          <div class="key-panel-row" id="tdr-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <input id="tdr-filter-search" class="text-input text-input-sm" placeholder="RCCS, account, complaint id…" style="width:240px;" />
+            <span class="hint-text" id="tdr-active-filters" style="margin-left:auto;"></span>
+            <button type="button" class="btn btn-pill btn-sm" id="tdr-clear-btn">Clear filters</button>
+          </div>
+          <div class="hint-text" id="tdr-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="tdr-table"><thead><tr></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+        </div>
+
+        <!-- RJ 2026-10-24: "find me all sanitary service bill where the last bill date is > billing date,
+             show me status billing period account bill number and bill amount and pending amount" -->
+        <div class="da-subpage" data-tmpd-sub="sanlbd">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Every <b>Sanitary</b> bill (GCCOM_BILL.ID_OFFERED_SERVICE = 190) whose <b>LAST_BILLING_DATE is after its BILLING_DATE</b>, with status (English), billing period, account, bill number, bill amount and pending amount.</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Sanitary: last bill date &gt; billing date</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="tslb-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="tslb-copy-btn" disabled title="Copy the visible accounts (one per line)">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="tslb-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="tslb-summary">Click Scan to load (a few seconds).</div>
+          <div class="rbo-dash" id="tslb-dash" hidden>
+            <div class="rbo-kpis fbc-kpis" id="tslb-kpi-row"></div>
+            <div class="fsp-panels" style="margin-top:10px;">
+              <section class="rbo-panel"><header><h3>🏷 Bill status</h3><span class="rbo-sub">click to filter</span></header><div id="tslb-status"></div></section>
+              <section class="rbo-panel"><header><h3>📅 Billing period</h3><span class="rbo-sub">click to filter</span></header><div id="tslb-bp"></div></section>
+            </div>
+          </div>
+          <div class="key-panel-row" id="tslb-filter-row" hidden>
+            <label class="field-label">Search</label>
+            <input id="tslb-filter-search" class="text-input text-input-sm" placeholder="Account, NISS, bill id / number…" style="width:240px;" />
+            <span class="hint-text" id="tslb-active-filters" style="margin-left:auto;"></span>
+            <button type="button" class="btn btn-pill btn-sm" id="tslb-clear-btn">Clear filters</button>
+          </div>
+          <div class="hint-text" id="tslb-filtered-count"></div>
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="tslb-table"><thead><tr></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+        </div>
 
         <!-- RJ 2026-10-22: tab 6 "RCCS list check" - pasted RCCS + account list -> complaint + wallet -->
         <div class="da-subpage" data-tmpd-sub="rccslist">
@@ -1971,8 +2082,25 @@
         </div>
         </div>
 
-        <!-- RJ 2026-10-12: third tab - subsidized accounts whose period bill is not generated -->
-        <div class="da-subpage" data-tmpd-sub="subsidy">
+        <!-- RJ 2026-10-12: third tab - subsidized accounts whose period bill is not generated
+             RJ 2026-10-23: moved to FIX BILLING CAMPAIGN 2026 ("merge here as new tab") - see that page -->
+      </section>
+
+      <!-- ===== FIX BILLING CAMPAIGN 2026 (RJ 2026-10-18) ===== -->
+      <section class="page" id="page-fixbillingcampaign">
+        <header class="page-header">
+          <h1>FIX BILLING CAMPAIGN 2026</h1>
+        </header>
+        <!-- RJ 2026-10-23: tab 2 "Subsidized - planned billing" -->
+        <nav class="da-subnav" aria-label="Fix billing campaign tabs">
+          <button type="button" class="da-subnav-btn is-active" data-fbc-sub="campaign">Campaign requests</button>
+          <button type="button" class="da-subnav-btn" data-fbc-sub="planned">Subsidized - planned billing</button>
+          <button type="button" class="da-subnav-btn" data-fbc-sub="subsidy">Subsidized, bill not generated</button>
+        </nav>
+
+        <!-- RJ 2026-10-23: moved here from Temp Dashboard ("merge here as new tab the tmp dashboard for
+             unbilled subsidized"). Same ids / route (/api/temp-dashboard/subsidy-missing-bill). -->
+        <div class="da-subpage" data-fbc-sub="subsidy">
         <p class="page-subtitle" style="margin:-6px 0 14px;">Accounts with a subsidized service - tariff <b>Domestic - Bahraini First Account</b> (E-D2 10000000003, W-D2 10000000004, E-D2-NM 10000000006) - that already has <b>at least 6 cycle bills</b> (TFGEN00001, not Rebilled / Cancelled, not Credit Note), where the billing period's bill is <b>not generated for every active service</b> of the account, and the account has a <b>not-yet-billed reading</b> in the period (Anomalous 5000 / Available 1000 / Sent to bill 6000; Cycle, Distribution or Direct Connection). <b>None</b> = no service billed in the period (main focus); <b>Partial</b> = some services billed.</p>
         <div class="card">
           <div class="card-header">
@@ -2001,18 +2129,6 @@
           </div>
         </div>
         </div>
-      </section>
-
-      <!-- ===== FIX BILLING CAMPAIGN 2026 (RJ 2026-10-18) ===== -->
-      <section class="page" id="page-fixbillingcampaign">
-        <header class="page-header">
-          <h1>FIX BILLING CAMPAIGN 2026</h1>
-        </header>
-        <!-- RJ 2026-10-23: tab 2 "Subsidized - planned billing" -->
-        <nav class="da-subnav" aria-label="Fix billing campaign tabs">
-          <button type="button" class="da-subnav-btn is-active" data-fbc-sub="campaign">Campaign requests</button>
-          <button type="button" class="da-subnav-btn" data-fbc-sub="planned">Subsidized - planned billing</button>
-        </nav>
         <div class="da-subpage is-active" data-fbc-sub="campaign">
         <p class="page-subtitle" style="margin:-6px 0 14px;">Every account with a <b>/mobileapp/complaint</b> request (GCGE_EXTERNAL_MESSAGES_IN, latest per account since the date, with a CreditAmount) - payment form via GCCOM_PAYMENT_FORM - linked to its <b>subsidy wallet</b> (credit balance and behaviour), flagged whether it is in <b>EWA_DDI_ELIGIBILITY</b> (info only), and to the <b>RCCS</b> it created (GCCC_COMPLAINT.COD_REF_COMPLAINT) with its attributes Credit Amount, No Bank Amount, Credit Usage and Deduction (Fixed) Amount.</p>
         <div class="card">
@@ -2027,13 +2143,19 @@
                 <option value="not_in_ewa">Requests - NOT in EWA_DDI_ELIGIBILITY</option>
                 <option value="with_wallet">Requests - with a wallet</option>
                 <option value="no_wallet">Requests - without a wallet</option>
+                <!-- RJ 2026-10-25: request has deductionDay, wallet FIXED_DAY (payment day) is null -->
+                <option value="day_no_wallet_day">Requests - deductionDay set, wallet payment day NULL</option>
+                <!-- RJ 2026-10-25: "no bank with no paymentDAy in credit wallet table" -->
+                <option value="nobank_no_wallet_day">No Bank - wallet payment day NULL</option>
               </select>
               <span class="hint-text" title="RJ 2026-10-18: customers whose request has no creditAmount are excluded">only requests with a CreditAmount</span>
               <label class="field-label" for="fbc-since">Requests after</label>
               <input id="fbc-since" class="text-input text-input-sm" type="date" value="2026-10-16" />
               <button type="button" class="btn btn-pill" id="fbc-detect-btn">🔍 Scan</button>
               <button type="button" class="btn btn-pill" id="fbc-copy-btn" disabled title="Copy the visible accounts (one per line)">📋 Copy accounts</button>
-              <button type="button" class="btn btn-pill" id="fbc-export-btn" disabled>⬇ Export CSV</button>
+              <button type="button" class="btn btn-pill" id="fbc-export-btn" disabled title="Export every row that matches the current filters">⬇ Export CSV (filtered)</button>
+              <!-- RJ 2026-10-25: "add to export only selected rows, also add select in current page, select all filtered" -->
+              <button type="button" class="btn btn-pill" id="fbc-export-sel-btn" disabled title="Export only the ticked rows">⬇ Export selected</button>
             </div>
           </div>
           <div class="hint-text" id="fbc-summary">Click Scan to load (about 15s).</div>
@@ -2062,10 +2184,18 @@
             <textarea id="fbc-filter-search" class="text-input text-input-sm" rows="2" placeholder="Account / payment form / RCCS… or paste many" style="width:240px;resize:vertical;"></textarea>
             <span class="hint-text" id="fbc-filter-search-count"></span>
             <label class="field-label" style="margin-left:12px;"><input type="checkbox" id="fbc-ewa-cols" /> Show all EWA columns</label>
+            <!-- RJ 2026-10-25: rows = every MESSAGES_IN request; tick for the latest per account only -->
+            <label class="field-label" style="margin-left:12px;" title="Hide the older requests of an account"><input type="checkbox" id="fbc-latest-only" /> Latest request per account only</label>
             <span class="hint-text" id="fbc-active-filters" style="margin-left:auto;"></span>
             <button type="button" class="btn btn-pill btn-sm" id="fbc-clear-btn">Clear filters</button>
           </div>
           <div class="hint-text" id="fbc-filtered-count"></div>
+          <div class="key-panel-row" id="fbc-sel-row" hidden style="margin-top:6px;">
+            <button type="button" class="btn btn-pill btn-sm" id="fbc-sel-page-btn" title="Tick every row shown in the table now">☑ Select current page</button>
+            <button type="button" class="btn btn-pill btn-sm" id="fbc-sel-all-btn" title="Tick every row matching the filters (also the ones beyond the first 3,000 shown)">☑ Select all filtered</button>
+            <button type="button" class="btn btn-pill btn-sm" id="fbc-sel-clear-btn">✖ Clear selection</button>
+            <span class="hint-text" id="fbc-sel-count"></span>
+          </div>
           <div class="grid-wrap fbc-grid" style="margin-top:10px;">
             <table class="data-grid" id="fbc-table"><thead></thead><tbody></tbody></table>
           </div>
