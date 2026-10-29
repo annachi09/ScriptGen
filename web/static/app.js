@@ -10052,7 +10052,7 @@ const HX_REFRESH = {
   pendingsr: () => ({ btn: "#psr-detect-btn" }),
   tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn", rccslist: "#trl-detect-btn", sanlbd: "#tslb-detect-btn", duprccs: "#tdr-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
-  fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),
+  fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),   // multi (RJ 2026-10-28) re-runs the campaign Scan
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
@@ -12199,8 +12199,11 @@ const FBC_RANGES = [[0, "0"], [50, "0-50"], [100, "50-100"], [250, "100-250"], [
 const FBC_RANGE_KPI = { "0": "case0", "0-50": "complete", "50-100": "services", "100-250": "pending", "250-500": "stuck", "> 500": "missing" };
 const fbcNum = (v) => { const n = Number(String(v ?? "").replace(/,/g, "")); return String(v ?? "").trim() === "" || !Number.isFinite(n) ? null : n; };
 const fbcMoney = (v) => { const n = fbcNum(v); return n === null ? "" : n.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 }); };
+// RJ 2026-10-28: "for the credit amount we will get it from the wallet movement table" - credit =
+// EWA_GCCOM_SUBSIDY_WALLET_MOVEMENT WALMOV0001 amount (wallet_credit_amount), not the live balance.
+const FBC_CREDIT = "wallet_credit_amount";
 function fbcRange(r) {
-  const n = fbcNum(r.wallet_balance);
+  const n = fbcNum(r[FBC_CREDIT]);
   if (n === null) return "(no wallet)";
   if (n <= 0) return "0";
   return FBC_RANGES.find(([lim]) => n <= lim)[1];
@@ -12251,10 +12254,10 @@ function fbcMarkShared(rows) {
 const FBC_GROUPS = [
   // RJ 2026-10-21: rows come from the requests; "In EWA" = also in EWA_DDI_ELIGIBILITY (info)
   ["Customer", "#6366f1", [["account", "Account", "mono"], ["id_payment_form", "Payment form", "mono"], ["category", "RCCS group", "cat"], ["req_complaint_type", "Type", "type"], ["in_ewa", "In EWA"], ["link_state", "Link"]]],
-  ["Subsidy wallet", "#10b981", [["wallet_balance", "Credit (balance)", "money"], ["cod_behaviour", "Behaviour", "beh"], ["wallet_fixed_day", "Payment day (wallet FIXED_DAY)", "num"], ["wallet_updated", "Wallet updated", "date"]]],
+  ["Subsidy wallet", "#10b981", [["wallet_credit_amount", "Credit (movement WALMOV0001)", "money"], ["wallet_credit_date", "Credit date", "date"], ["wallet_balance", "Balance", "money"], ["cod_behaviour", "Behaviour", "beh"], ["wallet_fixed_day", "Payment day (wallet FIXED_DAY)", "num"], ["wallet_updated", "Wallet updated", "date"]]],
   // RJ 2026-10-18 v2: "for third table for json, just show 1 column for JSON and just display,
   // request CREDIT, NO_BANK, DEDUCTION" - JSON opens the raw request on demand.
-  ["Request (JSON)", "#0ea5e9", [["req_id", "JSON", "json"], ["req_date", "Request date", "date"], ["is_latest", "Latest", "latest"], ["req_count", "Requests (account)", "num"], ["req_credit_amount", "CREDIT", "money"],
+  ["Request (JSON)", "#0ea5e9", [["req_id", "JSON", "json"], ["req_date", "Request date", "date"],["req_credit_amount", "CREDIT", "money"],
     ["req_nobank_amount", "NO_BANK", "money"], ["req_deduction_amount", "DEDUCTION", "money"], ["req_deduction_day", "Payment day (request deductionDay)", "num"]]],
   ["RCCS (GCCC_COMPLAINT)", "#f59e0b", [["rccs_ref", "RCCS", "mono"], ["rccs_accounts", "Accounts on RCCS", "shared"], ["rccs_status_en", "Status", "rst"], ["rccs_date", "Created", "date"],
     ["att_credit_amt", "CREDITAMT", "money"], ["att_nobank_amt", "NOBANK AMT", "money"], ["att_credit_usage", "Credit usage", "usage"],
@@ -12269,9 +12272,41 @@ function fbcColumns() {
   }
   return groups;
 }
+// ---- RJ 2026-10-28: "i only want to see 1 account and 1 rccs, only the successful request,
+// create a 3rd tab for those with multi rccs, for both remove the cancelled by default but add a
+// tick button to include them, i also want to have date and time filter and range filter".
+// Rows = one per (account, RCCS) from successful requests. Campaign tab = accounts with exactly 1
+// RCCS, Multi RCCS tab = 2+; cancelled RCCS (COMPLST001) are left out of the rows AND the count
+// unless the tab's "Include cancelled RCCS" box is ticked.
+let FBC_CANCELLED = "COMPLST001";
+const fbcIsCancelled = (r) => String(r.rccs_status || "") === FBC_CANCELLED;
+// per-account RCCS count within the pool (cancelled in / out) -> Map account -> n
+function fbcRccsCounts(includeCancelled) {
+  const m = new Map();
+  fbcRows.forEach((r) => { if (includeCancelled || !fbcIsCancelled(r)) m.set(r.account, (m.get(r.account) || 0) + 1); });
+  return m;
+}
+let fbcMainCounts = new Map();
+function fbcRecount() { fbcMainCounts = fbcRccsCounts($("#fbc-incl-cancel").checked); }
+const fbcInMain = (r) => ($("#fbc-incl-cancel").checked || !fbcIsCancelled(r)) && fbcMainCounts.get(r.account) === 1;
+const fbcDtKey = (v) => String(v ?? "").replace("T", " ").slice(0, 16);   // "YYYY-MM-DD HH:MM"
+// date-time + credit range check for a tab (prefix "fbc" / "fmr")
+function fbcRangeOk(r, p) {
+  const from = $(`#${p}-dt-from`).value, to = $(`#${p}-dt-to`).value;
+  const d = fbcDtKey(r.req_date);
+  if (from && d < fbcDtKey(from)) return false;
+  if (to && d > fbcDtKey(to)) return false;
+  const lo = $(`#${p}-cr-min`).value, hi = $(`#${p}-cr-max`).value;
+  if (lo !== "" || hi !== "") {
+    const c = parseFloat(String(r[FBC_CREDIT] ?? "").replace(/,/g, ""));   // wallet movement WALMOV0001
+    if (!Number.isFinite(c)) return false;
+    if (lo !== "" && c < parseFloat(lo)) return false;
+    if (hi !== "" && c > parseFloat(hi)) return false;
+  }
+  return true;
+}
 function fbcMatch(r, skip) {
-  // RJ 2026-10-25: optional "latest request per account only" (the old one-row-per-account view)
-  if ($("#fbc-latest-only")?.checked && r.is_latest === "NO") return false;
+  if (!fbcInMain(r) || !fbcRangeOk(r, "fbc")) return false;
   if (skip !== "kpi" && fbcF.kpi && !FBC_KPI_PRED[fbcF.kpi](r)) return false;
   if (skip !== "beh" && fbcF.beh && fbcBehKey(r) !== fbcF.beh) return false;
   if (skip !== "rst" && fbcF.rst && fbcRstKey(r) !== fbcF.rst) return false;
@@ -12366,13 +12401,13 @@ function fbcRenderDash() {
         `<span class="fbc-type-label"><span class="fbc-cat-ico">${FBC_TYPE_ICON[k] || "•"}</span>${escapeHtml(k)}</span>` +
         `<b class="fbc-type-n">${n.toLocaleString()}</b>` +
         `<span class="fbc-type-bar"><span style="width:${pct}%"></span></span>` +
-        `<span class="fbc-type-sub">${pct}% · ${escapeHtml(FBC_TYPE_NAMES[k] || "")} · credit ${fbcMoney(sum(rows, "wallet_balance"))}</span>` +
+        `<span class="fbc-type-sub">${pct}% · ${escapeHtml(FBC_TYPE_NAMES[k] || "")} · credit ${fbcMoney(sum(rows, FBC_CREDIT))}</span>` +
         `<span class="fbc-type-mini">${rstMini(rows)}</span></div>`;
     }).join("")}</div>`;
 
   // 2. wallet credit - one widget
   const wRows = fbcRows.filter((r) => fbcMatch(r) && r.has_wallet);
-  const bals = wRows.map((r) => fbcNum(r.wallet_balance)).filter((n) => n !== null);
+  const bals = wRows.map((r) => fbcNum(r[FBC_CREDIT])).filter((n) => n !== null);
   const total = bals.reduce((s, n) => s + n, 0);
   const rg = rboCount(wRows, fbcRange);
   const rgKeys = FBC_RANGES.map((x) => x[1]);
@@ -12392,10 +12427,10 @@ function fbcRenderDash() {
       return `<button type="button" class="fbc-beh-card${fbcF.beh === k ? " is-active" : ""}" data-kpi="${bKpi(k)}" data-fbc-beh="${escapeHtml(k)}" title="Click to filter, click again to clear">` +
         `<span class="fbc-beh-name">${escapeHtml(k)}</span>` +
         `<span class="fbc-beh-pct">${(100 * n / bTot).toFixed(1)}%</span>` +
-        `<span class="fbc-beh-sub">${n.toLocaleString()} wallet(s) · credit ${fbcMoney(sum(rowsK, "wallet_balance"))}</span></button>`;
+        `<span class="fbc-beh-sub">${n.toLocaleString()} wallet(s) · credit ${fbcMoney(sum(rowsK, FBC_CREDIT))}</span></button>`;
     }).join("")}</div>`;
   $("#fbc-wallet").innerHTML =
-    `<span class="fbc-type-label">👛 Wallet credit (EWA_GCCOM_SUBSIDY_WALLET)</span>` +
+    `<span class="fbc-type-label" title="Credit = EWA_GCCOM_SUBSIDY_WALLET_MOVEMENT.AMOUNT, MOVEMENT_TYPE WALMOV0001 (via the wallet)">👛 Wallet credit (WALLET_MOVEMENT WALMOV0001)</span>` +
     `<b class="fbc-wallet-total">${fbcMoney(total)}</b>` +
     `<div class="fbc-wallet-stats"><div>Customers<b>${wRows.length.toLocaleString()}</b></div>` +
       `<div>Average<b>${fbcMoney(bals.length ? total / bals.length : 0)}</b></div>` +
@@ -12599,7 +12634,12 @@ $("#fbc-filter-search").addEventListener("input", () => {
   }, 250);
 });
 $("#fbc-ewa-cols").addEventListener("change", fbcRender);
-$("#fbc-latest-only").addEventListener("change", fbcRender);
+$("#fbc-incl-cancel").addEventListener("change", () => { fbcRecount(); fbcRender(); });
+["#fbc-dt-from", "#fbc-dt-to", "#fbc-cr-min", "#fbc-cr-max"].forEach((s) => $(s).addEventListener("change", fbcRender));
+$("#fbc-range-clear-btn").addEventListener("click", () => {
+  ["#fbc-dt-from", "#fbc-dt-to", "#fbc-cr-min", "#fbc-cr-max"].forEach((s) => { $(s).value = ""; });
+  fbcRender();
+});
 // request JSON viewer (fetched on demand: GET /api/fix-billing-campaign/request/{id})
 $("#fbc-table").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-fbc-json]");
@@ -12644,7 +12684,79 @@ $$(".da-subnav-btn[data-fbc-sub]").forEach((btn) => btn.addEventListener("click"
   $$(".da-subpage[data-fbc-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.fbcSub === sub));
   if (sub === "planned" && !fspLoaded) $("#fsp-detect-btn").click();
   if (sub === "subsidy" && !tsubLoaded) $("#tsub-detect-btn").click();   // RJ 2026-10-23: moved from Temp Dashboard
+  if (sub === "multi") { if (!fbcRows.length) $("#fbc-detect-btn").click(); else fmrRender(); }   // RJ 2026-10-28
 }));
+// ---- RJ 2026-10-28: tab "Multi RCCS accounts" (same rows as the Campaign tab, accounts with 2+ RCCS)
+let fmrLoaded = false;
+const FMR_COLS = [["account", "Account", "mono"], ["rccs_n", "# RCCS", "num"], ["rccs_ref", "RCCS", "mono"], ["rccs_status_en", "RCCS status", "rst"],
+  ["rccs_date", "RCCS created", "date"], ["req_date", "Request date", "date"], ["req_id", "Request ID", "mono"], ["category", "RCCS group"],
+  ["wallet_credit_amount", "Credit (WALMOV0001)", "money"], ["req_credit_amount", "Request credit", "money"], ["req_nobank_amount", "No Bank", "money"], ["req_deduction_day", "Payment day (request)", "num"],
+  ["att_credit_amt", "RCCS credit", "money"], ["att_credit_usage_desc", "RCCS credit usage"],
+  ["wallet_balance", "Wallet balance", "money"], ["wallet_fixed_day", "Wallet payment day", "num"], ["behaviour_desc", "Wallet behaviour"], ["issue_text", "Issues"]];
+function fmrVisibleRows() {
+  const incl = $("#fmr-incl-cancel").checked;
+  const counts = fbcRccsCounts(incl);
+  const q = ($("#fmr-search").value || "").trim().toLowerCase();
+  return fbcRows
+    .filter((r) => (incl || !fbcIsCancelled(r)) && (counts.get(r.account) || 0) > 1)
+    .map((r) => { r.rccs_n = counts.get(r.account); return r; })
+    .filter((r) => fbcRangeOk(r, "fmr"))
+    .filter((r) => !q || [r.account, r.rccs_ref, r.id_payment_form].some((v) => String(v ?? "").toLowerCase().includes(q)))
+    .sort((a, b) => String(a.account).localeCompare(String(b.account)) || String(b.req_date).localeCompare(String(a.req_date)));
+}
+function fmrRender() {
+  if (!fmrLoaded) return;
+  const incl = $("#fmr-incl-cancel").checked;
+  const cnt = fbcRccsCounts(incl);
+  const all = fbcRows.filter((r) => (incl || !fbcIsCancelled(r)) && (cnt.get(r.account) || 0) > 1);
+  const rows = fmrVisibleRows();
+  const accs = new Set(rows.map((r) => r.account));
+  const canc = rows.filter(fbcIsCancelled).length;
+  const wallet = new Set(rows.filter((r) => r.has_wallet).map((r) => r.account)).size;
+  $("#fmr-dash").hidden = false; $("#fmr-filter-row").hidden = false;
+  $("#fmr-summary").textContent = `${new Set(all.map((r) => r.account)).size.toLocaleString()} account(s) with 2+ RCCS${incl ? " (cancelled included)" : " (cancelled left out)"}.`;
+  $("#fmr-kpi-row").innerHTML = [["total", "👥", "Accounts", accs.size, `${rows.length.toLocaleString()} RCCS`],
+    ["complete", "💳", "Accounts with a wallet", wallet, ""],
+    ["missing", "🚫", "Cancelled RCCS shown", canc, incl ? "included by the tick" : "tick to include"]]
+    .map(([kpi, icon, label, v, sub]) => `<div class="rbo-kpi" data-kpi="${kpi}"><span class="rbo-kpi-label"><span>${icon}</span>${escapeHtml(label)}</span><span class="rbo-kpi-value">${v.toLocaleString()}</span><span class="rbo-sub">${escapeHtml(sub)}</span></div>`).join("");
+  $("#fmr-table thead tr").innerHTML = FMR_COLS.map(([, l]) => `<th>${escapeHtml(l)}</th>`).join("");
+  let prev = null, band = 0;
+  $("#fmr-table tbody").innerHTML = rows.slice(0, 3000).map((r) => {
+    if (r.account !== prev) { band ^= 1; prev = r.account; }
+    const tint = fbcIsCancelled(r) ? ' class="kpi-tint" data-kpi="missing"' : "";
+    return `<tr${tint}${band ? ' style="background:rgba(127,127,127,.07)"' : ""}>` + FMR_COLS.map(([k, , kind]) => {
+      const raw = r[k] ?? "";
+      let v = escapeHtml(raw);
+      if (kind === "money") v = fbcMoney(raw);
+      else if (kind === "date") v = escapeHtml(String(raw).slice(0, 16));
+      else if (kind === "rst" && raw) v = `<span class="rbo-pill" data-kpi="${fbcIsCancelled(r) ? "missing" : /solved|approved/i.test(raw) ? "complete" : "pending"}">${escapeHtml(raw)}</span>`;
+      return `<td class="${kind === "money" || kind === "num" ? "hx-num" : ""}${kind === "mono" ? " hx-mono" : ""}">${v}</td>`;
+    }).join("") + "</tr>";
+  }).join("") || `<tr><td colspan="${FMR_COLS.length}" class="hint-text">No accounts with more than one RCCS for these filters.</td></tr>`;
+  renderFilteredCount("#fmr-filtered-count", rows.length, all.length);
+  $("#fmr-copy-btn").disabled = $("#fmr-export-btn").disabled = rows.length === 0;
+}
+$("#fmr-detect-btn").addEventListener("click", () => $("#fbc-detect-btn").click());
+["#fmr-incl-cancel", "#fmr-dt-from", "#fmr-dt-to", "#fmr-cr-min", "#fmr-cr-max"].forEach((s) => $(s).addEventListener("change", fmrRender));
+$("#fmr-search").addEventListener("input", () => fmrRender());
+$("#fmr-clear-btn").addEventListener("click", () => {
+  ["#fmr-dt-from", "#fmr-dt-to", "#fmr-cr-min", "#fmr-cr-max", "#fmr-search"].forEach((s) => { $(s).value = ""; });
+  $("#fmr-incl-cancel").checked = false;
+  fmrRender();
+});
+$("#fmr-copy-btn").addEventListener("click", async () => {
+  const accs = [...new Set(fmrVisibleRows().map((r) => r.account))];
+  try { await navigator.clipboard.writeText(accs.join("\n")); showToast(`Copied ${accs.length} account(s).`); } catch { showToast("Copy failed.", true); }
+});
+$("#fmr-export-btn").addEventListener("click", () => {
+  const q = (v) => { v = String(v ?? ""); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
+  const keys = FMR_COLS.map(([k]) => k).concat(["rccs_status", "id_complaint", "id_payment_form", "id_wallet"]);
+  const csv = [keys.map((k) => k.toUpperCase()).join(",")].concat(fmrVisibleRows().map((r) => keys.map((k) => q(r[k])).join(","))).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
+  a.download = `fix_billing_campaign_multi_rccs_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
 let fspRows = [], fspLoaded = false, fspF = { kpi: null, day: null, beh: null, tariff: null }, fspTerms = null;
 const fspToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const fspNum = (v) => { const n = parseFloat(String(v ?? "").replace(/,/g, "")); return Number.isFinite(n) ? n : 0; };
@@ -12922,12 +13034,16 @@ $("#fbc-detect-btn").addEventListener("click", async () => {
     fbcUpdateTerms();
     fbcEwaCols = data.ewa_columns || [];
     fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null };
-    $("#fbc-dash").hidden = false; $("#fbc-filter-row").hidden = false; $("#fbc-acts-title").hidden = false;
+    if (data.cancelled_status) FBC_CANCELLED = data.cancelled_status;
+    fbcRecount();
+    $("#fbc-dash").hidden = false; $("#fbc-filter-row").hidden = false; $("#fbc-range-row").hidden = false; $("#fbc-acts-title").hidden = false;
     const capped = data.row_cap && data.count >= data.row_cap ? ` (capped at ${Number(data.row_cap).toLocaleString()})` : "";
-    // RJ 2026-10-25: rows = every MESSAGES_IN request (not only the latest per account)
+    // RJ 2026-10-28: one row per account + RCCS (successful requests); this tab = 1 RCCS accounts
     const accN = new Set(fbcRows.map((r) => r.account)).size;
-    $("#fbc-summary").textContent = `${data.count.toLocaleString()} request(s) from ${accN.toLocaleString()} account(s)${capped} - requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
+    const canc = fbcRows.filter(fbcIsCancelled).length;
+    $("#fbc-summary").textContent = `${(data.main_count ?? 0).toLocaleString()} account(s) with 1 RCCS (cancelled left out) · ${(data.multi_accounts ?? 0).toLocaleString()} with 2+ RCCS (Multi RCCS tab) · ${data.count.toLocaleString()} RCCS from ${accN.toLocaleString()} account(s), ${canc.toLocaleString()} cancelled${capped} - successful requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
     fbcRender();
+    fmrLoaded = true; fmrRender();
   } catch (err) {
     $("#fbc-summary").textContent = "";
     showToast(err.message, true);

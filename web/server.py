@@ -1463,7 +1463,7 @@ _OVERVIEW_COUNTERS = {
     "rebillingmonitor": lambda conn, user: rebilling_monitor_open(user=user)["count"],
     # RJ 2026-10-21: cards for the menus added since the Overview was built
     "readingdiscrepancies": lambda conn, user: reading_discrepancies_pending(user=user)["count"],
-    "fixbillingcampaign": lambda conn, user: fix_billing_campaign_detect(FixBillingCampaignRequest(), user=user)["count"],
+    "fixbillingcampaign": lambda conn, user: fix_billing_campaign_detect(FixBillingCampaignRequest(), user=user)["main_count"],  # RJ 2026-10-28: = Campaign tab default (1 account / 1 RCCS, no cancelled)
     # RJ 2026-10-09: pending service requests with a JIRA comment
     "pendingsr": lambda conn, user: pending_service_request_detect(user=user)["count"],
 }
@@ -1480,7 +1480,7 @@ _DIGEST_LABELS = {
     "wrongbill_case3": "Wrong Bill Case 3", "wrongbill_case4": "Wrong Bill Case 4",
     "rebillingmonitor": "Open rebilling activities",
     "readingdiscrepancies": "Readings pending validation > 3 days",
-    "fixbillingcampaign": "FIX BILLING CAMPAIGN 2026 requests",   # RJ 2026-10-25: one row per MESSAGES_IN request
+    "fixbillingcampaign": "FIX BILLING CAMPAIGN 2026 accounts (1 RCCS)",   # RJ 2026-10-28
     "pendingsr": "Pending Service Requests (JIRA)",
 }
 alerts.register_digest_counters({k: (_DIGEST_LABELS.get(k, k), fn) for k, fn in _OVERVIEW_COUNTERS.items()
@@ -4849,7 +4849,17 @@ def fix_billing_campaign_detect(body: FixBillingCampaignRequest, user: str = Dep
     # RJ 2026-10-21: rows come from the requests; EWA_DDI_ELIGIBILITY values are the
     # EWA_* columns at the end (info only).
     ewa_cols = [c.lower() for c in res.columns if c.upper().startswith("EWA_")]
-    return {"rows": rows, "count": len(rows), "ewa_columns": ewa_cols, "scope": body.scope, "since": body.since,
+    # RJ 2026-10-28: default page view = accounts with exactly 1 non-cancelled RCCS (Campaign tab);
+    # 2+ -> Multi RCCS tab. main_count / multi_accounts mirror the page defaults (Overview card).
+    per_acc: dict = {}
+    for r in rows:
+        if str(r.get("rccs_status") or "") != fix_billing_campaign.CANCELLED_RCCS_STATUS:
+            per_acc[r.get("account")] = per_acc.get(r.get("account"), 0) + 1
+    main_count = sum(1 for n in per_acc.values() if n == 1)
+    multi_accounts = sum(1 for n in per_acc.values() if n > 1)
+    return {"rows": rows, "count": len(rows), "main_count": main_count, "multi_accounts": multi_accounts,
+            "cancelled_status": fix_billing_campaign.CANCELLED_RCCS_STATUS,
+            "ewa_columns": ewa_cols, "scope": body.scope, "since": body.since,
             "row_cap": fix_billing_campaign.ROW_CAP, "attrs": fix_billing_campaign.ATTRS,
             "elapsed_ms": res.elapsed_ms}
 

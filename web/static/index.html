@@ -2094,6 +2094,8 @@
         <!-- RJ 2026-10-23: tab 2 "Subsidized - planned billing" -->
         <nav class="da-subnav" aria-label="Fix billing campaign tabs">
           <button type="button" class="da-subnav-btn is-active" data-fbc-sub="campaign">Campaign requests</button>
+          <!-- RJ 2026-10-28: "create a 3rd tab for those with multi rccs" -->
+          <button type="button" class="da-subnav-btn" data-fbc-sub="multi">Multi RCCS accounts</button>
           <button type="button" class="da-subnav-btn" data-fbc-sub="planned">Subsidized - planned billing</button>
           <button type="button" class="da-subnav-btn" data-fbc-sub="subsidy">Subsidized, bill not generated</button>
         </nav>
@@ -2179,13 +2181,28 @@
             </section>
           </div>
           <div class="rbo-section-title" id="fbc-acts-title" style="margin:14px 0 12px;" hidden><span>3</span>Customers</div>
-          <div class="key-panel-row" id="fbc-filter-row" hidden>
+          <!-- RJ 2026-10-28: "make the horizontal filter always visible and accessible" - filter bars
+               shown from the start and kept at the top (sticky) while scrolling the table -->
+          <div class="fbc-sticky-filters">
+          <div class="key-panel-row" id="fbc-filter-row">
             <label class="field-label">Search</label>
             <textarea id="fbc-filter-search" class="text-input text-input-sm" rows="2" placeholder="Account / payment form / RCCS… or paste many" style="width:240px;resize:vertical;"></textarea>
             <span class="hint-text" id="fbc-filter-search-count"></span>
             <label class="field-label" style="margin-left:12px;"><input type="checkbox" id="fbc-ewa-cols" /> Show all EWA columns</label>
-            <!-- RJ 2026-10-25: rows = every MESSAGES_IN request; tick for the latest per account only -->
-            <label class="field-label" style="margin-left:12px;" title="Hide the older requests of an account"><input type="checkbox" id="fbc-latest-only" /> Latest request per account only</label>
+          </div>
+          <!-- RJ 2026-10-28: "remove the cancelled by default but add a tick button to include them,
+               i also want to have date and time filter and range filter" -->
+          <div class="key-panel-row fbc-range-row" id="fbc-range-row">
+            <label class="field-label" title="RCCS status COMPLST001 Canceled - left out by default (also when counting RCCS per account)"><input type="checkbox" id="fbc-incl-cancel" /> Include cancelled RCCS</label>
+            <label class="field-label" style="margin-left:12px;">Request from</label>
+            <input id="fbc-dt-from" class="text-input text-input-sm" type="datetime-local" />
+            <label class="field-label">to</label>
+            <input id="fbc-dt-to" class="text-input text-input-sm" type="datetime-local" />
+            <label class="field-label" style="margin-left:12px;">Credit from</label>
+            <input id="fbc-cr-min" class="text-input text-input-sm" type="number" step="0.001" style="width:90px;" placeholder="min" />
+            <label class="field-label">to</label>
+            <input id="fbc-cr-max" class="text-input text-input-sm" type="number" step="0.001" style="width:90px;" placeholder="max" />
+            <button type="button" class="btn btn-pill btn-sm" id="fbc-range-clear-btn">Clear dates / range</button>
             <span class="hint-text" id="fbc-active-filters" style="margin-left:auto;"></span>
             <button type="button" class="btn btn-pill btn-sm" id="fbc-clear-btn">Clear filters</button>
           </div>
@@ -2196,6 +2213,7 @@
             <button type="button" class="btn btn-pill btn-sm" id="fbc-sel-clear-btn">✖ Clear selection</button>
             <span class="hint-text" id="fbc-sel-count"></span>
           </div>
+          </div><!-- /fbc-sticky-filters -->
           <div class="grid-wrap fbc-grid" style="margin-top:10px;">
             <table class="data-grid" id="fbc-table"><thead></thead><tbody></tbody></table>
           </div>
@@ -2204,6 +2222,44 @@
 
         <!-- RJ 2026-10-23: "for all the subsidized account, i want to see the planned billing date on
              their readings for September 2026, make KPI" - planned billing date = READING_DATE + 3 -->
+        <!-- RJ 2026-10-28: tab "Multi RCCS accounts" - accounts whose successful requests created 2+ RCCS -->
+        <div class="da-subpage" data-fbc-sub="multi">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Accounts with <b>more than one RCCS</b> from successful <code>/mobileapp/complaint</code> requests (one row per account + RCCS). Same data as the Campaign tab's Scan; cancelled RCCS (COMPLST001) are left out - and not counted - unless ticked.</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Multi RCCS accounts</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="fmr-detect-btn" title="Runs the Campaign tab's Scan (same scope / date)">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="fmr-copy-btn" disabled>📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="fmr-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="fmr-summary">Click Scan to load (about 30s).</div>
+          <div class="rbo-dash" id="fmr-dash" hidden>
+            <div class="rbo-kpis fbc-kpis" id="fmr-kpi-row"></div>
+          </div>
+          <div class="fbc-sticky-filters">
+          <div class="key-panel-row" id="fmr-filter-row">
+            <label class="field-label" title="RCCS status COMPLST001 Canceled"><input type="checkbox" id="fmr-incl-cancel" /> Include cancelled RCCS</label>
+            <label class="field-label" style="margin-left:12px;">Request from</label>
+            <input id="fmr-dt-from" class="text-input text-input-sm" type="datetime-local" />
+            <label class="field-label">to</label>
+            <input id="fmr-dt-to" class="text-input text-input-sm" type="datetime-local" />
+            <label class="field-label" style="margin-left:12px;">Credit from</label>
+            <input id="fmr-cr-min" class="text-input text-input-sm" type="number" step="0.001" style="width:90px;" placeholder="min" />
+            <label class="field-label">to</label>
+            <input id="fmr-cr-max" class="text-input text-input-sm" type="number" step="0.001" style="width:90px;" placeholder="max" />
+            <input id="fmr-search" class="text-input text-input-sm" placeholder="Account / RCCS…" style="width:180px;margin-left:12px;" />
+            <button type="button" class="btn btn-pill btn-sm" id="fmr-clear-btn">Clear filters</button>
+          </div>
+          <div class="hint-text" id="fmr-filtered-count"></div>
+          </div><!-- /fbc-sticky-filters -->
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="fmr-table"><thead><tr></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+        </div>
+
         <div class="da-subpage" data-fbc-sub="planned">
         <p class="page-subtitle" style="margin:-6px 0 14px;">Every account with an active <b>subsidized service</b> (Bahraini First Account tariff <b>E-D2 / W-D2 / E-D2-NM</b>) and its readings of the billing period (GCGT_RE_READING). <b>Planned billing date = reading date + 3 days.</b> Billed = reading status Billed / UAU - Billed. Also shows whether the account has a <b>subsidy wallet</b>, the amount and the behaviour.</p>
         <div class="card">

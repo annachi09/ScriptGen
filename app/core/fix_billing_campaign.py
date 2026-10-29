@@ -63,6 +63,13 @@ RCCS_DAY_ATTR = "RCCSDEDDAT"
 # RESPONSEHEADER carries an error (all live ones start "InCMS-BL-...": wallet already exists, DD
 # process on going, deadlocks, ...) created no RCCS, so it is left out. Success = empty header.
 REQUEST_OK_SQL = "NULLIF(LTRIM(RTRIM(mi.RESPONSEHEADER)), '') IS NULL"
+# RJ 2026-10-28: "remove the cancelled by default but add a tick button to include them" -
+# GCCC_COMPLAINT_STATUS COMPLST001 = "Canceled" (live lookup; the other *Cancellation* statuses are
+# DD / OTC / PDC process steps, not a cancelled RCCS).
+CANCELLED_RCCS_STATUS = "COMPLST001"
+# RJ 2026-10-28: credit amount = the wallet's initial credit movement (WALMOV0001)
+MOVEMENT_TABLE = "OUC_COMMON_ADMIN.EWA_GCCOM_SUBSIDY_WALLET_MOVEMENT"
+CREDIT_MOVEMENT_TYPE = "WALMOV0001"
 EWA_COLUMNS = ("outstanding_as_of_now", "bill_amount_may", "bill_amount_jun", "bill_amount_jul",
                "bill_amount_aug", "bill_amount_set", "bill_amount_oct", "debt_as_of_cutoff_date",
                "credit_as_of_cutoff_date", "payment_method", "calculated_ddi", "credit", "ind_processed")
@@ -121,7 +128,8 @@ SELECT x.* INTO #m FROM (
            j.ID_ACCOUNT_REF, j.COMPLAINT_TYPE, j.RCCS_REF, j.CREDIT_AMOUNT, j.NO_BANK_AMOUNT,
            j.CREDIT_USAGE, j.DEDUCTION_AMOUNT, j.AMOUNT_TYPE, j.DEDUCTION_DAY,
            COUNT(*) OVER (PARTITION BY j.ID_ACCOUNT_REF) AS REQ_COUNT,
-           ROW_NUMBER() OVER (PARTITION BY j.ID_ACCOUNT_REF ORDER BY mi.CREATE_DATE DESC, mi.ID_SEQ DESC) AS RN
+           ROW_NUMBER() OVER (PARTITION BY j.ID_ACCOUNT_REF ORDER BY mi.CREATE_DATE DESC, mi.ID_SEQ DESC) AS RN,
+           ROW_NUMBER() OVER (PARTITION BY j.ID_ACCOUNT_REF, j.RCCS_REF ORDER BY mi.CREATE_DATE DESC, mi.ID_SEQ DESC) AS RN_RCCS
     FROM {MESSAGES_TABLE} mi WITH (NOLOCK)
     CROSS APPLY (SELECT
         CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.idAccount') END AS ID_ACCOUNT_REF,
@@ -137,7 +145,12 @@ SELECT x.* INTO #m FROM (
     ) j
     WHERE mi.REQUESTURL = '{REQUEST_URL}' AND mi.CREATE_DATE > '{since}'
       AND {REQUEST_OK_SQL}
-) x;
+) x
+WHERE x.RN_RCCS = 1;
+-- RJ 2026-10-28: "i only want to see 1 account and 1 rccs, only the successful request, create a
+-- 3rd tab for those with multi rccs" - one row per (account, RCCS) = its latest successful request.
+-- The page splits them: accounts with 1 RCCS -> Campaign tab, 2+ RCCS -> "Multi RCCS" tab
+-- (cancelled RCCS COMPLST001 left out of that count unless "Include cancelled" is ticked).
 -- RJ 2026-10-25: "the main table will be the MESSAGES_IN, check this account it has multiple rccs
 -- but why we only show it once? 1071736746" - every request is now a row (was: latest per
 -- account only, RN = 1). RN stays as REQ_SEQ (1 = the account's latest request).
@@ -169,6 +182,7 @@ SELECT m.ID_ACCOUNT_REF AS ACCOUNT,
        CASE WHEN e.id_payment_form IS NOT NULL THEN 'YES' ELSE 'NO' END AS IN_EWA,
        w.ID_WALLET, w.IND_ACTIVE AS WALLET_ACTIVE, w.BALANCE AS WALLET_BALANCE, w.COD_BEHAVIOUR,
        bvw.TXT AS BEHAVIOUR_DESC, w.UPDATE_DATE AS WALLET_UPDATED, w.FIXED_DAY AS WALLET_FIXED_DAY,
+       wmv.AMOUNT AS WALLET_CREDIT_AMOUNT, wmv.MOVEMENT_DATE AS WALLET_CREDIT_DATE,
        m.ID_SEQ AS REQ_ID, m.REQ_DATE, m.REQ_STATUS, m.REQ_COUNT, m.RN AS REQ_SEQ,
        CASE WHEN m.RN = 1 THEN 'YES' ELSE 'NO' END AS IS_LATEST, m.COMPLAINT_TYPE AS REQ_COMPLAINT_TYPE,
        m.RCCS_REF, m.CREDIT_AMOUNT AS REQ_CREDIT_AMOUNT, m.NO_BANK_AMOUNT AS REQ_NOBANK_AMOUNT,
@@ -182,6 +196,11 @@ FROM #m m
 LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.REFERENCE = m.ID_ACCOUNT_REF
 LEFT JOIN {DDI_TABLE} e WITH (NOLOCK) ON e.account = m.ID_ACCOUNT_REF
 LEFT JOIN {WALLET_TABLE} w WITH (NOLOCK) ON w.ID_PAYMENT_FORM = pf.ID_PAYMENT_FORM
+-- RJ 2026-10-28: "for the credit amount we will get it from the wallet movement table connecting the
+-- original wallet table ... MOVEMENT_TYPE = 'WALMOV0001'" (live: exactly 1 WALMOV0001 per wallet)
+OUTER APPLY (SELECT SUM(mv.AMOUNT) AS AMOUNT, MIN(mv.MOVEMENT_DATE) AS MOVEMENT_DATE
+             FROM {MOVEMENT_TABLE} mv WITH (NOLOCK)
+             WHERE mv.ID_WALLET = w.ID_WALLET AND mv.MOVEMENT_TYPE = '{CREDIT_MOVEMENT_TYPE}') wmv
 LEFT JOIN #bv bvw ON bvw.COD_DEVELOP = w.COD_BEHAVIOUR
 LEFT JOIN #c c ON c.COD_REF_COMPLAINT = m.RCCS_REF AND c.ID_ACCOUNT = pf.ID_PAYMENT_FORM
 LEFT JOIN #bv bva ON bva.COD_DEVELOP = c.ATT_CREDIT_USAGE
@@ -356,8 +375,9 @@ def shape_row(r: dict) -> dict:
         issues.append("Request without RCCS complaint")
     if has_req and not has_wallet:
         issues.append("Request without wallet")
-    if _differs(r.get("wallet_balance"), r.get("att_credit_amt")):
-        issues.append("Wallet balance <> RCCS credit amount")
+    # RJ 2026-10-28: credit = wallet movement WALMOV0001 (the balance moves with releases)
+    if _differs(r.get("wallet_credit_amount"), r.get("att_credit_amt")):
+        issues.append("Wallet credit (WALMOV0001) <> RCCS credit amount")
     if _differs(r.get("req_credit_amount"), r.get("att_credit_amt")):
         issues.append("Request credit <> RCCS credit amount")
     if _differs(r.get("req_nobank_amount"), r.get("att_nobank_amt")):

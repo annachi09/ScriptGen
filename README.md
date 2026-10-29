@@ -3137,6 +3137,43 @@ request) and the paymentday in the wallet table is null".
   is filled it always equals deductionDay. Note: 11,001 of the 14,908 have no noBankAmount in the
   request.
 
+### FIX BILLING CAMPAIGN: sticky filter bar + credit from wallet movement (2026-10-28)
+
+RJ: "make the horizontal filter always visible and accessible, also for the credit amount we will get
+it from the wallet movement table connecting the original wallet table, select * from
+EWA_GCCOM_SUBSIDY_WALLET_MOVEMENT where id_wallet =546 and MOVEMENT_TYPE = 'WALMOV0001'".
+
+- Filter bars (search, cancelled tick, date-time / credit range, selection) on the Campaign and Multi
+  RCCS tabs are shown from the start and pinned (`.fbc-sticky-filters`, sticky inside `#content`).
+  Static change (Ctrl+F5).
+- Credit = `EWA_GCCOM_SUBSIDY_WALLET_MOVEMENT.AMOUNT`, `MOVEMENT_TYPE = 'WALMOV0001'`, joined on
+  `ID_WALLET` of the account's wallet (`WALLET_CREDIT_AMOUNT`, `WALLET_CREDIT_DATE`). Used for the
+  credit column, credit range filter, wallet widget / range buckets / behaviour sums, and the check
+  "Wallet credit (WALMOV0001) <> RCCS credit amount" (was the live balance). Balance stays a column.
+  Python change - restart needed.
+- Live: 32,023 wallets, every one has exactly 1 WALMOV0001; 486 wallets' balance already differs from
+  the credit (WALMOV0002 movements, 505 rows). Total credit 3,616,737.238 vs balance 3,574,117.229.
+
+### FIX BILLING CAMPAIGN: 1 account / 1 RCCS, Multi RCCS tab, cancelled tick, date-time + credit range (2026-10-28)
+
+RJ: "for fix bill campaign, i only want to see 1 account and 1 rccs, only the successful request,
+create a 3rd tab for those with multi rccs, for both remove the cancelled by default but add a tick
+button to include them, i also want to have date and time filter and range filter".
+
+- Query: one row per (account, RCCS) = its latest successful request (`RN_RCCS = 1`).
+- Campaign tab: accounts with exactly 1 RCCS. New tab **Multi RCCS accounts**: accounts with 2+
+  RCCS, one row per RCCS, grouped per account (shared Scan; copy accounts, CSV).
+- Both tabs: cancelled RCCS (`GCCC_COMPLAINT_STATUS` COMPLST001 "Canceled" -
+  `fix_billing_campaign.CANCELLED_RCCS_STATUS`) left out of the rows and of the RCCS count per
+  account by default; "Include cancelled RCCS" tick brings them back (an account can then move tabs).
+- Both tabs: Request from / to (date + time, on the request CREATE_DATE) and Credit from / to.
+- Removed: "Latest request per account only" tick, Latest / Requests columns (not needed any more).
+- Route returns `main_count` / `multi_accounts` (page defaults); Overview card = `main_count`
+  ("FIX BILLING CAMPAIGN 2026 accounts (1 RCCS)"). Python change - restart needed.
+- Live 2026-10-28 (successful credit requests since 10-16): 32,245 RCCS / 32,065 accounts, 3,713
+  cancelled RCCS; 180 accounts have 2+ RCCS with cancelled included but only **5** without
+  (3,538 accounts have only cancelled RCCS and drop out by default).
+
 ### FIX BILLING CAMPAIGN: only successful requests (2026-10-25)
 
 RJ: "only messages_in and responseheader is not an error : InCMS-BL-SS000009. Invalid system

@@ -649,6 +649,12 @@ table tbody tr.kpi-tint > td:first-child { box-shadow: inset 4px 0 0 var(--kpi-c
 [data-rbm-sub="open"] .grid-wrap { border: 1px solid var(--card-border); border-radius: 12px; }
 /* RJ 2026-10-18: FIX BILLING CAMPAIGN 2026 table - coloured column groups with separators */
 #fbc-table th, #fbc-table td { white-space: nowrap; }
+/* RJ 2026-10-28: "make the horizontal filter always visible and accessible" - the filter bars
+   stay pinned at the top of the scrolling page (wrapping so nothing hides off to the right) */
+.fbc-sticky-filters { position: sticky; top: 0; z-index: 20; background: var(--surface, var(--bg, #fff));
+  padding: 8px 10px; margin: 0 -10px; border-bottom: 1px solid var(--border, rgba(127,127,127,.25));
+  box-shadow: 0 6px 12px -10px rgba(0,0,0,.35); }
+.fbc-sticky-filters .key-panel-row { flex-wrap: wrap; row-gap: 6px; margin: 4px 0; }
 #fbc-table thead tr.fbc-group-row th { text-align: center; font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
   color: #fff; background: var(--g) !important; border-left: 3px solid var(--card-bg); }
 #fbc-table thead tr:not(.fbc-group-row) th { border-bottom: 3px solid var(--g); }
