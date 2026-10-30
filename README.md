@@ -3137,6 +3137,23 @@ request) and the paymentday in the wallet table is null".
   is filled it always equals deductionDay. Note: 11,001 of the 14,908 have no noBankAmount in the
   request.
 
+### FIX BILLING CAMPAIGN: all successful requests + "Multi RCCS" marker (2026-10-29)
+
+RJ: "ok change it, i want to see all successful in messages in, and the account, then just add a
+marker if there are multi rccs for the account".
+
+- Campaign tab shows every successful request (one row per account + RCCS, cancelled hidden unless
+  ticked) again - no more 1-RCCS-only restriction.
+- New column **Multi RCCS** (right after Account): "⚠ n RCCS" when the account has 2+ RCCS (same
+  cancelled rule); new KPI card "Accounts with more than 1 RCCS" filters them and groups each
+  account's rows together. `RCCS_N` is in both CSVs.
+- The "Multi RCCS accounts" tab (2026-10-28) was removed (HTML deleted, its JS kept commented out).
+- Route `main_count` = successful requests / RCCS without cancelled (Overview card
+  "FIX BILLING CAMPAIGN 2026 successful requests"); `multi_accounts` = accounts marked.
+  Python change - restart needed.
+- Live (2026-10-29): 5 accounts marked by default (180 with cancelled ticked) - see examples
+  1047371404, 1049785353, 1059103414, 1067160984, 1069788949 (second RCCS on 10-25 10:02-10:04).
+
 ### FIX BILLING CAMPAIGN: sticky filter bar + credit from wallet movement (2026-10-28)
 
 RJ: "make the horizontal filter always visible and accessible, also for the credit amount we will get

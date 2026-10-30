@@ -149,8 +149,8 @@ SELECT x.* INTO #m FROM (
 WHERE x.RN_RCCS = 1;
 -- RJ 2026-10-28: "i only want to see 1 account and 1 rccs, only the successful request, create a
 -- 3rd tab for those with multi rccs" - one row per (account, RCCS) = its latest successful request.
--- The page splits them: accounts with 1 RCCS -> Campaign tab, 2+ RCCS -> "Multi RCCS" tab
--- (cancelled RCCS COMPLST001 left out of that count unless "Include cancelled" is ticked).
+-- RJ 2026-10-29: all rows are shown; accounts with 2+ RCCS only get a "Multi RCCS" marker
+-- (cancelled RCCS COMPLST001 left out of rows and count unless "Include cancelled" is ticked).
 -- RJ 2026-10-25: "the main table will be the MESSAGES_IN, check this account it has multiple rccs
 -- but why we only show it once? 1071736746" - every request is now a row (was: latest per
 -- account only, RN = 1). RN stays as REQ_SEQ (1 = the account's latest request).

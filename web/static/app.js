@@ -12234,6 +12234,8 @@ const FBC_KPI_PRED = {
   issues: (r) => (r.issues || []).length > 0, multi: (r) => Number(r.req_count) > 1,
   // RJ 2026-10-18: "add a kpi for more than 1 account in an rccs number"
   sharedRccs: (r) => Number(r.rccs_accounts) > 1,
+  // RJ 2026-10-29: account with more than one RCCS (successful requests)
+  multiRccs: (r) => fbcRccsN(r) > 1,
   notInEwa: (r) => String(r.in_ewa || "").toUpperCase() !== "YES",
   // RJ 2026-10-25: request has a deductionDay but the wallet's FIXED_DAY (payment day) is null
   dayNoWalletDay: (r) => String(r.req_deduction_day ?? "").trim() !== "" && r.has_wallet && String(r.wallet_fixed_day ?? "").trim() === "",
@@ -12253,7 +12255,7 @@ function fbcMarkShared(rows) {
 // column groups: [group label, accent, columns]
 const FBC_GROUPS = [
   // RJ 2026-10-21: rows come from the requests; "In EWA" = also in EWA_DDI_ELIGIBILITY (info)
-  ["Customer", "#6366f1", [["account", "Account", "mono"], ["id_payment_form", "Payment form", "mono"], ["category", "RCCS group", "cat"], ["req_complaint_type", "Type", "type"], ["in_ewa", "In EWA"], ["link_state", "Link"]]],
+  ["Customer", "#6366f1", [["account", "Account", "mono"], ["rccs_n", "Multi RCCS", "multi"], ["id_payment_form", "Payment form", "mono"], ["category", "RCCS group", "cat"], ["req_complaint_type", "Type", "type"], ["in_ewa", "In EWA"], ["link_state", "Link"]]],
   ["Subsidy wallet", "#10b981", [["wallet_credit_amount", "Credit (movement WALMOV0001)", "money"], ["wallet_credit_date", "Credit date", "date"], ["wallet_balance", "Balance", "money"], ["cod_behaviour", "Behaviour", "beh"], ["wallet_fixed_day", "Payment day (wallet FIXED_DAY)", "num"], ["wallet_updated", "Wallet updated", "date"]]],
   // RJ 2026-10-18 v2: "for third table for json, just show 1 column for JSON and just display,
   // request CREDIT, NO_BANK, DEDUCTION" - JSON opens the raw request on demand.
@@ -12287,8 +12289,15 @@ function fbcRccsCounts(includeCancelled) {
   return m;
 }
 let fbcMainCounts = new Map();
-function fbcRecount() { fbcMainCounts = fbcRccsCounts($("#fbc-incl-cancel").checked); }
-const fbcInMain = (r) => ($("#fbc-incl-cancel").checked || !fbcIsCancelled(r)) && fbcMainCounts.get(r.account) === 1;
+function fbcRecount() {
+  fbcMainCounts = fbcRccsCounts($("#fbc-incl-cancel").checked);
+  fbcRows.forEach((r) => { r.rccs_n = fbcMainCounts.get(r.account) || ""; });   // also exported in the CSV
+}
+// RJ 2026-10-29: "i want to see all successful in messages in, and the account, then just add a
+// marker if there are multi rccs for the account" - every successful request row is shown again;
+// fbcRccsN(r) = RCCS count of the account (same cancelled rule) -> "Multi RCCS" marker + KPI.
+const fbcInMain = (r) => $("#fbc-incl-cancel").checked || !fbcIsCancelled(r);
+const fbcRccsN = (r) => fbcMainCounts.get(r.account) || 0;
 const fbcDtKey = (v) => String(v ?? "").replace("T", " ").slice(0, 16);   // "YYYY-MM-DD HH:MM"
 // date-time + credit range check for a tab (prefix "fbc" / "fmr")
 function fbcRangeOk(r, p) {
@@ -12336,6 +12345,7 @@ function fbcVisibleRows() {
   let rows = fbcRows.filter((r) => fbcMatch(r));
   if (fbcSortKey) rows = [...rows].sort((a, b) => _hierCompareValues(a[fbcSortKey], b[fbcSortKey], fbcSortDir));
   else if (fbcF.kpi === "sharedRccs") rows = [...rows].sort((a, b) => String(a.rccs_ref).localeCompare(String(b.rccs_ref)));  // keep each RCCS's accounts together
+  else if (fbcF.kpi === "multiRccs") rows = [...rows].sort((a, b) => String(a.account).localeCompare(String(b.account)) || String(a.req_date).localeCompare(String(b.req_date)));  // keep each account's RCCS together
   return rows;
 }
 function fbcListHtml(entries, attr, active, kpiOf, extraOf) {
@@ -12446,6 +12456,7 @@ function fbcRenderDash() {
   const sharedRccs = new Set(sharedRows.map((r) => r.rccs_ref)).size;
   const kCards = [
     ["missing", "🔗", "RCCS with more than 1 account", sharedRccs, `${sharedRows.length.toLocaleString()} accounts share them`, "sharedRccs"],
+    ["missing", "🧾", "Accounts with more than 1 RCCS", new Set(kBase.filter(FBC_KPI_PRED.multiRccs).map((r) => r.account)).size, `${kBase.filter(FBC_KPI_PRED.multiRccs).length.toLocaleString()} RCCS rows`, "multiRccs"],
     ["pending", "❓", "Request without RCCS", kBase.filter(FBC_KPI_PRED.noRccs).length, "RCCS reference not found", "noRccs"],
     ["case0", "🗂️", "Not in EWA_DDI_ELIGIBILITY", kBase.filter(FBC_KPI_PRED.notInEwa).length, "request accounts outside the EWA list", "notInEwa"],
     ["stuck", "⚠️", "Customers with issues", kBase.filter(FBC_KPI_PRED.issues).length, "see consistency checks", "issues"],
@@ -12548,6 +12559,7 @@ function fbcRender() {
       else if (c.kind === "rst" && raw) v = `<span class="rbo-pill" data-kpi="${/reject|cancel/i.test(raw) ? "missing" : /solved|approved/i.test(raw) ? "complete" : "pending"}">${escapeHtml(raw)}</span>`;
       else if (c.kind === "type" && raw) v = `<span title="${escapeHtml(FBC_TYPE_NAMES[raw] || raw)}">${escapeHtml(raw)}</span>`;
       else if (c.kind === "issues" && raw) v = `<span style="color:#dc2626;font-weight:600">⚠ ${escapeHtml(raw)}</span>`;
+      else if (c.kind === "multi") { const n = fbcRccsN(r); v = n > 1 ? `<span class="rbo-pill" data-kpi="missing" title="This account has ${n} RCCS from successful requests">⚠ ${n} RCCS</span>` : ""; }
       else if (c.kind === "latest" && raw) v = `<span class="rbo-pill" data-kpi="${raw === "YES" ? "complete" : "case0"}">${raw === "YES" ? "latest" : `older #${escapeHtml(r.req_seq ?? "")}`}</span>`;
       else if (c.kind === "shared") v = Number(raw) > 1
         ? `<span class="rbo-pill" data-kpi="missing" title="Also on this RCCS: ${escapeHtml(r.rccs_other_accounts || "")}">⚠ ${escapeHtml(raw)} accounts</span>`
@@ -12684,9 +12696,10 @@ $$(".da-subnav-btn[data-fbc-sub]").forEach((btn) => btn.addEventListener("click"
   $$(".da-subpage[data-fbc-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.fbcSub === sub));
   if (sub === "planned" && !fspLoaded) $("#fsp-detect-btn").click();
   if (sub === "subsidy" && !tsubLoaded) $("#tsub-detect-btn").click();   // RJ 2026-10-23: moved from Temp Dashboard
-  if (sub === "multi") { if (!fbcRows.length) $("#fbc-detect-btn").click(); else fmrRender(); }   // RJ 2026-10-28
 }));
-// ---- RJ 2026-10-28: tab "Multi RCCS accounts" (same rows as the Campaign tab, accounts with 2+ RCCS)
+/* RJ 2026-10-29: tab "Multi RCCS accounts" (2026-10-28) removed - "i want to see all successful in
+   messages in, and the account, then just add a marker if there are multi rccs for the account".
+   Replaced by the "Multi RCCS" marker column + KPI card on the Campaign tab.
 let fmrLoaded = false;
 const FMR_COLS = [["account", "Account", "mono"], ["rccs_n", "# RCCS", "num"], ["rccs_ref", "RCCS", "mono"], ["rccs_status_en", "RCCS status", "rst"],
   ["rccs_date", "RCCS created", "date"], ["req_date", "Request date", "date"], ["req_id", "Request ID", "mono"], ["category", "RCCS group"],
@@ -12757,6 +12770,7 @@ $("#fmr-export-btn").addEventListener("click", () => {
   a.download = `fix_billing_campaign_multi_rccs_${new Date().toISOString().slice(0, 10)}.csv`;
   a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 });
+*/
 let fspRows = [], fspLoaded = false, fspF = { kpi: null, day: null, beh: null, tariff: null }, fspTerms = null;
 const fspToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const fspNum = (v) => { const n = parseFloat(String(v ?? "").replace(/,/g, "")); return Number.isFinite(n) ? n : 0; };
@@ -13041,9 +13055,9 @@ $("#fbc-detect-btn").addEventListener("click", async () => {
     // RJ 2026-10-28: one row per account + RCCS (successful requests); this tab = 1 RCCS accounts
     const accN = new Set(fbcRows.map((r) => r.account)).size;
     const canc = fbcRows.filter(fbcIsCancelled).length;
-    $("#fbc-summary").textContent = `${(data.main_count ?? 0).toLocaleString()} account(s) with 1 RCCS (cancelled left out) · ${(data.multi_accounts ?? 0).toLocaleString()} with 2+ RCCS (Multi RCCS tab) · ${data.count.toLocaleString()} RCCS from ${accN.toLocaleString()} account(s), ${canc.toLocaleString()} cancelled${capped} - successful requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
+    // RJ 2026-10-29: all successful requests shown; multi-RCCS accounts are only marked
+    $("#fbc-summary").textContent = `${(data.main_count ?? 0).toLocaleString()} successful request(s) / RCCS (cancelled left out) · ${(data.multi_accounts ?? 0).toLocaleString()} account(s) marked Multi RCCS · ${data.count.toLocaleString()} RCCS from ${accN.toLocaleString()} account(s) incl. ${canc.toLocaleString()} cancelled${capped} - successful requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
     fbcRender();
-    fmrLoaded = true; fmrRender();
   } catch (err) {
     $("#fbc-summary").textContent = "";
     showToast(err.message, true);
