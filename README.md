@@ -3137,6 +3137,40 @@ request) and the paymentday in the wallet table is null".
   is filled it always equals deductionDay. Note: 11,001 of the 14,908 have no noBankAmount in the
   request.
 
+### FIX BILLING CAMPAIGN: Customers filter no longer times out (2026-11-01)
+
+RJ: "can you make it faster, using the filter it times out and never give result".
+
+- Cause (measured live): with a scope condition in the WHERE (e.g. cancelled + wallet) SQL Server
+  chose a much worse plan - still running after 120s and hitting the timeout - while the same
+  query without it ("all") returns in ~50s.
+- Fix: `build_query` always runs the "all" shape; the scope is applied afterwards in Python
+  (`fix_billing_campaign.scope_match`, same rules as before) in `/api/fix-billing-campaign/detect`.
+  Every Customers option now takes the same time as "All requests" (~50s live).
+- Python change - restart needed.
+
+### FIX BILLING CAMPAIGN: "Cancelled RCCS - with a wallet" scope (2026-11-01)
+
+RJ: "i want a filter for all with cancelled rccs and with wallet". New Customers option
+`cancelled_with_wallet` (server side: `c.COD_STATUS_COMPLAINT = 'COMPLST001' AND` wallet exists) -
+Scan returns only those rows (live: 4,312), so the whole dashboard is about them; it ticks
+"Include cancelled RCCS" automatically. The KPI card "Wallet with cancelled RCCS" stays for
+filtering inside any scope. Python change - restart needed.
+
+### FIX BILLING CAMPAIGN: cancelled RCCS included by default + "Wallet with cancelled RCCS" filter (2026-11-01)
+
+RJ: "why the dashboard is showing less, yet i have 43k in the subsidy wallet" -> cause: cancelled
+RCCS (COMPLST001) were hidden by default (~4.1k wallets). RJ: "include it but add a filter, i want
+to see them".
+
+- "Include cancelled RCCS" is now ticked by default (untick to hide them as before).
+- New KPI card / filter **Wallet with cancelled RCCS** (wallet exists + RCCS Canceled).
+- Summary shows requests, accounts, wallets, cancelled RCCS (with a wallet) and Multi RCCS accounts.
+- Route: `main_count` = every row (Overview card), new `wallet_cancelled`. Python change - restart.
+- Live 2026-11-01: 43,567 successful requests / 43,387 accounts / 43,260 wallets (table has
+  ~43.23k); 4,343 cancelled RCCS, **4,312 of them with a wallet** (card click verified:
+  "Showing 4312 of 43567"). Every wallet's account has a successful credit request since 10-16.
+
 ### FIX BILLING CAMPAIGN: all successful requests + "Multi RCCS" marker (2026-10-29)
 
 RJ: "ok change it, i want to see all successful in messages in, and the account, then just add a

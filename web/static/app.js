@@ -12236,6 +12236,8 @@ const FBC_KPI_PRED = {
   sharedRccs: (r) => Number(r.rccs_accounts) > 1,
   // RJ 2026-10-29: account with more than one RCCS (successful requests)
   multiRccs: (r) => fbcRccsN(r) > 1,
+  // RJ 2026-11-01: "include it but add a filter, i want to see them" - wallet exists, RCCS Canceled
+  walletCancelled: (r) => r.has_wallet && fbcIsCancelled(r),
   notInEwa: (r) => String(r.in_ewa || "").toUpperCase() !== "YES",
   // RJ 2026-10-25: request has a deductionDay but the wallet's FIXED_DAY (payment day) is null
   dayNoWalletDay: (r) => String(r.req_deduction_day ?? "").trim() !== "" && r.has_wallet && String(r.wallet_fixed_day ?? "").trim() === "",
@@ -12456,6 +12458,7 @@ function fbcRenderDash() {
   const sharedRccs = new Set(sharedRows.map((r) => r.rccs_ref)).size;
   const kCards = [
     ["missing", "🔗", "RCCS with more than 1 account", sharedRccs, `${sharedRows.length.toLocaleString()} accounts share them`, "sharedRccs"],
+    ["missing", "🚫", "Wallet with cancelled RCCS", kBase.filter(FBC_KPI_PRED.walletCancelled).length, $("#fbc-incl-cancel").checked ? "wallet exists, RCCS Canceled (COMPLST001)" : "tick 'Include cancelled RCCS' to see them", "walletCancelled"],
     ["missing", "🧾", "Accounts with more than 1 RCCS", new Set(kBase.filter(FBC_KPI_PRED.multiRccs).map((r) => r.account)).size, `${kBase.filter(FBC_KPI_PRED.multiRccs).length.toLocaleString()} RCCS rows`, "multiRccs"],
     ["pending", "❓", "Request without RCCS", kBase.filter(FBC_KPI_PRED.noRccs).length, "RCCS reference not found", "noRccs"],
     ["case0", "🗂️", "Not in EWA_DDI_ELIGIBILITY", kBase.filter(FBC_KPI_PRED.notInEwa).length, "request accounts outside the EWA list", "notInEwa"],
@@ -13049,6 +13052,8 @@ $("#fbc-detect-btn").addEventListener("click", async () => {
     fbcEwaCols = data.ewa_columns || [];
     fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null };
     if (data.cancelled_status) FBC_CANCELLED = data.cancelled_status;
+    // RJ 2026-11-01: the "Cancelled RCCS - with a wallet" scope needs cancelled rows shown
+    if ($("#fbc-scope").value === "cancelled_with_wallet") $("#fbc-incl-cancel").checked = true;
     fbcRecount();
     $("#fbc-dash").hidden = false; $("#fbc-filter-row").hidden = false; $("#fbc-range-row").hidden = false; $("#fbc-acts-title").hidden = false;
     const capped = data.row_cap && data.count >= data.row_cap ? ` (capped at ${Number(data.row_cap).toLocaleString()})` : "";
@@ -13056,7 +13061,9 @@ $("#fbc-detect-btn").addEventListener("click", async () => {
     const accN = new Set(fbcRows.map((r) => r.account)).size;
     const canc = fbcRows.filter(fbcIsCancelled).length;
     // RJ 2026-10-29: all successful requests shown; multi-RCCS accounts are only marked
-    $("#fbc-summary").textContent = `${(data.main_count ?? 0).toLocaleString()} successful request(s) / RCCS (cancelled left out) · ${(data.multi_accounts ?? 0).toLocaleString()} account(s) marked Multi RCCS · ${data.count.toLocaleString()} RCCS from ${accN.toLocaleString()} account(s) incl. ${canc.toLocaleString()} cancelled${capped} - successful requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
+    // RJ 2026-11-01: cancelled RCCS included by default; "Wallet with cancelled RCCS" card filters them
+    const wN = new Set(fbcRows.filter((r) => r.has_wallet).map((r) => r.id_wallet)).size;
+    $("#fbc-summary").textContent = `${data.count.toLocaleString()} successful request(s) / RCCS from ${accN.toLocaleString()} account(s) · ${wN.toLocaleString()} wallet(s) · ${canc.toLocaleString()} cancelled RCCS (${fbcRows.filter((r) => r.has_wallet && fbcIsCancelled(r)).length.toLocaleString()} with a wallet) · ${new Set(fbcRows.filter((r) => fbcRccsN(r) > 1).map((r) => r.account)).size.toLocaleString()} account(s) marked Multi RCCS${capped} - successful requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
     fbcRender();
   } catch (err) {
     $("#fbc-summary").textContent = "";

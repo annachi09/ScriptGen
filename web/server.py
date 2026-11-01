@@ -4846,19 +4846,26 @@ def fix_billing_campaign_detect(body: FixBillingCampaignRequest, user: str = Dep
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     rows = [fix_billing_campaign.shape_row({c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)})
             for r in res.rows]
+    # RJ 2026-11-01: scope filtered here (the SQL always runs the fast "all" shape)
+    if body.scope and body.scope != "all":
+        rows = [r for r in rows if fix_billing_campaign.scope_match(r, body.scope)]
     # RJ 2026-10-21: rows come from the requests; EWA_DDI_ELIGIBILITY values are the
     # EWA_* columns at the end (info only).
     ewa_cols = [c.lower() for c in res.columns if c.upper().startswith("EWA_")]
     # RJ 2026-10-29: default page view = every successful request / RCCS except cancelled ones;
     # accounts with 2+ of them are only marked "Multi RCCS". main_count / multi_accounts mirror the
     # page defaults (Overview card = main_count).
+    # RJ 2026-11-01: cancelled RCCS are now INCLUDED by default ("include it but add a filter") -
+    # main_count = every row; wallet_cancelled = rows with a wallet whose RCCS is Canceled.
     per_acc: dict = {}
     for r in rows:
-        if str(r.get("rccs_status") or "") != fix_billing_campaign.CANCELLED_RCCS_STATUS:
-            per_acc[r.get("account")] = per_acc.get(r.get("account"), 0) + 1
+        per_acc[r.get("account")] = per_acc.get(r.get("account"), 0) + 1
     main_count = sum(per_acc.values())
+    wallet_cancelled = sum(1 for r in rows if r.get("has_wallet")
+                           and str(r.get("rccs_status") or "") == fix_billing_campaign.CANCELLED_RCCS_STATUS)
     multi_accounts = sum(1 for n in per_acc.values() if n > 1)
     return {"rows": rows, "count": len(rows), "main_count": main_count, "multi_accounts": multi_accounts,
+            "wallet_cancelled": wallet_cancelled,
             "cancelled_status": fix_billing_campaign.CANCELLED_RCCS_STATUS,
             "ewa_columns": ewa_cols, "scope": body.scope, "since": body.since,
             "row_cap": fix_billing_campaign.ROW_CAP, "attrs": fix_billing_campaign.ATTRS,

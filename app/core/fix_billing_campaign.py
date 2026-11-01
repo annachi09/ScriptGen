@@ -51,7 +51,8 @@ ATTRS = {"RCCSCRDAMT": "Credit Amount", "RCCSNOBAMT": "No Bank Amount",
 # external messages_in" - the requests (GCGE_EXTERNAL_MESSAGES_IN, latest per account)
 # are now the base; EWA_DDI_ELIGIBILITY is optional extra info (LEFT JOIN) and the
 # payment form comes from GCCOM_PAYMENT_FORM.REFERENCE = the request's idAccount.
-SCOPES = ("all", "in_ewa", "not_in_ewa", "with_wallet", "no_wallet", "day_no_wallet_day", "nobank_no_wallet_day")
+SCOPES = ("all", "in_ewa", "not_in_ewa", "with_wallet", "no_wallet", "day_no_wallet_day", "nobank_no_wallet_day",
+          "cancelled_with_wallet")
 # RJ 2026-10-25: "we added paymentday in the credit wallet and the rccs attribute, and the request
 # in external messages in is deductionDay, so for no Bank only there will be deduction day, i need
 # a filter for those with payemnt day (deductionDay on the request) and the paymentday in the
@@ -106,8 +107,16 @@ def build_query(scope: str = "all", since: str | None = None) -> str:
                                  " AND NULLIF(LTRIM(RTRIM(CASE WHEN c.ID_COMPLAINT IS NOT NULL THEN c.ATT_NOBANK_AMT"
                                  " ELSE m.NO_BANK_AMOUNT END)), '') IS NOT NULL"
                                  " AND w.ID_PAYMENT_FORM IS NOT NULL AND w.FIXED_DAY IS NULL"),
+        # RJ 2026-11-01: "i want a filter for all with cancelled rccs and with wallet"
+        "cancelled_with_wallet": (" AND c.COD_STATUS_COMPLAINT = 'COMPLST001'"
+                                  " AND w.ID_PAYMENT_FORM IS NOT NULL"),
     }[scope]
-    where = f"WHERE {has_credit}{extra}"
+    # RJ 2026-11-01: "can you make it faster, using the filter it times out and never give result" -
+    # a scope condition in the WHERE made SQL Server pick a far worse plan (cancelled + wallet:
+    # >100s and timing out vs ~50s for "all"). The SQL now always runs the "all" shape and the
+    # scope is applied to the shaped rows in Python (scope_match). `extra` kept for reference only.
+    del extra
+    where = f"WHERE {has_credit}"
     ewa_cols = ",\n       ".join(f"e.{c} AS EWA_{c.upper()}" for c in EWA_COLUMNS)
     return f"""
 SET NOCOUNT ON;
@@ -328,6 +337,30 @@ def _num(v):
         return float(str(v).replace(",", ""))
     except ValueError:
         return None
+
+
+def _filled(v) -> bool:
+    return str(v if v is not None else "").strip() != ""
+
+
+def scope_match(r: dict, scope: str) -> bool:
+    """RJ 2026-11-01: Customers scope applied in Python on shaped rows (same rules the SQL had)."""
+    has_wallet = _filled(r.get("id_wallet"))
+    if scope == "in_ewa":
+        return str(r.get("in_ewa") or "").upper() == "YES"
+    if scope == "not_in_ewa":
+        return str(r.get("in_ewa") or "").upper() != "YES"
+    if scope == "with_wallet":
+        return has_wallet
+    if scope == "no_wallet":
+        return not has_wallet
+    if scope == "day_no_wallet_day":
+        return _filled(r.get("req_deduction_day")) and has_wallet and not _filled(r.get("wallet_fixed_day"))
+    if scope == "nobank_no_wallet_day":
+        return r.get("category") == CATEGORY_NO_BANK and has_wallet and not _filled(r.get("wallet_fixed_day"))
+    if scope == "cancelled_with_wallet":
+        return str(r.get("rccs_status") or "") == CANCELLED_RCCS_STATUS and has_wallet
+    return True
 
 
 def _differs(a, b) -> bool:

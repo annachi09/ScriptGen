@@ -2146,6 +2146,8 @@
                 <option value="day_no_wallet_day">Requests - deductionDay set, wallet payment day NULL</option>
                 <!-- RJ 2026-10-25: "no bank with no paymentDAy in credit wallet table" -->
                 <option value="nobank_no_wallet_day">No Bank - wallet payment day NULL</option>
+                <!-- RJ 2026-11-01: "i want a filter for all with cancelled rccs and with wallet" -->
+                <option value="cancelled_with_wallet">Cancelled RCCS - with a wallet</option>
               </select>
               <span class="hint-text" title="RJ 2026-10-18: customers whose request has no creditAmount are excluded">only requests with a CreditAmount</span>
               <label class="field-label" for="fbc-since">Requests after</label>
@@ -2190,7 +2192,8 @@
           <!-- RJ 2026-10-28: "remove the cancelled by default but add a tick button to include them,
                i also want to have date and time filter and range filter" -->
           <div class="key-panel-row fbc-range-row" id="fbc-range-row">
-            <label class="field-label" title="RCCS status COMPLST001 Canceled - left out by default (also when counting RCCS per account)"><input type="checkbox" id="fbc-incl-cancel" /> Include cancelled RCCS</label>
+            <!-- RJ 2026-11-01: "include it but add a filter, i want to see them" - ticked by default -->
+            <label class="field-label" title="RCCS status COMPLST001 Canceled - included by default; untick to leave them out (also from the RCCS count per account)"><input type="checkbox" id="fbc-incl-cancel" checked /> Include cancelled RCCS</label>
             <label class="field-label" style="margin-left:12px;">Request from</label>
             <input id="fbc-dt-from" class="text-input text-input-sm" type="datetime-local" />
             <label class="field-label">to</label>
