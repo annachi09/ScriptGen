@@ -320,6 +320,141 @@ DROP TABLE #sub; DROP TABLE #rd; DROP TABLE #st;
 """
 
 
+# ---------------------------------------------------------------------------
+# Tab "Bahraini First Account categories" (RJ 2026-11-01): "add a new tab with 3 category
+# Bahraini first account under fix billing, bahraini first account not under fix billing and,
+# others that are not in the first 2 category, add a tick box if bill is generated (in status
+# invoicing) for the November billing period (or the period selected)".
+#   Bahraini First Account (BFA) = account with an active service on a BFA tariff
+#       (SUBSIDY_FARES, same rule as the Subsidized tabs)
+#   under fix billing = the account has a successful campaign request (empty RESPONSEHEADER,
+#       creditAmount, after `since` - same rules as the Campaign tab)
+#   categories: 1 BFA + campaign, 2 BFA without campaign,
+#       3 Others = every other account (active service on any other tariff, plus campaign accounts
+#       that are not BFA). RJ 2026-11-01 (later): "why others are low, i suppose other tariffs will
+#       fall under this category" - was campaign-non-BFA only (59), now all other accounts (~294k).
+#   bill generated = GCCOM_BILL of the account in the period with BILLING_STATUS ESTFAC0012
+#       (Invoicing)
+# One row per account. Category totals (CAT1..3_TOTAL / _GEN) are computed in SQL over ALL
+# accounts; "Others" rows are only RETURNED when they have an Invoicing bill or a campaign request,
+# unless include_all_others=True (~294k rows - heavy for the browser).
+# ---------------------------------------------------------------------------
+BFA_PERIOD_DEFAULT = 10000000239          # 11-November 2026 (GCCOM_BILLING_PERIOD, live)
+BILL_STATUS_INVOICING = "ESTFAC0012"      # OUC_ADMIN.GCCOM_BILL_STATUS "Invoicing" (live)
+BFA_CATEGORIES = ("Bahraini First Account - under fix billing",
+                  "Bahraini First Account - not under fix billing",
+                  "Others - other tariffs")
+
+
+def build_bfa_categories_query(billing_period: int = BFA_PERIOD_DEFAULT, since: str | None = None,
+                               include_all_others: bool = False) -> str:
+    bp = int(billing_period)
+    since = _since(since)
+    fares = ", ".join(str(f) for f in SUBSIDY_FARES)
+    c1, c2, c3 = BFA_CATEGORIES
+    others_filter = "" if include_all_others else \
+        "WHERE f.CAT_NO < 3 OR f.BILL_GENERATED = 'YES' OR f.UNDER_FIX_BILLING = 'YES'"
+    return f"""
+SET NOCOUNT ON;
+IF OBJECT_ID('tempdb..#acc') IS NOT NULL DROP TABLE #acc;
+IF OBJECT_ID('tempdb..#cmp') IS NOT NULL DROP TABLE #cmp;
+IF OBJECT_ID('tempdb..#u') IS NOT NULL DROP TABLE #u;
+IF OBJECT_ID('tempdb..#bl') IS NOT NULL DROP TABLE #bl;
+IF OBJECT_ID('tempdb..#tot') IS NOT NULL DROP TABLE #tot;
+DECLARE @bp_name varchar(100) = (SELECT COALESCE(d.TEXT, p.DESCRIPTION) FROM GCCOM_BILLING_PERIOD p
+    LEFT JOIN GCTS_DICTIONARY d ON d.ID = p.PERIOD_NAME_XI18N AND d.LOCALE = 'EN' WHERE p.ID_BILLING_PERIOD = {bp});
+
+-- every account with an active service: BFA flag + its tariffs (GCCOM_FARE.RATE_CODE)
+SELECT x.ID_PAYMENT_FORM, MAX(x.IS_BFA) AS IS_BFA, STRING_AGG(x.RATE_CODE, ', ') AS TARIFFS
+INTO #acc
+FROM (SELECT DISTINCT cs.ID_PAYMENT_FORM,
+             CASE WHEN bs.ID_FARE IN ({fares}) THEN 1 ELSE 0 END AS IS_BFA,
+             CAST(COALESCE(f.RATE_CODE, CAST(bs.ID_FARE AS varchar(20))) AS varchar(30)) AS RATE_CODE
+      FROM GCCOM_CONTRACTED_SERVICE cs WITH (NOLOCK)
+      LEFT JOIN GCCOM_BILLING_SERVICE bs WITH (NOLOCK) ON bs.ID_CONTRACTED_SERVICE = cs.ID_CONTRACTED_SERVICE
+      LEFT JOIN OUC_COMMON_ADMIN.GCCOM_FARE f ON f.ID_FARE = bs.ID_FARE
+      WHERE cs.STATUS NOT IN ('ESTSC00001', 'ESTSC00004', 'ESTSC00005')) x
+GROUP BY x.ID_PAYMENT_FORM;
+
+-- fix billing campaign: successful requests with a creditAmount (Campaign tab rules).
+-- Two steps (raw copy, then JSON parse) - live: ~32s + ~22s; one step was slower.
+IF OBJECT_ID('tempdb..#raw') IS NOT NULL DROP TABLE #raw;
+SELECT mi.CREATE_DATE, mi.REQUESTENTITY, LEFT(mi.RESPONSEENTITY, 60) AS RESPONSE_REF
+INTO #raw
+FROM {MESSAGES_TABLE} mi WITH (NOLOCK)
+WHERE mi.REQUESTURL = '{REQUEST_URL}' AND mi.CREATE_DATE > '{since}'
+  AND NULLIF(LTRIM(RTRIM(mi.RESPONSEHEADER)), '') IS NULL;
+
+SELECT pf.ID_PAYMENT_FORM, j.ID_ACCOUNT_REF, MAX(r.CREATE_DATE) AS LAST_REQ_DATE,
+       COUNT(DISTINCT j.RCCS_REF) AS RCCS_COUNT
+INTO #cmp
+FROM #raw r
+CROSS APPLY (SELECT
+    CASE WHEN ISJSON(r.REQUESTENTITY) = 1 THEN JSON_VALUE(r.REQUESTENTITY, '$.idAccount') END AS ID_ACCOUNT_REF,
+    COALESCE(CASE WHEN ISJSON(r.REQUESTENTITY) = 1 THEN JSON_VALUE(r.REQUESTENTITY, '$.rccsReference') END,
+             r.RESPONSE_REF) AS RCCS_REF,
+    CASE WHEN ISJSON(r.REQUESTENTITY) = 1 THEN JSON_VALUE(r.REQUESTENTITY, '$.creditAmount') END AS CREDIT_AMOUNT
+) j
+LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.REFERENCE = j.ID_ACCOUNT_REF
+WHERE NULLIF(LTRIM(RTRIM(j.CREDIT_AMOUNT)), '') IS NOT NULL
+GROUP BY pf.ID_PAYMENT_FORM, j.ID_ACCOUNT_REF;
+DROP TABLE #raw;
+
+-- universe = every active account + campaign accounts (FULL OUTER: campaign account without an
+-- active service still listed)
+SELECT COALESCE(a.ID_PAYMENT_FORM, c.ID_PAYMENT_FORM) AS ID_PAYMENT_FORM, c.ID_ACCOUNT_REF,
+       a.TARIFFS, c.LAST_REQ_DATE, c.RCCS_COUNT,
+       CASE WHEN a.IS_BFA = 1 AND c.ID_ACCOUNT_REF IS NOT NULL THEN 1
+            WHEN a.IS_BFA = 1 THEN 2 ELSE 3 END AS CAT_NO
+INTO #u
+FROM #acc a
+FULL OUTER JOIN #cmp c ON c.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM;
+
+-- Invoicing bills of the period per payment form (status filter first: live ~30 ms;
+-- all bills of the period with a join was ~33 s+)
+SELECT b.ID_PAYMENT_FORM,
+       COUNT(*) AS INVOICING_BILLS,
+       SUM(b.TOTAL_AMOUNT) AS INVOICING_AMOUNT,
+       MAX(b.BILLING_DATE) AS INVOICING_BILL_DATE,
+       STRING_AGG(CAST(b.BILL_NUMBER AS varchar(40)), ', ') AS INVOICING_BILL_NUMBERS
+INTO #bl
+FROM OUC_COMMON_ADMIN.GCCOM_BILL b WITH (NOLOCK)
+WHERE b.ID_BILLING_PERIOD = {bp} AND b.BILLING_STATUS = '{BILL_STATUS_INVOICING}'
+GROUP BY b.ID_PAYMENT_FORM;
+
+-- category totals over ALL accounts (returned on every row; "Others" rows may be trimmed below)
+SELECT SUM(CASE WHEN u.CAT_NO = 1 THEN 1 ELSE 0 END) AS CAT1_TOTAL,
+       SUM(CASE WHEN u.CAT_NO = 1 AND bl.ID_PAYMENT_FORM IS NOT NULL THEN 1 ELSE 0 END) AS CAT1_GEN,
+       SUM(CASE WHEN u.CAT_NO = 2 THEN 1 ELSE 0 END) AS CAT2_TOTAL,
+       SUM(CASE WHEN u.CAT_NO = 2 AND bl.ID_PAYMENT_FORM IS NOT NULL THEN 1 ELSE 0 END) AS CAT2_GEN,
+       SUM(CASE WHEN u.CAT_NO = 3 THEN 1 ELSE 0 END) AS CAT3_TOTAL,
+       SUM(CASE WHEN u.CAT_NO = 3 AND bl.ID_PAYMENT_FORM IS NOT NULL THEN 1 ELSE 0 END) AS CAT3_GEN
+INTO #tot
+FROM #u u LEFT JOIN #bl bl ON bl.ID_PAYMENT_FORM = u.ID_PAYMENT_FORM;
+
+SELECT f.*, t.* FROM (
+  SELECT COALESCE(pf.REFERENCE, u.ID_ACCOUNT_REF) AS ACCOUNT, u.ID_PAYMENT_FORM, u.CAT_NO,
+         CASE u.CAT_NO WHEN 1 THEN '{c1}' WHEN 2 THEN '{c2}' ELSE '{c3}' END AS CATEGORY,
+         u.TARIFFS, CASE WHEN u.ID_ACCOUNT_REF IS NOT NULL THEN 'YES' ELSE 'NO' END AS UNDER_FIX_BILLING,
+         u.LAST_REQ_DATE, u.RCCS_COUNT,
+         w.ID_WALLET, w.BALANCE AS WALLET_BALANCE,
+         ISNULL(bl.INVOICING_BILLS, 0) AS INVOICING_BILLS, bl.INVOICING_BILL_NUMBERS,
+         bl.INVOICING_AMOUNT, bl.INVOICING_BILL_DATE,
+         CASE WHEN ISNULL(bl.INVOICING_BILLS, 0) > 0 THEN 'YES' ELSE 'NO' END AS BILL_GENERATED,
+         {bp} AS ID_BILLING_PERIOD, @bp_name AS BILLING_PERIOD_NAME
+  FROM #u u
+  LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = u.ID_PAYMENT_FORM
+  LEFT JOIN {WALLET_TABLE} w WITH (NOLOCK) ON w.ID_PAYMENT_FORM = u.ID_PAYMENT_FORM
+  LEFT JOIN #bl bl ON bl.ID_PAYMENT_FORM = u.ID_PAYMENT_FORM
+) f
+CROSS JOIN #tot t
+{others_filter}
+ORDER BY f.CAT_NO, f.ACCOUNT;
+
+DROP TABLE #acc; DROP TABLE #cmp; DROP TABLE #u; DROP TABLE #bl; DROP TABLE #tot;
+"""
+
+
 def build_request_json_query(id_seq: int) -> str:
     """RJ 2026-10-18: the request group in the table shows one JSON column - the raw
     REQUESTENTITY is fetched on demand per request (keeps the scan payload small)."""

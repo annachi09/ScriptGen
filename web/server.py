@@ -4872,6 +4872,42 @@ def fix_billing_campaign_detect(body: FixBillingCampaignRequest, user: str = Dep
             "elapsed_ms": res.elapsed_ms}
 
 
+# RJ 2026-11-01: tab "Bahraini First Account categories" (fix_billing_campaign.build_bfa_categories_query)
+class BfaCategoriesRequest(BaseModel):
+    billing_period: int = fix_billing_campaign.BFA_PERIOD_DEFAULT
+    since: str = fix_billing_campaign.DEFAULT_SINCE
+    include_all_others: bool = False   # RJ 2026-11-01: list all ~294k "Others" rows (heavy)
+
+
+@app.post("/api/fix-billing-campaign/bfa-categories")
+def fix_billing_campaign_bfa_categories(body: BfaCategoriesRequest, user: str = Depends(require_login)):
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        sql_text = fix_billing_campaign.build_bfa_categories_query(body.billing_period, body.since,
+                                                                   body.include_all_others)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        res = mssql.run_query(conn, sql_text, timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    tot_keys = ("cat1_total", "cat1_gen", "cat2_total", "cat2_gen", "cat3_total", "cat3_gen")
+    rows, totals = [], {}
+    for r in res.rows:
+        d = {c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)}
+        if not totals:
+            totals = {k: d.get(k) for k in tot_keys}
+        for k in tot_keys:   # constant on every row - sent once in "totals"
+            d.pop(k, None)
+        rows.append(d)
+    return {"rows": rows, "count": len(rows), "totals": totals,
+            "categories": list(fix_billing_campaign.BFA_CATEGORIES), "all_others": body.include_all_others,
+            "billing_period": body.billing_period, "since": body.since, "elapsed_ms": res.elapsed_ms}
+
+
 # RJ 2026-10-23: tab 2 "Subsidized - planned billing" (fix_billing_campaign.build_subsidy_planned_query)
 class SubsidyPlannedRequest(BaseModel):
     billing_period: int = fix_billing_campaign.SUBSIDY_PERIOD_DEFAULT

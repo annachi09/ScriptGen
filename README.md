@@ -3137,6 +3137,41 @@ request) and the paymentday in the wallet table is null".
   is filled it always equals deductionDay. Note: 11,001 of the 14,908 have no noBankAmount in the
   request.
 
+### FIX BILLING CAMPAIGN: tab "Bahraini First Account categories" (2026-11-01)
+
+RJ: "add a new tab with 3 category Bahraini first account under fix billing, bahraini first account
+not under fix billing and, others that are not in the first 2 category, add a tick box if bill is
+generated (in status invoicing) for the November billing period (or the period selected)".
+
+- `fix_billing_campaign.build_bfa_categories_query(billing_period, since)`, route
+  `POST /api/fix-billing-campaign/bfa-categories` (300s timeout).
+  - Bahraini First Account = active contracted service on tariff E-D2 / W-D2 / E-D2-NM
+    (`SUBSIDY_FARES`, same rule as the Subsidized tabs).
+  - Under fix billing = successful campaign request (empty RESPONSEHEADER, creditAmount, after
+    the date) - same rules as the Campaign tab.
+  - Categories: 1 BFA + campaign, 2 BFA without campaign, 3 campaign accounts that are not BFA.
+  - Bill generated = `GCCOM_BILL` of the period with `BILLING_STATUS = 'ESTFAC0012'` (Invoicing);
+    count, bill numbers, amount, billing date shown. Period default 10000000239 = 11-November 2026
+    (dropdown Sep-Dec 2026).
+- UI: category KPI cards (click to filter, each shows how many have an Invoicing bill and %),
+  ticks "Bill generated (Invoicing)" / "Bill NOT generated", search, copy accounts, CSV.
+- Speed: the bills step filters period + Invoicing status first (~30 ms; all bills of the period
+  was ~33 s), the requests are copied then JSON-parsed (~32 s + ~22 s). Whole tab ~107 s live.
+- Live 2026-11-01, November: BFA under fix billing 43,841 (1 with an Invoicing bill), BFA not
+  under fix billing 123,076 (3), others 59 (7) - November billing has barely started.
+- New route - restart needed.
+- RJ 2026-11-01 (later): "why others are low, i suppose other tariffs will fall under this
+  category" -> **Others = every other account**: active service (status not Pending /
+  Terminated / Cancelled) on any non-BFA tariff, plus campaign accounts that are not BFA. Tariffs
+  shown as `GCCOM_FARE.RATE_CODE`. Live: 461,087 active accounts = 166,913 BFA + 294,174 Others
+  (20 Others with a November Invoicing bill).
+- Category cards always show SQL totals over all accounts (`CAT1..3_TOTAL/_GEN`, route `totals`).
+  To keep the browser light, Others rows are only listed when they have an Invoicing bill or a
+  campaign request; tick **List all Others (re-scan)** to list all ~294k (`include_all_others`).
+- RJ 2026-11-01: "inside i want the 3 filter i mentioned" - a **Category** row in the filter bar
+  with one tick per category (all ticked by default; any combination). Clicking a card ticks only
+  that category; "All accounts" card / Clear filters ticks all 3. Static change (Ctrl+F5).
+
 ### FIX BILLING CAMPAIGN: Customers filter no longer times out (2026-11-01)
 
 RJ: "can you make it faster, using the filter it times out and never give result".

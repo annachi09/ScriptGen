@@ -155,6 +155,7 @@ const SG_ENDPOINT_OWNER = [
   ["/api/reading-discrepancies/pending-validation", "readingdiscrepancies", "pending"],
   ["/api/reading-discrepancies/", "readingdiscrepancies", "unbilled"],
   ["/api/fix-billing-campaign/subsidy-planned", "fixbillingcampaign", "planned"],
+  ["/api/fix-billing-campaign/bfa-categories", "fixbillingcampaign", "bfacat"],   // RJ 2026-11-01
   ["/api/fix-billing-campaign/", "fixbillingcampaign", "campaign"],
   ["/api/pending-sr/", "pendingsr", ""],
   ["/api/rebilling-monitor/open", "rebillingmonitor", "open"],
@@ -10052,7 +10053,7 @@ const HX_REFRESH = {
   pendingsr: () => ({ btn: "#psr-detect-btn" }),
   tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn", rccslist: "#trl-detect-btn", sanlbd: "#tslb-detect-btn", duprccs: "#tdr-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
-  fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),   // multi (RJ 2026-10-28) re-runs the campaign Scan
+  fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn", bfacat: "#fbk-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),   // multi (RJ 2026-10-28) re-runs the campaign Scan
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
@@ -12699,7 +12700,112 @@ $$(".da-subnav-btn[data-fbc-sub]").forEach((btn) => btn.addEventListener("click"
   $$(".da-subpage[data-fbc-sub]").forEach((p) => p.classList.toggle("is-active", p.dataset.fbcSub === sub));
   if (sub === "planned" && !fspLoaded) $("#fsp-detect-btn").click();
   if (sub === "subsidy" && !tsubLoaded) $("#tsub-detect-btn").click();   // RJ 2026-10-23: moved from Temp Dashboard
+  if (sub === "bfacat" && !fbkLoaded) $("#fbk-detect-btn").click();     // RJ 2026-11-01
 }));
+// ---- RJ 2026-11-01: tab "Bahraini First Account categories" ---------------------------------
+// 3 categories (BFA under fix billing / BFA not under fix billing / others = campaign, not BFA)
+// + tick "Bill generated (Invoicing)" for the selected billing period (default November 2026).
+let fbkRows = [], fbkLoaded = false, fbkCat = null, fbkCats = [], fbkTotals = {}, fbkAllOthers = false;
+const FBK_CAT_KPI = { 1: "complete", 2: "pending", 3: "services" };
+const FBK_CAT_ICON = { 1: "🇧🇭", 2: "🏠", 3: "🧾" };
+const FBK_COLS = [["account", "Account", "mono"], ["category", "Category", "cat"], ["tariffs", "BFA tariff"], ["under_fix_billing", "Under fix billing"],
+  ["last_req_date", "Last campaign request", "date"], ["rccs_count", "# RCCS", "num"], ["wallet_balance", "Wallet balance", "money"],
+  ["bill_generated", "Bill generated (Invoicing)", "gen"], ["invoicing_bills", "# Invoicing bills", "num"], ["invoicing_bill_numbers", "Bill number(s)", "mono"],
+  ["invoicing_amount", "Invoicing amount", "money"], ["invoicing_bill_date", "Billing date", "date"], ["id_payment_form", "Payment form", "mono"]];
+// RJ 2026-11-01: the 3 category ticks in the filter bar (cards set / clear them too)
+const fbkCatOn = () => new Set($$(".fbk-cat-cb").filter((c) => c.checked).map((c) => c.value));
+function fbkSyncCat() {
+  const on = fbkCatOn();
+  fbkCat = on.size === 1 ? Number([...on][0]) : null;   // card highlight when exactly one is ticked
+}
+function fbkMatch(r, skip) {
+  if (skip !== "cat" && !fbkCatOn().has(String(r.cat_no))) return false;
+  if ($("#fbk-gen-only").checked && r.bill_generated !== "YES") return false;
+  if ($("#fbk-notgen-only").checked && r.bill_generated === "YES") return false;
+  const q = ($("#fbk-search").value || "").trim().toLowerCase();
+  if (q && ![r.account, r.id_payment_form, r.tariffs, r.invoicing_bill_numbers].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+  return true;
+}
+function fbkRender() {
+  // RJ 2026-11-01 (later): card numbers = SQL totals over ALL accounts (Others is ~294k and only
+  // partly listed unless "List all Others" is ticked) - the table below follows the filters.
+  const tn = (k) => Number(String(fbkTotals[k] ?? 0).replace(/,/g, "")) || 0;
+  const catCards = [1, 2, 3].map((n) => [n, FBK_CAT_KPI[n], FBK_CAT_ICON[n], fbkCats[n - 1] || `Category ${n}`, tn(`cat${n}_total`), tn(`cat${n}_gen`)]);
+  const cards = [[null, "total", "👥", "All accounts", catCards.reduce((s, c) => s + c[4], 0), catCards.reduce((s, c) => s + c[5], 0)]].concat(catCards);
+  $("#fbk-kpi-row").innerHTML = cards.map(([n, kpi, icon, label, v, gen]) => {
+    const listed = n ? fbkRows.filter((r) => String(r.cat_no) === String(n)).length : fbkRows.length;
+    const part = listed < v ? ` · ${listed.toLocaleString()} listed` : "";
+    return `<div class="rbo-kpi${n && String(fbkCat) === String(n) ? " is-active" : ""}" data-kpi="${kpi}" data-fbk-cat="${n || ""}" title="${escapeHtml(label)} - click to filter, click again to clear">` +
+      `<span class="rbo-kpi-label"><span>${icon}</span>${escapeHtml(label)}</span><span class="rbo-kpi-value">${v.toLocaleString()}</span>` +
+      `<span class="rbo-sub">${gen.toLocaleString()} with an Invoicing bill (${v ? (100 * gen / v).toFixed(v > 1000 ? 2 : 0) : 0}%)${part}</span></div>`;
+  }).join("");
+  $("#fbk-table thead tr").innerHTML = FBK_COLS.map(([, l]) => `<th>${escapeHtml(l)}</th>`).join("");
+  const vis = fbkRows.filter((r) => fbkMatch(r));
+  $("#fbk-table tbody").innerHTML = vis.slice(0, 3000).map((r) => `<tr>` + FBK_COLS.map(([k, , kind]) => {
+    const raw = r[k] ?? "";
+    let v = escapeHtml(raw);
+    if (kind === "money") v = fbcMoney(raw);
+    else if (kind === "date") v = escapeHtml(String(raw).slice(0, 16));
+    else if (kind === "cat") v = `<span class="rbo-pill" data-kpi="${FBK_CAT_KPI[r.cat_no] || "services"}">${escapeHtml(raw)}</span>`;
+    else if (kind === "gen") v = raw === "YES" ? `<span class="rbo-pill" data-kpi="complete">✔ Generated</span>` : `<span class="rbo-pill" data-kpi="case0">Not yet</span>`;
+    return `<td class="${kind === "money" || kind === "num" ? "hx-num" : ""}${kind === "mono" ? " hx-mono" : ""}">${v}</td>`;
+  }).join("") + "</tr>").join("") || `<tr><td colspan="${FBK_COLS.length}" class="hint-text">No accounts match.</td></tr>`;
+  if (vis.length > 3000) $("#fbk-table tbody").insertAdjacentHTML("beforeend", `<tr><td colspan="${FBK_COLS.length}" class="hint-text">Showing the first 3,000 of ${vis.length.toLocaleString()} - use Export CSV for all.</td></tr>`);
+  renderFilteredCount("#fbk-filtered-count", vis.length, fbkRows.length);
+  const onCats = fbkCatOn();
+  $("#fbk-active-filters").textContent = [onCats.size < 3 ? `Category: ${[...onCats].sort().map((n) => fbkCats[n - 1] || n).join(" + ") || "none"}` : "", $("#fbk-gen-only").checked ? "Bill generated" : "", $("#fbk-notgen-only").checked ? "Bill not generated" : ""].filter(Boolean).join(" · ");
+  $("#fbk-copy-btn").disabled = $("#fbk-export-btn").disabled = vis.length === 0;
+}
+$("#fbk-dash").addEventListener("click", (e) => {
+  const k = e.target.closest("[data-fbk-cat]");
+  if (!k) return;
+  const n = k.dataset.fbkCat || null;
+  fbkCat = !n || String(fbkCat) === n ? null : Number(n);
+  // card click = tick only that category (click again / "All accounts" = tick all 3)
+  $$(".fbk-cat-cb").forEach((c) => { c.checked = !fbkCat || c.value === String(fbkCat); });
+  fbkRender();
+});
+$$(".fbk-cat-cb").forEach((c) => c.addEventListener("change", () => { fbkSyncCat(); fbkRender(); }));
+$("#fbk-gen-only").addEventListener("change", () => { if ($("#fbk-gen-only").checked) $("#fbk-notgen-only").checked = false; fbkRender(); });
+$("#fbk-notgen-only").addEventListener("change", () => { if ($("#fbk-notgen-only").checked) $("#fbk-gen-only").checked = false; fbkRender(); });
+$("#fbk-search").addEventListener("input", () => fbkRender());
+$("#fbk-all-others").addEventListener("change", () => $("#fbk-detect-btn").click());   // re-scan with / without all Others
+$("#fbk-clear-btn").addEventListener("click", () => { fbkCat = null; $$(".fbk-cat-cb").forEach((c) => { c.checked = true; }); $("#fbk-gen-only").checked = $("#fbk-notgen-only").checked = false; $("#fbk-search").value = ""; fbkRender(); });
+$("#fbk-detect-btn").addEventListener("click", async () => {
+  const btn = $("#fbk-detect-btn");
+  btn.disabled = true; fbkLoaded = true;
+  $("#fbk-summary").textContent = "Loading (about 2 minutes)…";
+  try {
+    const data = await api("/api/fix-billing-campaign/bfa-categories", { method: "POST", body: { billing_period: Number($("#fbk-bp").value), since: $("#fbk-since").value || "2026-10-16", include_all_others: $("#fbk-all-others").checked } });
+    fbkRows = data.rows || [];
+    fbkCats = data.categories || [];
+    fbkTotals = data.totals || {};
+    fbkAllOthers = !!data.all_others;
+    $("#fbk-dash").hidden = false;
+    const pName = (fbkRows[0] && fbkRows[0].billing_period_name) || data.billing_period;
+    const gen = fbkRows.filter((r) => r.bill_generated === "YES").length;
+    $("#fbk-summary").textContent = `${data.count.toLocaleString()} account(s) listed${fbkAllOthers ? "" : " (Others: only those with an Invoicing bill or a campaign request - tick 'List all Others' to list all)"} · ${gen.toLocaleString()} with an Invoicing bill in ${pName} · campaign requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
+    fbkRender();
+  } catch (err) {
+    $("#fbk-summary").textContent = "";
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#fbk-copy-btn").addEventListener("click", async () => {
+  const accs = [...new Set(fbkRows.filter((r) => fbkMatch(r)).map((r) => r.account))];
+  try { await navigator.clipboard.writeText(accs.join("\n")); showToast(`Copied ${accs.length} account(s).`); } catch { showToast("Copy failed.", true); }
+});
+$("#fbk-export-btn").addEventListener("click", () => {
+  const q = (v) => { v = String(v ?? ""); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
+  const keys = FBK_COLS.map(([k]) => k).concat(["cat_no", "id_wallet", "billing_period_name"]);
+  const csv = [keys.map((k) => k.toUpperCase()).join(",")].concat(fbkRows.filter((r) => fbkMatch(r)).map((r) => keys.map((k) => q(r[k])).join(","))).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
+  a.download = `bahraini_first_account_categories_${$("#fbk-bp").value}.csv`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
 /* RJ 2026-10-29: tab "Multi RCCS accounts" (2026-10-28) removed - "i want to see all successful in
    messages in, and the account, then just add a marker if there are multi rccs for the account".
    Replaced by the "Multi RCCS" marker column + KPI card on the Campaign tab.

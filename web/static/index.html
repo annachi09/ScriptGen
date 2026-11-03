@@ -2093,7 +2093,9 @@
         </header>
         <!-- RJ 2026-10-23: tab 2 "Subsidized - planned billing" -->
         <nav class="da-subnav" aria-label="Fix billing campaign tabs">
-          <button type="button" class="da-subnav-btn is-active" data-fbc-sub="campaign">Campaign requests</button>          <button type="button" class="da-subnav-btn" data-fbc-sub="planned">Subsidized - planned billing</button>
+          <button type="button" class="da-subnav-btn is-active" data-fbc-sub="campaign">Campaign requests</button>
+          <!-- RJ 2026-11-01: Bahraini First Account categories + bill generated (Invoicing) tick -->
+          <button type="button" class="da-subnav-btn" data-fbc-sub="bfacat">Bahraini First Account categories</button>          <button type="button" class="da-subnav-btn" data-fbc-sub="planned">Subsidized - planned billing</button>
           <button type="button" class="da-subnav-btn" data-fbc-sub="subsidy">Subsidized, bill not generated</button>
         </nav>
 
@@ -2222,6 +2224,58 @@
 
         <!-- RJ 2026-10-23: "for all the subsidized account, i want to see the planned billing date on
              their readings for September 2026, make KPI" - planned billing date = READING_DATE + 3 -->
+        <!-- RJ 2026-11-01: "add a new tab with 3 category Bahraini first account under fix billing, bahraini
+             first account not under fix billing and, others that are not in the first 2 category, add a tick
+             box if bill is generated (in status invoicing) for the November billing period (or the period selected)" -->
+        <div class="da-subpage" data-fbc-sub="bfacat">
+        <p class="page-subtitle" style="margin:-6px 0 14px;"><b>Bahraini First Account</b> = account with an active service on tariff E-D2 / W-D2 / E-D2-NM. <b>Under fix billing</b> = the account has a successful campaign request (GCGE_EXTERNAL_MESSAGES_IN, empty RESPONSEHEADER, creditAmount, after the request date). <b>Others</b> = every other account (active service on any other tariff, plus campaign accounts that are not Bahraini First Account). <b>Bill generated</b> = a GCCOM_BILL of the selected billing period in status <b>Invoicing</b> (ESTFAC0012).</p>
+        <div class="card">
+          <div class="card-header">
+            <h2>Bahraini First Account categories</h2>
+            <div class="card-header-actions">
+              <label class="field-label" for="fbk-bp">Billing period</label>
+              <select id="fbk-bp" class="text-input text-input-sm">
+                <option value="10000000237">9-September 2026</option>
+                <option value="10000000238">10-October 2026</option>
+                <option value="10000000239" selected>11-November 2026</option>
+                <option value="10000000240">12-December 2026</option>
+              </select>
+              <label class="field-label" for="fbk-since">Requests after</label>
+              <input id="fbk-since" class="text-input text-input-sm" type="date" value="2026-10-16" />
+              <button type="button" class="btn btn-pill" id="fbk-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="fbk-copy-btn" disabled title="Copy the visible accounts">📋 Copy accounts</button>
+              <button type="button" class="btn btn-pill" id="fbk-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="fbk-summary">Click Scan to load (about 2 minutes).</div>
+          <div class="rbo-dash" id="fbk-dash" hidden>
+            <div class="rbo-kpis fbc-kpis" id="fbk-kpi-row"></div>
+          </div>
+          <div class="fbc-sticky-filters">
+          <!-- RJ 2026-11-01: "inside i want the 3 filter i mentioned" - one tick per category -->
+          <div class="key-panel-row" id="fbk-cat-row">
+            <span class="field-label" style="font-weight:600;">Category</span>
+            <label class="field-label"><input type="checkbox" class="fbk-cat-cb" value="1" checked /> 🇧🇭 Bahraini First Account - under fix billing</label>
+            <label class="field-label" style="margin-left:10px;"><input type="checkbox" class="fbk-cat-cb" value="2" checked /> 🏠 Bahraini First Account - not under fix billing</label>
+            <label class="field-label" style="margin-left:10px;"><input type="checkbox" class="fbk-cat-cb" value="3" checked /> 🧾 Others - other tariffs</label>
+          </div>
+          <div class="key-panel-row" id="fbk-filter-row">
+            <label class="field-label" title="Only accounts with a bill of the selected period in status Invoicing (ESTFAC0012)"><input type="checkbox" id="fbk-gen-only" /> Bill generated (Invoicing) in the period</label>
+            <label class="field-label" style="margin-left:12px;" title="Only accounts WITHOUT an Invoicing bill of the period"><input type="checkbox" id="fbk-notgen-only" /> Bill NOT generated</label>
+            <!-- RJ 2026-11-01: Others = all other tariffs (~294k) - only listed in full on request -->
+            <label class="field-label" style="margin-left:12px;" title="Others has ~294k accounts. By default only Others with an Invoicing bill or a campaign request are listed (the card totals always count all). Tick and Scan again to list all of them (slower, heavy)."><input type="checkbox" id="fbk-all-others" /> List all Others (re-scan)</label>
+            <input id="fbk-search" class="text-input text-input-sm" placeholder="Account / payment form / tariff…" style="width:220px;margin-left:12px;" />
+            <span class="hint-text" id="fbk-active-filters" style="margin-left:auto;"></span>
+            <button type="button" class="btn btn-pill btn-sm" id="fbk-clear-btn">Clear filters</button>
+          </div>
+          <div class="hint-text" id="fbk-filtered-count"></div>
+          </div><!-- /fbc-sticky-filters -->
+          <div class="grid-wrap" style="margin-top:10px;">
+            <table class="data-grid" id="fbk-table"><thead><tr></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+        </div>
+
         <!-- RJ 2026-10-29: the "Multi RCCS accounts" tab (2026-10-28) was removed - the Campaign tab now
              shows every successful request with a "Multi RCCS" marker per account instead -->
         <div class="da-subpage" data-fbc-sub="planned">
