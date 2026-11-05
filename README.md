@@ -3137,6 +3137,117 @@ request) and the paymentday in the wallet table is null".
   is filled it always equals deductionDay. Note: 11,001 of the 14,908 have no noBankAmount in the
   request.
 
+### New menu: Billing Statistics (2026-11-04)
+
+RJ: "create a new Dashboard, Billing Statistics. Focused on accounts. counting how many by Billing
+Status, add filter and KPI. lets have November 2026 (use the current date to determine which billing
+period is displayed), also have a quick card for Subsidized, normal customer, and ones enrolled in
+fixed billing using table ewa_gccom_fixed_billing. Will be good to have also some category per
+tariff and per signal in GCCOM_PAYMENT_FORM. By default lets focus on Service bills, but there will
+be filter of other bill type." + "make very good dashboard good color modern".
+
+- Files: `app/core/billing_stats.py`, route `POST /api/billing-stats/detect`
+  (`{billing_period: null = today's period, bill_types: ["TFGEN00001"] | [...] | ["ALL"]}`),
+  `web/static/billingstats.js` + `billingstats.css`, nav item / page `billingstats`, menu id in
+  `web/menu_access.py`, Overview card `billingstats` (= distinct accounts, Service bills, current
+  period - kept out of the daily digest, it is not an anomaly).
+- Live schema used (checked 2026-11-04): current period = `GCCOM_BILLING_PERIOD` with today between
+  `INITIAL_DATE` / `END_DATE` (10000000239 "11-November 2026"); bill types = `GCGT_ATTRIBUTE_VALUES`
+  master `GENBILLTYP` (TFGEN00001 Service); statuses = `OUC_ADMIN.GCCOM_BILL_STATUS`; tariff =
+  `GCCOM_BILLING_SERVICE.ID_FARE` -> `GCCOM_FARE.RATE_CODE`; signal = `GCCOM_PAYMENT_FORM.COD_TYPE`
+  (COD00..COD14, no description table found - codes shown); fixed billing =
+  `OUC_ADMIN.EWA_GCCOM_FIXED_BILLING` `IND_ACTIVE = 1` (45,565 rows live, all active, enrolled
+  2026-10-18 .. 11-02); subsidized = active service on E-D2 / W-D2 / E-D2-NM (same rule as FIX
+  BILLING tabs).
+- Counting: one SQL row per combination (status set, tariff set, signal, subsidized, fixed) with
+  DISTINCT accounts, so totals count each account once; a status / tariff bar counts the accounts
+  having that status / tariff.
+- Page: gradient hero with the period badge, sticky filter bar (period, customer, fixed billing,
+  tariff, signal, bill-type chips - Service default, status chips), KPIs (accounts, bills, billed
+  amount, pending amount, statuses), 3 segment cards (Subsidized / Normal / Fixed billing - click to
+  filter), status bars + donut, tariff and signal bars, status x segment heat table, CSV export.
+- New route + new menu - restart needed, then Ctrl+F5.
+- Live 2026-11-04 (November, Service bills): 441,718 accounts in 613 combinations, 166,269
+  subsidized, 45,446 fixed billing enrolled; ~30 s (per-account status / tariff lists built with
+  grouped STRING_AGG - the first correlated version ran > 2 min).
+- RJ 2026-11-04 (later): "i want the status filter at the top, and by default filtering Invoiced
+  only" - Bill status chips are now the first row of the filter bar, plus an "All statuses" chip;
+  default (and Clear filters / period or bill-type change) = Invoiced (ESTFAC0005) only. Overview
+  card follows: accounts with an Invoiced Service bill in the current period.
+- Also 2026-11-04: `data/config.json` got corrupted ("Extra data" -> every DB call 500) when
+  parallel queries rewrote the recent-queries list at the same time. File repaired (recent queries
+  list cleared); `app/config.py` `save_config` now writes a temp file under a lock and swaps it in
+  atomically, `load_config` retries a read that races the swap.
+
+### Billing Statistics: tab 2 "Operations" (2026-11-04)
+
+RJ: "on the same, create a second tab, for operations: [bill_data / notice_data / event_data /
+payment_data query] ... i want you to optimize, maybe limit id_letter event to be > 75938612".
+
+- Tabs on the page: **Accounts by status** (unchanged) / **Operations**. Operations loads on first
+  open; From / To dates (default = start of today's billing period -> today), Load, Export CSV;
+  Refresh in the hero reloads the active tab.
+- Per day: bills invoiced (`GCCOM_BILL` ESTFAC0005), notices sent (`GCCB_NOTICE` ESTAVI0003),
+  e-mail / SMS letters generated + sent (`GCCB_EVENT_LETTERS` x `GCCB_SS_EVENT_LETTER`
+  MOENV00004 / MOENV00006, sent = `IND_COMMUNICATE = 0` as in RJ's query), payments received +
+  processed (`EWA_GCCB_EXTERNAL_COLLECTIONS` IND_CONFIRMED / IND_PROCESSED). KPI cards with sent %
+  and processed %, per-day bars, daily table with totals.
+- `billing_stats.build_operations_query(d1, d2)`, route `POST /api/billing-stats/operations`
+  (300 s timeout). Optimisations:
+  - Instead of the fixed `ID_LETTER_EVENT > 75938612`, the query finds the floor itself: it steps
+    back from MAX(ID) in PK blocks until the block is older than the From date (-3 days margin).
+    For Nov 1-4 that floor was 82,296,642 (tighter than 75,938,612; works for any date range).
+    Same trick on `EXTERNAL_COLLECTIONS.ID_PAYMENT` (PAYMENT_DATE has no index).
+  - Each source is staged in a temp table with range date predicates + `OPTION (RECOMPILE)`.
+  - Live timings: payments 79 s -> < 1 s, events 59 s -> ~1 s; whole tab ~70 s (notices ~34 s,
+    send-service rows ~30 s are what's left - no date index on those tables).
+- Bug fixed from the original SQL: `COUNT(CASE ... ELSE 0 END)` counts every row (0 is not NULL),
+  so generated = sent. Now `SUM(CASE ... THEN 1 ELSE 0 END)`.
+- New route - restart needed (`run_dev.bat`), then Ctrl+F5.
+- RJ 2026-11-04 (later): "remove this: BILL_NUMBER, ACCOUNT_NUMBER" - bills invoiced and notices
+  sent removed (query, KPIs, charts, table, CSV). That also drops the slowest step (notices ~34 s).
+  The send-service scan now uses the exact ID window of the events in range (MIN/MAX of #ev)
+  instead of the probe floor with its 3-day margin.
+
+### Billing Statistics: faster + quick-view tabs (2026-11-04)
+
+RJ: "the billing statistics is not working timing out, better optimize please. also i want easy
+filtering (maybe pre defined tab, like fix billing, normal, etc...)".
+
+- Bill status filter now runs in SQL (`statuses`, default Invoiced; "All statuses" = every bill of
+  the period, slower). Clicking a status chip re-queries. Status / bill-type chip counts = bills,
+  from one light `GROUP BY BILL_TYPE, BILLING_STATUS` (`build_summary_query`), replacing the
+  `COUNT(DISTINCT)` per bill type.
+- Subsidized check only probes the accounts found (was every BFA contracted service in the DB);
+  temp tables indexed; `OPTION (RECOMPILE)`.
+- Server cache 10 min per (period, bill types, statuses); lookups / current period cached per day.
+  Refresh button forces a re-run. A cache hit still fills "ℹ Query used".
+- Quick-view tabs at the top of the filter bar, each with its account count: All accounts, Fixed
+  billing, Not on fixed billing, Subsidized, Subsidized + fixed, Subsidized not fixed, Normal,
+  Normal + fixed (they set the Customer + Fixed billing filters).
+- Python change - restart needed, then Ctrl+F5.
+- Live 2026-11-04: stats query (November, Service, Invoiced) 6.3 s; the bill type x status summary
+  26 s on first load (then cached 10 min).
+- RJ 2026-11-04: "show the description only of the tariff and signal and i want to be able to
+  change the billing period but by default will be by the current day":
+  - Tariff = `GCCOM_FARE.NAME_TYPE` (e.g. "Domestic - Bahraini First Account"; E-D2 and W-D2 share
+    that name so they count as one); signal = `OUC_COMMON_ADMIN.GCCOM_PAYMENT_FORM_TYPE.DESCRIPTION`
+    by `COD_DEVELOP = COD_TYPE` (e.g. "6 - Limited Income Family"). Codes are no longer shown.
+  - Billing period picker is now the first control of the filter bar on both tabs, default = the
+    period covering today. On Operations, picking a period sets From / To to the period's dates
+    (To capped at today); the dates can still be changed by hand. `POST /api/billing-stats/operations`
+    takes `billing_period`; the period list (with dates) is shared and cached per day.
+- RJ 2026-11-04: "add a last table to list the account and I want to download only the filter
+  account" + "base on the filters only" - **Accounts** table at the bottom of the Accounts tab.
+  - `POST /api/billing-stats/accounts` runs `build_stats_query(..., per_account=True)` (one row per
+    account, ACCOUNT = `GCCOM_PAYMENT_FORM.REFERENCE`, cached 10 min like the stats) and applies the
+    page filters server-side: period, bill types, statuses (SQL), quick view (customer + fixed
+    billing), tariff, signal, account search. Pages of 200 (Prev / Next).
+  - "Download filtered accounts" = same request with `csv: true` -> CSV of every filtered account
+    (ACCOUNT, BILL_STATUS names, TARIFF, SIGNAL, SUBSIDIZED, FIXED_BILLING, BILLS, amounts).
+  - The filter-bar export is renamed "Export summary CSV" (grouped combinations).
+  - Python change - restart needed, then Ctrl+F5.
+
 ### FIX BILLING CAMPAIGN: tab "Bahraini First Account categories" (2026-11-01)
 
 RJ: "add a new tab with 3 category Bahraini first account under fix billing, bahraini first account

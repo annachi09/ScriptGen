@@ -18,6 +18,10 @@ from .utils import crypto
 from .utils.dotenv_lite import load_dotenv_if_present
 from .utils.paths import get_app_dir, get_config_path, get_internal_db_path
 
+import threading as _threading
+
+_SAVE_LOCK = _threading.Lock()   # RJ 2026-11-04: serialise config.json writes (see save_config)
+
 CONFIG_VERSION = 1
 RECENT_QUERIES_MAX = 15
 
@@ -205,6 +209,19 @@ def _load_email(raw) -> EmailConfig:
     return EmailConfig(**{k: v for k, v in raw.items() if k in known})
 
 
+def _read_config_json(path) -> dict:
+    """RJ 2026-11-04: a read racing the atomic replace on Windows can briefly fail - retry."""
+    import time
+    last = None
+    for _ in range(5):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (PermissionError, json.JSONDecodeError) as exc:
+            last = exc
+            time.sleep(0.05)
+    raise last
+
+
 def load_config() -> AppConfig:
     path = get_config_path()
     if not path.exists():
@@ -212,7 +229,7 @@ def load_config() -> AppConfig:
         save_config(cfg)
         return cfg
 
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = _read_config_json(path)
     connections = {
         key: ConnectionConfig(**val) for key, val in raw.get("connections", {}).items()
     }
@@ -260,4 +277,21 @@ def save_config(cfg: AppConfig) -> None:
         "saved_queries": [asdict(q) for q in cfg.saved_queries],
         "email": asdict(cfg.email),
     }
-    get_config_path().write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    # RJ 2026-11-04: data/config.json got corrupted ("Extra data" -> every DB call failed with 500)
+    # when several queries finished at the same time and each rewrote the file in place. Now the
+    # write goes to a temp file under a lock and is swapped in atomically, so a reader never sees a
+    # half-written file and two writers can't interleave.
+    path = get_config_path()
+    text = json.dumps(raw, indent=2)
+    with _SAVE_LOCK:
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:   # target briefly open by a reader (Windows)
+                if attempt == 4:
+                    raise
+                import time
+                time.sleep(0.05)

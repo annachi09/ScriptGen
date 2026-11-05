@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/styles.css" />
   <!-- RJ 2026-10-02 visual polish layer (same layout) - remove this line to go back to the previous look -->
   <link rel="stylesheet" href="/polish.css" />
+  <link rel="stylesheet" href="/billingstats.css" /><!-- RJ 2026-11-04 Billing Statistics -->
 </head>
 <body>
 
@@ -146,6 +147,9 @@
         </button>
         <button class="nav-item" data-page="anomalystats" title="Anomalies Statistics">
           <span class="nav-icon">📈</span><span class="nav-label">Anomalies Statistics</span>
+        </button>
+        <button class="nav-item" data-page="billingstats" title="Billing Statistics">
+          <span class="nav-icon">💹</span><span class="nav-label">Billing Statistics</span>
         </button>
         <button class="nav-item" data-page="tempdashboard" title="Temp Dashboard">
           <span class="nav-icon">🧪</span><span class="nav-label">Temp Dashboard</span>
@@ -3192,6 +3196,39 @@
         <div id="as-root" class="as-root" aria-live="polite"></div>
       </section>
 
+      <!-- ===== Billing Statistics page (RJ 2026-11-04) - rendered by billingstats.js =====
+           "create a new Dashboard, Billing Statistics. Focused on accounts. counting how many by Billing
+           Status, add filter and KPI ... make very good dashboard good color modern" -->
+      <section class="page" id="page-billingstats">
+        <div class="bst-hero">
+          <div class="bst-hero-text">
+            <span class="bst-eyebrow">Billing dashboard</span>
+            <h1>Billing Statistics</h1>
+            <p>Accounts by bill status for the billing period - Service bills by default. Click any bar, card or chip to filter the whole page.</p>
+          </div>
+          <div class="bst-hero-side">
+            <div class="bst-period-badge" id="bst-period-badge">…</div>
+            <span class="bst-updated" id="bst-updated"></span>
+            <button type="button" class="bst-btn bst-btn-light" id="bst-refresh-btn" title="Reload from the database">⟳ Refresh</button>
+          </div>
+        </div>
+        <!-- RJ 2026-11-04: tab 2 "Operations" (daily bills / notices / e-mail / SMS / payments) -->
+        <div class="da-subnav bst-subnav" role="tablist">
+          <button type="button" class="da-subnav-btn is-active" data-bst-sub="accounts">💹 Accounts by status</button>
+          <button type="button" class="da-subnav-btn" data-bst-sub="ops">⚙️ Operations</button>
+        </div>
+        <div class="da-subpage is-active" data-bst-sub="accounts">
+          <div id="bst-root" class="bst-root" aria-live="polite">
+            <div class="bst-empty">Open the page to load the statistics…</div>
+          </div>
+        </div>
+        <div class="da-subpage" data-bst-sub="ops">
+          <div id="bso-root" class="bst-root" aria-live="polite">
+            <div class="bst-empty">Open the tab to load the daily operations…</div>
+          </div>
+        </div>
+      </section>
+
       <!-- ===== Documentation page (RJ 2026-10-02) - content in docs-content.js / docs-queries.js, rendered by docs.js ===== -->
       <section class="page" id="page-documentation">
         <header class="page-header docs-header">
@@ -3526,6 +3563,7 @@
 
   <script src="/app.js"></script>
   <script src="/anomstats.js"></script>
+  <script src="/billingstats.js"></script><!-- RJ 2026-11-04 Billing Statistics -->
   <script src="/docs-content.js"></script>
   <script src="/docs-queries.js"></script>
   <script src="/docs.js"></script>

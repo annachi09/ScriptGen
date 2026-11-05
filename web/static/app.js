@@ -156,6 +156,7 @@ const SG_ENDPOINT_OWNER = [
   ["/api/reading-discrepancies/", "readingdiscrepancies", "unbilled"],
   ["/api/fix-billing-campaign/subsidy-planned", "fixbillingcampaign", "planned"],
   ["/api/fix-billing-campaign/bfa-categories", "fixbillingcampaign", "bfacat"],   // RJ 2026-11-01
+  ["/api/billing-stats/", "billingstats", null],   // RJ 2026-11-04 Billing Statistics
   ["/api/fix-billing-campaign/", "fixbillingcampaign", "campaign"],
   ["/api/pending-sr/", "pendingsr", ""],
   ["/api/rebilling-monitor/open", "rebillingmonitor", "open"],
@@ -654,6 +655,12 @@ const OVERVIEW_CARDS = [
     key: "fixbillingcampaign", icon: "💳", label: "FIX BILLING CAMPAIGN 2026", color: "#10b981",
     desc: "Accounts with a /mobileapp/complaint request after 2026-10-16 that has a CreditAmount (all requests, EWA is info only).",
     page: "fixbillingcampaign", group: "Campaigns",
+  },
+  {
+    // RJ 2026-11-04: = the Billing Statistics page headline (distinct accounts, Service bills, current period)
+    key: "billingstats", icon: "💹", label: "Billing Statistics", color: "#6366f1",
+    desc: "Accounts with an Invoiced Service bill in the current billing period (by today's date) - the page default.",
+    page: "billingstats", group: "Statistics",
   },
   {
     key: "history", icon: "🕓", label: "Script History", color: "#06b6d4",
@@ -10053,7 +10060,8 @@ const HX_REFRESH = {
   pendingsr: () => ({ btn: "#psr-detect-btn" }),
   tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn", rccslist: "#trl-detect-btn", sanlbd: "#tslb-detect-btn", duprccs: "#tdr-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
-  fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn", bfacat: "#fbk-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),   // multi (RJ 2026-10-28) re-runs the campaign Scan
+  fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn", bfacat: "#fbk-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),
+  billingstats: () => ({ btn: "#bst-refresh-btn" }),   // RJ 2026-11-04 (page loads itself on open, like Anomalies Statistics)   // multi (RJ 2026-10-28) re-runs the campaign Scan
 };
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an

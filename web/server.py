@@ -55,6 +55,7 @@ from app.core import wrong_bill_perc_dist
 from app.core import wrong_bill_sanitary_zero
 from app.core import wrong_bill_first_regularized
 from app.core import anomaly_stats
+from app.core import billing_stats   # RJ 2026-11-04 Billing Statistics dashboard
 from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -1466,6 +1467,12 @@ _OVERVIEW_COUNTERS = {
     "fixbillingcampaign": lambda conn, user: fix_billing_campaign_detect(FixBillingCampaignRequest(), user=user)["main_count"],  # RJ 2026-10-29: = Campaign tab default (successful requests, no cancelled)
     # RJ 2026-10-09: pending service requests with a JIRA comment
     "pendingsr": lambda conn, user: pending_service_request_detect(user=user)["count"],
+    # RJ 2026-11-04: Billing Statistics headline = distinct accounts with an INVOICED (ESTFAC0005,
+    # page default status) Service bill in the current billing period. Not an anomaly - kept out
+    # of the daily digest.
+    "billingstats": lambda conn, user: sum(int(str(r.get("accounts") or 0).replace(",", "") or 0)
+                                           for r in billing_stats_detect(BillingStatsRequest(), user=user)["rows"]
+                                           if "ESTFAC0005" in str(r.get("statuses") or "").split("|")),
 }
 
 # RJ 2026-10-09: daily digest e-mail = the same counters, readable labels.
@@ -1484,7 +1491,7 @@ _DIGEST_LABELS = {
     "pendingsr": "Pending Service Requests (JIRA)",
 }
 alerts.register_digest_counters({k: (_DIGEST_LABELS.get(k, k), fn) for k, fn in _OVERVIEW_COUNTERS.items()
-                                 if not k.startswith("anomstats")})
+                                 if not k.startswith("anomstats") and k != "billingstats"})
 
 
 @app.get("/api/overview/count/{key}")
@@ -5238,6 +5245,201 @@ def wrong_bill_first_regularized_detect(body: WrongBillFirstRegularizedRequest |
         "regularized_count": sum(b["regularized_count"] for b in bills),
         "seconds": round(time.time() - t0, 1),
     }
+
+
+# ---------------------------------------------------------------------
+# Billing Statistics (RJ 2026-11-04) - see app/core/billing_stats.py.
+# Account-focused: distinct accounts per bill status for the current billing period (by date),
+# Service bills by default; segment cards Subsidized / Normal / Fixed billing; tariff + signal.
+# ---------------------------------------------------------------------
+class BillingStatsRequest(BaseModel):
+    billing_period: int | None = None          # None = the period covering today
+    bill_types: list[str] = [billing_stats.SERVICE_BILL_TYPE]   # ["ALL"] = every bill type
+    # RJ 2026-11-04 (speed): bill statuses filtered in SQL; [] / ["ALL"] = every status
+    statuses: list[str] = [billing_stats.DEFAULT_STATUS]
+    force: bool = False                        # True = bypass the 10-min cache (Refresh button)
+
+
+# RJ 2026-11-04 (speed): results cached 10 min per (period, bill types, statuses); the bill type x
+# status summary + lookups cached per period. Refresh (force) re-runs.
+_BST_CACHE: dict = {}
+_BST_TTL = 600
+
+
+def _bst_cached(key, fn, force=False, log_sql=None):
+    hit = _BST_CACHE.get(key)
+    if hit and not force and time.time() - hit[0] < _BST_TTL:
+        cap = _SQL_CAPTURE.get()          # keep "ℹ Query used" filled on a cache hit
+        if cap is not None and log_sql:
+            cap.append("-- (cached result, run within the last 10 min)\n" + log_sql)
+        return hit[1]
+    val = fn()
+    _BST_CACHE[key] = (time.time(), val)
+    return val
+
+
+def _bst_meta(conn):
+    """Current period (by today's date), period list (with dates), status / bill type names -
+    cached per day. RJ 2026-11-04: shared by both tabs (period picker, default = today's period)."""
+    def _meta():
+        cur = mssql.run_query(conn, billing_stats.build_current_period_query())
+        current = {"id": int(cur.rows[0][0]), "name": str(cur.rows[0][1])} if cur.rows else None
+        lk = mssql.run_query(conn, billing_stats.build_lookups_query())
+        per = mssql.run_query(conn, billing_stats.build_periods_query(current["id"])) if current else None
+        return {"current": current,
+                "statuses": {str(r[1]): str(r[2]) for r in lk.rows if r[0] == "STATUS"},
+                "bill_types": {str(r[1]): str(r[2]) for r in lk.rows if r[0] == "BILLTYPE"},
+                "periods": [{"id": int(r[0]), "name": str(r[1]), "from": str(r[2] or ""), "to": str(r[3] or "")}
+                            for r in (per.rows if per else [])]}
+    return _bst_cached(("meta", datetime.now().strftime("%Y-%m-%d")), _meta)
+
+
+@app.post("/api/billing-stats/detect")
+def billing_stats_detect(body: BillingStatsRequest, user: str = Depends(require_login)):
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    t0 = time.time()
+    try:
+        meta = _bst_meta(conn)
+        current = meta["current"]
+        bp = int(body.billing_period or (current["id"] if current else 0))
+        if not bp:
+            raise HTTPException(status_code=400, detail="No billing period covers today - pick one.")
+        sum_sql = billing_stats.build_summary_query(bp)
+        summary = _bst_cached(("summary", bp), lambda: _row_dicts(mssql.run_query(
+            conn, sum_sql, timeout_seconds=300)), body.force, sum_sql)
+        sts = sorted(body.statuses or [])
+        stats_sql = billing_stats.build_stats_query(bp, body.bill_types, sts)
+        rows = _bst_cached(("stats", bp, tuple(sorted(body.bill_types)), tuple(sts)),
+                           lambda: _row_dicts(mssql.run_query(conn, stats_sql, timeout_seconds=300)),
+                           body.force, stats_sql)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    # bill-type chips: bills per type; status chips: bills per status within the selected types
+    all_bt = "ALL" in body.bill_types
+    bt_counts: dict[str, int] = {}
+    st_counts: dict[str, int] = {}
+    for r in summary:
+        n = int(str(r.get("bills") or 0).replace(",", "") or 0)
+        bt_counts[str(r.get("bill_type"))] = bt_counts.get(str(r.get("bill_type")), 0) + n
+        if all_bt or str(r.get("bill_type")) in body.bill_types:
+            st_counts[str(r.get("billing_status"))] = st_counts.get(str(r.get("billing_status")), 0) + n
+    periods = meta["periods"]
+    period_name = next((p["name"] for p in periods if p["id"] == bp), str(bp))
+    return {"rows": rows, "statuses": meta["statuses"], "bill_types": meta["bill_types"],
+            "bill_type_counts": [{"bill_type": k, "bills": v} for k, v in sorted(bt_counts.items(), key=lambda x: -x[1])],
+            "status_counts": [{"status": k, "bills": v} for k, v in sorted(st_counts.items(), key=lambda x: -x[1])],
+            "periods": periods, "current_period": current,
+            "billing_period": bp, "billing_period_name": period_name,
+            "selected_bill_types": body.bill_types, "selected_statuses": sts,
+            "generated_at": billing_stats.generated_at(), "seconds": round(time.time() - t0, 1)}
+
+
+class BillingAccountsRequest(BillingStatsRequest):
+    # RJ 2026-11-04: "add a last table to list the account and I want to download only the filter
+    # account" + "base on the filters only" - same filters as the page (statuses in SQL, the rest here)
+    tariff: str = ""
+    signal: str = ""
+    seg: str = "all"          # all | sub | normal
+    fixed: str = "all"        # all | yes | no
+    search: str = ""          # account number contains
+    offset: int = 0
+    limit: int = 200
+    csv: bool = False         # True = every filtered account as a CSV file
+
+
+@app.post("/api/billing-stats/accounts")
+def billing_stats_accounts(body: BillingAccountsRequest, user: str = Depends(require_login)):
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    t0 = time.time()
+    try:
+        meta = _bst_meta(conn)
+        bp = int(body.billing_period or (meta["current"]["id"] if meta["current"] else 0))
+        sts = sorted(body.statuses or [])
+        acc_sql = billing_stats.build_stats_query(bp, body.bill_types, sts, per_account=True)
+
+        def _run():
+            res = mssql.run_query(conn, acc_sql, timeout_seconds=300)
+            return [tuple(diff_engine.cell_display(v) for v in r) for r in res.rows]
+        rows = _bst_cached(("accounts", bp, tuple(sorted(body.bill_types)), tuple(sts)), _run, body.force, acc_sql)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    # row = ACCOUNT, STATUSES, TARIFFS, SIGNAL, SUBSIDIZED, FIXED_BILLING, BILLS, AMOUNT, PENDING
+    q = (body.search or "").strip()
+
+    def ok(r):
+        if body.tariff and body.tariff not in str(r[2]).split("|"):
+            return False
+        if body.signal and str(r[3]) != body.signal:
+            return False
+        sub, fix = str(r[4]) == "1", str(r[5]) == "1"
+        if body.seg == "sub" and not sub or body.seg == "normal" and sub:
+            return False
+        if body.fixed == "yes" and not fix or body.fixed == "no" and fix:
+            return False
+        return not q or q in str(r[0])
+    flt = [r for r in rows if ok(r)]
+    names = meta["statuses"]
+    if body.csv:
+        import csv as _csv, io as _io
+        buf = _io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow(["ACCOUNT", "BILL_STATUS", "TARIFF", "SIGNAL", "SUBSIDIZED", "FIXED_BILLING", "BILLS", "BILLED_AMOUNT", "PENDING_AMOUNT"])
+        for r in flt:
+            w.writerow([r[0], "|".join(names.get(s, s) for s in str(r[1]).split("|")), r[2], r[3],
+                        "YES" if str(r[4]) == "1" else "NO", "YES" if str(r[5]) == "1" else "NO", r[6], r[7], r[8]])
+        return Response(content="﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="billing_statistics_accounts_{bp}.csv"'})
+    off, lim = max(0, body.offset), max(1, min(body.limit, 1000))
+    cols = ["account", "statuses", "tariffs", "signal", "subsidized", "fixed_billing", "bills", "amount", "pending"]
+    return {"total": len(flt), "all": len(rows), "offset": off,
+            "rows": [dict(zip(cols, r)) for r in flt[off:off + lim]],
+            "seconds": round(time.time() - t0, 1)}
+
+
+class BillingOpsRequest(BaseModel):
+    date_from: str | None = None   # None = first day of the current billing period
+    date_to: str | None = None     # None = today
+    # RJ 2026-11-04: "i want to be able to change the billing period but by default will be by the
+    # current day" - a period sets From/To to its dates (To capped at today); None = today's period
+    billing_period: int | None = None
+
+
+@app.post("/api/billing-stats/operations")
+def billing_stats_operations(body: BillingOpsRequest, user: str = Depends(require_login)):
+    """RJ 2026-11-04: Billing Statistics tab 2 "Operations" (billing_stats.build_operations_query)."""
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    t0 = time.time()
+    try:
+        meta = _bst_meta(conn)
+        current = meta["current"]
+        today = datetime.now().strftime("%Y-%m-%d")
+        bp = int(body.billing_period or (current["id"] if current else 0))
+        per = next((p for p in meta["periods"] if p["id"] == bp), None)
+        d1, d2 = body.date_from, body.date_to
+        if not d1:
+            d1 = per["from"] if per and per["from"] else datetime.now().strftime("%Y-%m-01")
+        if not d2:
+            d2 = min(per["to"], today) if per and per["to"] else today
+        if d2 < d1:
+            d2 = d1
+        res = mssql.run_query(conn, billing_stats.build_operations_query(d1, d2), timeout_seconds=300)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"rows": _row_dicts(res), "date_from": d1, "date_to": d2,
+            "billing_period": bp, "periods": meta["periods"], "current_period": current,
+            "generated_at": billing_stats.generated_at(), "seconds": round(time.time() - t0, 1)}
 
 
 # ---------------------------------------------------------------------
