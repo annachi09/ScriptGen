@@ -56,6 +56,7 @@ from app.core import wrong_bill_sanitary_zero
 from app.core import wrong_bill_first_regularized
 from app.core import anomaly_stats
 from app.core import billing_stats   # RJ 2026-11-04 Billing Statistics dashboard
+from app.core import sr_quick_fix    # RJ 2026-11-09 SR Quick FIX menu
 from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -1470,6 +1471,11 @@ _OVERVIEW_COUNTERS = {
     # RJ 2026-11-04: Billing Statistics headline = distinct accounts with an INVOICED (ESTFAC0005,
     # page default status) Service bill in the current billing period. Not an anomaly - kept out
     # of the daily digest.
+    # RJ 2026-11-08: Case 5 headline = held (5002NOTEMP) accounts
+    "billissuance_case5": lambda conn, user: bill_issuance_case5_detect(user=user)["account_count"],
+    # RJ 2026-11-09: SR Quick FIX headline = system-wide candidate readings (sent to bill,
+    # VALUE < PREV_VALUE, not a rollover) - the page's "All candidates" scan.
+    "srquickfix_incbp": lambda conn, user: sr_inc_bp_detect(None, user=user)["candidate_count"],
     "billingstats": lambda conn, user: sum(int(str(r.get("accounts") or 0).replace(",", "") or 0)
                                            for r in billing_stats_detect(BillingStatsRequest(), user=user)["rows"]
                                            if "ESTFAC0005" in str(r.get("statuses") or "").split("|")),
@@ -1480,6 +1486,7 @@ _DIGEST_LABELS = {
     "dateanomaly": "DIFF DATES anomalies", "hierarchy": "Hierarchy - pending primaries",
     "billissuance_case1": "Bill Issuance Case 1", "billissuance_case2": "Bill Issuance Case 2",
     "billissuance_case3": "Bill Issuance Case 3", "billissuance_case4": "Bill Issuance Case 4 (unclassified)",
+    "billissuance_case5": "Bill Issuance Case 5 (Temp Stop PCAL)",
     "incorrectbillingperiod": "Incorrect Billing Period", "tnbcycledisc": "TNB Cycle/Disc",
     "wrongstuckhierarchy": "Wrong Stuck in Hierarchy ITB", "wrongstuckhierarchy_sanitary": "Wrong Stuck - Sanitary vs Water",
     "disconnectiontnb": "Disconnection TNB", "doubleitb": "DOUBLE ITB (needs rebilling)",
@@ -1489,6 +1496,7 @@ _DIGEST_LABELS = {
     "readingdiscrepancies": "Readings pending validation > 3 days",
     "fixbillingcampaign": "FIX BILLING CAMPAIGN 2026 successful requests",   # RJ 2026-10-29
     "pendingsr": "Pending Service Requests (JIRA)",
+    "srquickfix_incbp": "SR Incorrect Billing Period - readings lower than previous",  # RJ 2026-11-09
 }
 alerts.register_digest_counters({k: (_DIGEST_LABELS.get(k, k), fn) for k, fn in _OVERVIEW_COUNTERS.items()
                                  if not k.startswith("anomstats") and k != "billingstats"})
@@ -3573,8 +3581,14 @@ def bill_issuance_release_complete(body: BillIssuanceReleaseCompleteRequest, use
                                           with_active_contract=body.with_active_contract, user=user)
         complete = list(dict.fromkeys(str(r["id_payment_form"]) for r in data["rows"]))
         label = "Case 3 (All Contract Status - Bills Complete)"
+    elif body.case == "case5":
+        # RJ 2026-11-08: "i want to know if they can be released, checking the service and the bill
+        # generated are complete" - Case 5 accounts whose every billable service has its bill
+        data = bill_issuance_case5_detect(user=user)
+        complete = [str(r["id_payment_form"]) for r in data["rows"] if str(r.get("release_ready")) == "1"]
+        label = "Case 5 (Temp Stop PCAL - services complete)"
     else:
-        raise HTTPException(status_code=400, detail="case must be 'case2' or 'case3'.")
+        raise HTTPException(status_code=400, detail="case must be 'case2', 'case3' or 'case5'.")
     requested = [str(x).strip() for x in body.id_payment_forms if str(x).strip()]
     if requested:
         cset = set(complete)
@@ -3693,6 +3707,41 @@ def _case4_group_rows_by_account(rows: list[dict]) -> list[dict]:
             "billing_date": diff_engine.cell_display(_da_col(r, "BILLING_DATE")),
         })
     return list(accounts.values())
+
+
+@app.post("/api/bill-issuance/case5/detect")
+def bill_issuance_case5_detect(user: str = Depends(require_login)):
+    """RJ 2026-11-08: Case 5 - Temp Stop PCAL (5002NOTEMP) analysis, read only
+    (bill_issuance_validator.build_case5_temp_stop_query + case5_main_issue)."""
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    t0 = time.time()
+    try:
+        res = mssql.run_query(conn, bill_issuance_validator.build_case5_temp_stop_query(), timeout_seconds=300)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = _row_dicts(res)
+    checks = {k: 0 for k, _ in bill_issuance_validator.CASE5_ISSUES}
+    issues: dict[str, int] = {}
+    segments: dict[str, int] = {}
+    for r in rows:
+        r["main_issue"] = bill_issuance_validator.case5_main_issue(r)
+        issues[r["main_issue"]] = issues.get(r["main_issue"], 0) + 1
+        segments[str(r.get("segment"))] = segments.get(str(r.get("segment")), 0) + 1
+        for k in checks:
+            if str(r.get(k) or "0").replace(",", "") not in ("0", ""):
+                checks[k] += 1
+    return {"rows": rows, "account_count": len(rows),
+            "notice_count": sum(int(str(r.get("notices") or 0).replace(",", "") or 0) for r in rows),
+            "issues": issues, "segments": segments, "checks": checks,
+            # RJ 2026-11-08: release readiness = every billable service has its bill for the period
+            "ready_count": sum(1 for r in rows if str(r.get("release_ready")) == "1"),
+            "ready_clean_count": sum(1 for r in rows if str(r.get("release_ready")) == "1"
+                                     and r["main_issue"] == bill_issuance_validator.CASE5_NO_ISSUE),
+            "check_labels": dict(bill_issuance_validator.CASE5_ISSUES),
+            "no_issue_label": bill_issuance_validator.CASE5_NO_ISSUE,
+            "seconds": round(time.time() - t0, 1)}
 
 
 @app.post("/api/bill-issuance/case4/detect")
@@ -4829,12 +4878,174 @@ def reading_discrepancies_generate(body: ReadingDiscrepanciesGenerateRequest, us
 
 
 # ---------------------------------------------------------------------
+# SR Quick FIX (RJ 2026-11-09) - app/core/sr_quick_fix.py
+# Tab 1: SR INCORRECT BILLING PERIOD - account(s) -> sent-to-bill electricity / water readings
+# (VALUE < PREV_VALUE pre-selected) -> RJ's 3 UPDATEs, UPDATE_PROGRAM = INC_BP (+ rollback).
+# ---------------------------------------------------------------------
+class SrIncBpDetectRequest(BaseModel):
+    accounts: str = ""           # pasted list; empty = system-wide candidates (VALUE < PREV_VALUE)
+    period_floor: Optional[int] = sr_quick_fix.DEFAULT_PERIOD_FLOOR
+
+
+def _sr_inc_bp_scan(conn, accounts: list[str], period_floor) -> tuple[list[dict], float]:
+    res = mssql.run_query(conn, sr_quick_fix.build_readings_query(accounts or None, period_floor))
+    rows = _row_dicts(res)
+    ms = res.elapsed_ms
+    ids = sr_quick_fix.clean_ids(r.get("id_reading") for r in rows)
+    items: dict[str, list[dict]] = {}
+    for s in range(0, len(ids), 1000):
+        ires = mssql.run_query(conn, sr_quick_fix.build_items_query(ids[s:s + 1000]))
+        ms += ires.elapsed_ms
+        for it in _row_dicts(ires):
+            items.setdefault(str(it.get("id_reading")), []).append(it)
+    for r in rows:
+        its = items.get(str(r.get("id_reading")), [])
+        r["items"] = its
+        r["lower_than_prev"] = str(r.get("lower_than_prev")) == "1"
+        try:
+            usage = float(str(r.get("reading_usage") or 0).replace(",", ""))
+        except ValueError:
+            usage = 0.0
+        # VALUE < PREV_VALUE but a positive usage = meter rollover (not this SR case)
+        r["rollover"] = r["lower_than_prev"] and usage > 0
+        r["has_sanitary"] = any(str(i.get("id_offered_service")) == "190" for i in its)
+        r["shared_itb"] = max([int(str(i.get("shared_readings") or 0).replace(",", "") or 0) for i in its] or [0])
+        r["open_anomalies"] = sum(int(str(i.get("open_anomalies") or 0).replace(",", "") or 0) for i in its)
+        r["candidate"] = r["lower_than_prev"] and not r["rollover"]
+    return rows, ms
+
+
+@app.post("/api/sr-quick-fix/incorrect-bp/detect")
+def sr_inc_bp_detect(body: Optional[SrIncBpDetectRequest] = None, user: str = Depends(require_login)):
+    body = body or SrIncBpDetectRequest()
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    accounts = sr_quick_fix.clean_accounts(body.accounts)
+    try:
+        rows, ms = _sr_inc_bp_scan(conn, accounts, body.period_floor)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    found = {str(r.get("account")) for r in rows}
+    return {
+        "rows": rows, "count": len(rows), "accounts": accounts,
+        "missing_accounts": [a for a in accounts if a not in found],
+        "candidate_count": sum(1 for r in rows if r["candidate"]),
+        "account_count": len({r.get("account") for r in rows if r["candidate"]}),
+        "sanitary_count": sum(1 for r in rows if r["candidate"] and r["has_sanitary"]),
+        "rollover_count": sum(1 for r in rows if r["rollover"]),
+        "elapsed_ms": ms, "scope": "accounts" if accounts else "all",
+    }
+
+
+class SrIncBpGenerateRequest(BaseModel):
+    accounts: str = ""
+    period_floor: Optional[int] = sr_quick_fix.DEFAULT_PERIOD_FLOOR
+    reading_ids: list[str] = []
+    program: str = sr_quick_fix.DEFAULT_PROGRAM
+    audit_user: str = sr_quick_fix.DEFAULT_USER
+    clean: bool = False
+
+
+@app.post("/api/sr-quick-fix/incorrect-bp/generate")
+def sr_inc_bp_generate(body: SrIncBpGenerateRequest, user: str = Depends(require_editor)):
+    """Re-scans server-side; only readings both selected AND still sent to bill go in."""
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    scope = {str(x).strip() for x in body.reading_ids if str(x).strip()}
+    if not scope:
+        raise HTTPException(status_code=400, detail="Select at least one reading.")
+    try:
+        rows, _ms = _sr_inc_bp_scan(conn, sr_quick_fix.clean_accounts(body.accounts), body.period_floor)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    selected = [r for r in rows if str(r.get("id_reading")) in scope]
+    if not selected:
+        raise HTTPException(status_code=400, detail="None of the selected readings are still Sent to bill - re-scan.")
+    program = body.program.strip() or sr_quick_fix.DEFAULT_PROGRAM
+    audit_user = body.audit_user.strip() or sr_quick_fix.DEFAULT_USER
+    sql_text = sr_quick_fix.build_fix_script(selected, program=program, user=audit_user, clean=body.clean)
+    rollback = sr_quick_fix.build_rollback_script(selected, program=program, user=audit_user)
+    accs = sorted({str(r.get("account")) for r in selected})
+    _record_script(user, script_history.KIND_SR_INC_BP,
+                   f"SR Incorrect Billing Period - {len(selected)} reading(s), account(s) {', '.join(accs[:10])}",
+                   program, sql_text, statements=sql_text.count("UPDATE "))
+    _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "ROLLBACK of SR Incorrect Billing Period",
+                   program, rollback, statements=rollback.count("UPDATE "))
+    return {"sql": sql_text, "rollback_sql": rollback, "reading_count": len(selected),
+            "skipped": len(scope) - len(selected),
+            "item_count": len({i.get("id_item_to_bill") for r in selected for i in r["items"]}),
+            "sanitary_items": sum(1 for r in selected for i in r["items"] if str(i.get("id_offered_service")) == "190")}
+
+
+# ---------------------------------------------------------------------
 # FIX BILLING CAMPAIGN 2026 (RJ 2026-10-18) - app/core/fix_billing_campaign.py
 # EWA_DDI_ELIGIBILITY + subsidy wallet + /mobileapp/complaint requests + RCCS attributes
 # ---------------------------------------------------------------------
+# RJ 2026-11-08: "optimize FIX BILLING CAMPAIGN 2026, also try to have a cache of the last data
+# loaded, and try to slowly load the data at the background when in rest mode".
+# Every FIX BILLING data set is kept as the LAST loaded result on disk (data/cache/fbc_*.json.gz,
+# survives a restart) + in memory. Requests take `cache`:
+#   "prefer"  -> return the last loaded result instantly when there is one (any age), else run;
+#   "refresh" -> run the query and store it (Scan button, idle background refresh).
+# Responses carry cached_at (ISO) and from_cache.
+import gzip as _fbc_gzip, hashlib as _fbc_hash, json as _fbc_json, threading as _fbc_threading
+_FBC_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
+_FBC_MEM: dict = {}
+_FBC_LOCK = _fbc_threading.Lock()
+
+
+def _fbc_cache_path(kind: str, params: dict) -> Path:
+    h = _fbc_hash.sha1(_fbc_json.dumps(params, sort_keys=True).encode()).hexdigest()[:12]
+    return _FBC_CACHE_DIR / f"fbc_{kind}_{h}.json.gz"
+
+
+def _fbc_cached(kind: str, params: dict, mode: str, compute):
+    """Return (payload, from_cache). compute() -> JSON-able dict (run the SQL)."""
+    path = _fbc_cache_path(kind, params)
+    if mode != "refresh":
+        hit = _FBC_MEM.get(path.name)
+        if hit is None and path.exists():
+            try:
+                with _fbc_gzip.open(path, "rt", encoding="utf-8") as fh:
+                    hit = _fbc_json.load(fh)
+                _FBC_MEM[path.name] = hit
+            except Exception:
+                hit = None
+        if hit is not None:
+            return hit, True
+    payload = compute()
+    payload["cached_at"] = datetime.now().isoformat(timespec="seconds")
+    with _FBC_LOCK:
+        _FBC_MEM[path.name] = payload
+        try:
+            _FBC_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            with _fbc_gzip.open(tmp, "wt", encoding="utf-8") as fh:
+                _fbc_json.dump(payload, fh, default=str)
+            os.replace(tmp, path)
+        except Exception:
+            pass   # memory copy still serves
+    return payload, False
+
+
+@app.get("/api/fix-billing-campaign/cache-status")
+def fix_billing_campaign_cache_status(user: str = Depends(require_login)):
+    """Age of every cached FIX BILLING data set (for the idle background refresh)."""
+    out = []
+    if _FBC_CACHE_DIR.exists():
+        for p in _FBC_CACHE_DIR.glob("fbc_*.json.gz"):
+            out.append({"file": p.name, "kind": p.name.split("_")[1],
+                        "saved_at": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds"),
+                        "age_seconds": int(time.time() - p.stat().st_mtime)})
+    return {"items": out}
+
+
 class FixBillingCampaignRequest(BaseModel):
     scope: str = "all"   # RJ 2026-10-21: request-based scopes (fix_billing_campaign.SCOPES)
     since: str = fix_billing_campaign.DEFAULT_SINCE
+    cache: str = "refresh"   # RJ 2026-11-08: "prefer" = last loaded result, "refresh" = run
 
 
 @app.post("/api/fix-billing-campaign/detect")
@@ -4844,15 +5055,33 @@ def fix_billing_campaign_detect(body: FixBillingCampaignRequest, user: str = Dep
     if not conn:
         raise HTTPException(status_code=400, detail="No connection configured.")
     try:
-        sql_text = fix_billing_campaign.build_query(body.scope, body.since)
+        # RJ 2026-11-08: the SQL is always the "all" shape (scope applied below), so the cache is
+        # keyed on `since` only and every scope reuses it.
+        sql_text = fix_billing_campaign.build_query("all", body.since)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    try:
+
+    def _compute():
         res = mssql.run_query(conn, sql_text, timeout_seconds=300)
+        return {"columns": list(res.columns),
+                "rows": [fix_billing_campaign.shape_row({c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)})
+                         for r in res.rows],
+                "elapsed_ms": res.elapsed_ms}
+    try:
+        # "detectfb" (RJ 2026-11-09: fixed billing base) - new key so an old request-based cache is not served
+        cached, from_cache = _fbc_cached("detectfb", {"since": body.since}, body.cache, _compute)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    rows = [fix_billing_campaign.shape_row({c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)})
-            for r in res.rows]
+    if from_cache:   # keep "ℹ Query used" filled on a cache hit
+        cap = _SQL_CAPTURE.get()
+        if cap is not None:
+            cap.append(f"-- (cached result from {cached.get('cached_at')})\n" + sql_text)
+
+    class _Res:   # same attribute names the code below used on the live result
+        columns = cached["columns"]
+        elapsed_ms = cached.get("elapsed_ms")
+    res = _Res
+    rows = list(cached["rows"])
     # RJ 2026-11-01: scope filtered here (the SQL always runs the fast "all" shape)
     if body.scope and body.scope != "all":
         rows = [r for r in rows if fix_billing_campaign.scope_match(r, body.scope)]
@@ -4876,7 +5105,7 @@ def fix_billing_campaign_detect(body: FixBillingCampaignRequest, user: str = Dep
             "cancelled_status": fix_billing_campaign.CANCELLED_RCCS_STATUS,
             "ewa_columns": ewa_cols, "scope": body.scope, "since": body.since,
             "row_cap": fix_billing_campaign.ROW_CAP, "attrs": fix_billing_campaign.ATTRS,
-            "elapsed_ms": res.elapsed_ms}
+            "elapsed_ms": res.elapsed_ms, "cached_at": cached.get("cached_at"), "from_cache": from_cache}
 
 
 # RJ 2026-11-01: tab "Bahraini First Account categories" (fix_billing_campaign.build_bfa_categories_query)
@@ -4884,6 +5113,7 @@ class BfaCategoriesRequest(BaseModel):
     billing_period: int = fix_billing_campaign.BFA_PERIOD_DEFAULT
     since: str = fix_billing_campaign.DEFAULT_SINCE
     include_all_others: bool = False   # RJ 2026-11-01: list all ~294k "Others" rows (heavy)
+    cache: str = "refresh"             # RJ 2026-11-08: "prefer" | "refresh"
 
 
 @app.post("/api/fix-billing-campaign/bfa-categories")
@@ -4897,27 +5127,37 @@ def fix_billing_campaign_bfa_categories(body: BfaCategoriesRequest, user: str = 
                                                                    body.include_all_others)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    try:
+
+    def _compute():
         res = mssql.run_query(conn, sql_text, timeout_seconds=300)
+        tot_keys = ("cat1_total", "cat1_gen", "cat2_total", "cat2_gen", "cat3_total", "cat3_gen")
+        rows, totals = [], {}
+        for r in res.rows:
+            d = {c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)}
+            if not totals:
+                totals = {k: d.get(k) for k in tot_keys}
+            for k in tot_keys:   # constant on every row - sent once in "totals"
+                d.pop(k, None)
+            rows.append(d)
+        return {"rows": rows, "count": len(rows), "totals": totals,
+                "categories": list(fix_billing_campaign.BFA_CATEGORIES), "all_others": body.include_all_others,
+                "billing_period": body.billing_period, "since": body.since, "elapsed_ms": res.elapsed_ms}
+    try:
+        payload, from_cache = _fbc_cached("bfa", {"bp": body.billing_period, "since": body.since,
+                                                  "all": body.include_all_others}, body.cache, _compute)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    tot_keys = ("cat1_total", "cat1_gen", "cat2_total", "cat2_gen", "cat3_total", "cat3_gen")
-    rows, totals = [], {}
-    for r in res.rows:
-        d = {c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)}
-        if not totals:
-            totals = {k: d.get(k) for k in tot_keys}
-        for k in tot_keys:   # constant on every row - sent once in "totals"
-            d.pop(k, None)
-        rows.append(d)
-    return {"rows": rows, "count": len(rows), "totals": totals,
-            "categories": list(fix_billing_campaign.BFA_CATEGORIES), "all_others": body.include_all_others,
-            "billing_period": body.billing_period, "since": body.since, "elapsed_ms": res.elapsed_ms}
+    if from_cache:
+        cap = _SQL_CAPTURE.get()
+        if cap is not None:
+            cap.append(f"-- (cached result from {payload.get('cached_at')})\n" + sql_text)
+    return {**payload, "from_cache": from_cache}
 
 
 # RJ 2026-10-23: tab 2 "Subsidized - planned billing" (fix_billing_campaign.build_subsidy_planned_query)
 class SubsidyPlannedRequest(BaseModel):
     billing_period: int = fix_billing_campaign.SUBSIDY_PERIOD_DEFAULT
+    cache: str = "refresh"   # RJ 2026-11-08: "prefer" | "refresh"
 
 
 @app.post("/api/fix-billing-campaign/subsidy-planned")
@@ -4926,14 +5166,23 @@ def fix_billing_campaign_subsidy_planned(body: SubsidyPlannedRequest, user: str 
     conn = config.get_active_connection()
     if not conn:
         raise HTTPException(status_code=400, detail="No connection configured.")
+    sql_text = fix_billing_campaign.build_subsidy_planned_query(body.billing_period)
+
+    def _compute():
+        res = mssql.run_query(conn, sql_text, timeout_seconds=300)
+        rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
+        return {"rows": rows, "count": len(rows), "billing_period": body.billing_period,
+                "planned_days": fix_billing_campaign.PLANNED_BILLING_DAYS,
+                "tariffs": fix_billing_campaign.SUBSIDY_FARES, "elapsed_ms": res.elapsed_ms}
     try:
-        res = mssql.run_query(conn, fix_billing_campaign.build_subsidy_planned_query(body.billing_period), timeout_seconds=300)
+        payload, from_cache = _fbc_cached("planned", {"bp": body.billing_period}, body.cache, _compute)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    rows = [{c.lower(): diff_engine.cell_display(v) for c, v in zip(res.columns, r)} for r in res.rows]
-    return {"rows": rows, "count": len(rows), "billing_period": body.billing_period,
-            "planned_days": fix_billing_campaign.PLANNED_BILLING_DAYS,
-            "tariffs": fix_billing_campaign.SUBSIDY_FARES, "elapsed_ms": res.elapsed_ms}
+    if from_cache:
+        cap = _SQL_CAPTURE.get()
+        if cap is not None:
+            cap.append(f"-- (cached result from {payload.get('cached_at')})\n" + sql_text)
+    return {**payload, "from_cache": from_cache}
 
 
 # RJ 2026-10-18: raw request JSON for one message (table "JSON" column, on demand)

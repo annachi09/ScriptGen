@@ -41,6 +41,7 @@ import re
 
 DDI_TABLE = "OUC_COMMON_ADMIN.EWA_DDI_ELIGIBILITY"
 WALLET_TABLE = "OUC_COMMON_ADMIN.EWA_GCCOM_SUBSIDY_WALLET"
+FIXED_BILLING_TABLE = "OUC_ADMIN.EWA_GCCOM_FIXED_BILLING"   # RJ 2026-11-09: main table of the Campaign tab
 MESSAGES_TABLE = "OUC_COMMON_ADMIN.GCGE_EXTERNAL_MESSAGES_IN"
 REQUEST_URL = "/mobileapp/complaint"
 DEFAULT_SINCE = "2026-10-16"
@@ -83,6 +84,24 @@ def _since(value: str | None) -> str:
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
         raise ValueError("since must be YYYY-MM-DD")
     return v
+
+
+def _msg_floor_sql(since: str) -> str:
+    """RJ 2026-11-08 (speed): GCGE_EXTERNAL_MESSAGES_IN has ~123M rows, a clustered PK on ID_SEQ and
+    NO date index, so `CREATE_DATE > since` scanned the whole table (8-40 s live). This binary-searches
+    the first ID_SEQ on/after (since - 2 days) with ~27 PK seeks (2 ms) - IDs grow with time - and the
+    scans then start at @msg_floor (0.4 s live, same 57,132 rows; 0 matching rows below the floor)."""
+    return f"""
+DECLARE @msg_since datetime2 = DATEADD(day, -2, CAST('{since}' AS datetime2));
+DECLARE @msg_lo bigint = (SELECT MIN(ID_SEQ) FROM {MESSAGES_TABLE}),
+        @msg_hi bigint = (SELECT MAX(ID_SEQ) FROM {MESSAGES_TABLE}), @msg_mid bigint, @msg_d datetime2;
+WHILE @msg_lo < @msg_hi BEGIN
+  SET @msg_mid = @msg_lo + (@msg_hi - @msg_lo) / 2;
+  SELECT TOP 1 @msg_d = CREATE_DATE FROM {MESSAGES_TABLE} WITH (NOLOCK) WHERE ID_SEQ >= @msg_mid ORDER BY ID_SEQ;
+  IF @msg_d < @msg_since SET @msg_lo = @msg_mid + 1 ELSE SET @msg_hi = @msg_mid;
+END
+DECLARE @msg_floor bigint = ISNULL(@msg_lo, 0);
+"""
 
 
 def build_query(scope: str = "all", since: str | None = None) -> str:
@@ -131,31 +150,39 @@ LEFT JOIN GCTS_DICTIONARY d ON d.ID = v.NAME_TYPE_XI18N AND d.LOCALE = 'EN'
 WHERE v.COD_MASTER_ATTRIBUTE = '{BEHAVIOUR_MASTER}';
 
 -- requests: latest per account since the date (JSON parsed only when valid)
+-- RJ 2026-11-08 (speed): copy the matching messages first, then parse each JSON ONCE with OPENJSON
+-- (was 9 x ISJSON + JSON_VALUE per row on the base table: ~27 s -> raw copy ~8 s + parse ~2.5 s live)
+IF OBJECT_ID('tempdb..#raw') IS NOT NULL DROP TABLE #raw;
+{_msg_floor_sql(since)}
+SELECT mi.ID_SEQ, mi.CREATE_DATE, mi.REPONSESTATUS, CAST(LEFT(mi.RESPONSEENTITY, 60) AS varchar(60)) AS RESPONSE_REF, mi.REQUESTENTITY
+INTO #raw
+FROM {MESSAGES_TABLE} mi WITH (NOLOCK)
+WHERE mi.ID_SEQ >= @msg_floor AND mi.REQUESTURL = '{REQUEST_URL}' AND mi.CREATE_DATE > '{since}'
+  AND {REQUEST_OK_SQL}
+OPTION (RECOMPILE);
+
 SELECT x.* INTO #m FROM (
-    SELECT mi.ID_SEQ, mi.CREATE_DATE AS REQ_DATE, mi.REPONSESTATUS AS REQ_STATUS,
-           LEFT(mi.RESPONSEENTITY, 60) AS RESPONSE_REF,
-           j.ID_ACCOUNT_REF, j.COMPLAINT_TYPE, j.RCCS_REF, j.CREDIT_AMOUNT, j.NO_BANK_AMOUNT,
-           j.CREDIT_USAGE, j.DEDUCTION_AMOUNT, j.AMOUNT_TYPE, j.DEDUCTION_DAY,
+    SELECT r.ID_SEQ, r.CREATE_DATE AS REQ_DATE, r.REPONSESTATUS AS REQ_STATUS, r.RESPONSE_REF,
+           j.ID_ACCOUNT_REF, j.COMPLAINT_TYPE, COALESCE(j.RCCS_REF, r.RESPONSE_REF) AS RCCS_REF,
+           j.CREDIT_AMOUNT, j.NO_BANK_AMOUNT, j.CREDIT_USAGE, j.DEDUCTION_AMOUNT, j.AMOUNT_TYPE, j.DEDUCTION_DAY,
            COUNT(*) OVER (PARTITION BY j.ID_ACCOUNT_REF) AS REQ_COUNT,
-           ROW_NUMBER() OVER (PARTITION BY j.ID_ACCOUNT_REF ORDER BY mi.CREATE_DATE DESC, mi.ID_SEQ DESC) AS RN,
-           ROW_NUMBER() OVER (PARTITION BY j.ID_ACCOUNT_REF, j.RCCS_REF ORDER BY mi.CREATE_DATE DESC, mi.ID_SEQ DESC) AS RN_RCCS
-    FROM {MESSAGES_TABLE} mi WITH (NOLOCK)
-    CROSS APPLY (SELECT
-        CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.idAccount') END AS ID_ACCOUNT_REF,
-        CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.complaintType') END AS COMPLAINT_TYPE,
-        COALESCE(CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.rccsReference') END,
-                 LEFT(mi.RESPONSEENTITY, 60)) AS RCCS_REF,
-        CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.creditAmount') END AS CREDIT_AMOUNT,
-        CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.noBankAmount') END AS NO_BANK_AMOUNT,
-        CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.creditUsage') END AS CREDIT_USAGE,
-        CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.deductionAmount') END AS DEDUCTION_AMOUNT,
-        CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.amountType') END AS AMOUNT_TYPE,
-        CASE WHEN ISJSON(mi.REQUESTENTITY) = 1 THEN JSON_VALUE(mi.REQUESTENTITY, '$.deductionDay') END AS DEDUCTION_DAY
-    ) j
-    WHERE mi.REQUESTURL = '{REQUEST_URL}' AND mi.CREATE_DATE > '{since}'
-      AND {REQUEST_OK_SQL}
+           ROW_NUMBER() OVER (PARTITION BY j.ID_ACCOUNT_REF ORDER BY r.CREATE_DATE DESC, r.ID_SEQ DESC) AS RN,
+           ROW_NUMBER() OVER (PARTITION BY j.ID_ACCOUNT_REF, COALESCE(j.RCCS_REF, r.RESPONSE_REF)
+                              ORDER BY r.CREATE_DATE DESC, r.ID_SEQ DESC) AS RN_RCCS
+    FROM #raw r
+    -- varchar (not nvarchar) so the joins to GCCOM_PAYMENT_FORM.REFERENCE / GCCC_COMPLAINT.COD_REF_COMPLAINT
+    -- / EWA_DDI_ELIGIBILITY.account (all varchar) stay index seeks - nvarchar forced an implicit
+    -- conversion of the table column (scan). JSON_VALUE also returned nvarchar before.
+    OUTER APPLY OPENJSON(CASE WHEN ISJSON(r.REQUESTENTITY) = 1 THEN r.REQUESTENTITY END) WITH (
+        ID_ACCOUNT_REF varchar(25) '$.idAccount', COMPLAINT_TYPE nvarchar(100) '$.complaintType',
+        RCCS_REF varchar(60) '$.rccsReference', CREDIT_AMOUNT nvarchar(100) '$.creditAmount',
+        NO_BANK_AMOUNT nvarchar(100) '$.noBankAmount', CREDIT_USAGE nvarchar(100) '$.creditUsage',
+        DEDUCTION_AMOUNT nvarchar(100) '$.deductionAmount', AMOUNT_TYPE nvarchar(100) '$.amountType',
+        DEDUCTION_DAY nvarchar(100) '$.deductionDay') j
 ) x
 WHERE x.RN_RCCS = 1;
+DROP TABLE #raw;
+CREATE CLUSTERED INDEX cx ON #m (RCCS_REF);
 -- RJ 2026-10-28: "i only want to see 1 account and 1 rccs, only the successful request, create a
 -- 3rd tab for those with multi rccs" - one row per (account, RCCS) = its latest successful request.
 -- RJ 2026-10-29: all rows are shown; accounts with 2+ RCCS only get a "Multi RCCS" marker
@@ -186,8 +213,17 @@ GROUP BY c.COD_REF_COMPLAINT, c.ID_ACCOUNT, c.ID_COMPLAINT, c.COD_STATUS_COMPLAI
 
 -- RJ 2026-10-21: no TOP - "do not limit top 60k, we are expecting 163k customers".
 -- RJ 2026-10-21 (later): base = the requests (#m), EWA_DDI_ELIGIBILITY only as info.
-SELECT m.ID_ACCOUNT_REF AS ACCOUNT,
+-- RJ 2026-11-09: "let's redo this the main table will be ewa_gccom_fixed_billing" + "apply this to the
+-- dashboard" - base = OUC_ADMIN.EWA_GCCOM_FIXED_BILLING (active enrolments, 1 row per account);
+-- each account shows its LATEST successful campaign request (m.RN = 1) and that request's RCCS.
+-- ACC_RCCS_COUNT = distinct RCCS of the account's successful requests (the "Multi RCCS" marker).
+SELECT pf.REFERENCE AS ACCOUNT,
        pf.ID_PAYMENT_FORM,
+       fb.ID_FIXED_BILLING, fb.ENROLLMENT_DATE AS FB_ENROLLMENT_DATE, fb.MONTHLY_AMOUNT AS FB_MONTHLY_AMOUNT,
+       fb.FROM_ID_BILLING_PERIOD AS FB_FROM_PERIOD, fb.TO_ID_BILLING_PERIOD AS FB_TO_PERIOD,
+       fb.WITHDRAWAL_DATE AS FB_WITHDRAWAL_DATE, fb.UPDATE_PROGRAM AS FB_PROGRAM,
+       ISNULL(rc.N, 0) AS ACC_RCCS_COUNT,
+       CASE WHEN m.ID_SEQ IS NULL THEN 'NO' ELSE 'YES' END AS HAS_REQUEST,
        CASE WHEN e.id_payment_form IS NOT NULL THEN 'YES' ELSE 'NO' END AS IN_EWA,
        w.ID_WALLET, w.IND_ACTIVE AS WALLET_ACTIVE, w.BALANCE AS WALLET_BALANCE, w.COD_BEHAVIOUR,
        bvw.TXT AS BEHAVIOUR_DESC, w.UPDATE_DATE AS WALLET_UPDATED, w.FIXED_DAY AS WALLET_FIXED_DAY,
@@ -201,9 +237,12 @@ SELECT m.ID_ACCOUNT_REF AS ACCOUNT,
        COALESCE(ds.TEXT, st.NAME_TYPE) AS RCCS_STATUS_EN,
        c.ATT_CREDIT_AMT, c.ATT_NOBANK_AMT, c.ATT_CREDIT_USAGE, bva.TXT AS ATT_CREDIT_USAGE_DESC, c.ATT_DEDUCTION_AMT, c.ATT_DEDUCTION_DAY,
        {ewa_cols}
-FROM #m m
-LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.REFERENCE = m.ID_ACCOUNT_REF
-LEFT JOIN {DDI_TABLE} e WITH (NOLOCK) ON e.account = m.ID_ACCOUNT_REF
+FROM {FIXED_BILLING_TABLE} fb WITH (NOLOCK)
+JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = fb.ID_PAYMENT_FORM
+LEFT JOIN #m m ON m.ID_ACCOUNT_REF = pf.REFERENCE AND m.RN = 1
+LEFT JOIN (SELECT ID_ACCOUNT_REF, COUNT(DISTINCT RCCS_REF) AS N FROM #m GROUP BY ID_ACCOUNT_REF) rc
+       ON rc.ID_ACCOUNT_REF = pf.REFERENCE
+LEFT JOIN {DDI_TABLE} e WITH (NOLOCK) ON e.account = pf.REFERENCE
 LEFT JOIN {WALLET_TABLE} w WITH (NOLOCK) ON w.ID_PAYMENT_FORM = pf.ID_PAYMENT_FORM
 -- RJ 2026-10-28: "for the credit amount we will get it from the wallet movement table connecting the
 -- original wallet table ... MOVEMENT_TYPE = 'WALMOV0001'" (live: exactly 1 WALMOV0001 per wallet)
@@ -211,12 +250,15 @@ OUTER APPLY (SELECT SUM(mv.AMOUNT) AS AMOUNT, MIN(mv.MOVEMENT_DATE) AS MOVEMENT_
              FROM {MOVEMENT_TABLE} mv WITH (NOLOCK)
              WHERE mv.ID_WALLET = w.ID_WALLET AND mv.MOVEMENT_TYPE = '{CREDIT_MOVEMENT_TYPE}') wmv
 LEFT JOIN #bv bvw ON bvw.COD_DEVELOP = w.COD_BEHAVIOUR
-LEFT JOIN #c c ON c.COD_REF_COMPLAINT = m.RCCS_REF AND c.ID_ACCOUNT = pf.ID_PAYMENT_FORM
+-- one RCCS per account (newest complaint when the reference exists twice for the account)
+OUTER APPLY (SELECT TOP 1 * FROM #c c1
+             WHERE c1.COD_REF_COMPLAINT = m.RCCS_REF AND c1.ID_ACCOUNT = pf.ID_PAYMENT_FORM
+             ORDER BY c1.ID_COMPLAINT DESC) c
 LEFT JOIN #bv bva ON bva.COD_DEVELOP = c.ATT_CREDIT_USAGE
 LEFT JOIN OUC_ADMIN.GCCC_COMPLAINT_STATUS st ON st.COD_DEVELOP = c.COD_STATUS_COMPLAINT
 LEFT JOIN GCTS_DICTIONARY ds ON ds.ID = st.NAME_TYPE_XI18N AND ds.LOCALE = 'EN'
-{where}
-ORDER BY m.ID_ACCOUNT_REF, m.REQ_DATE DESC, m.ID_SEQ DESC;
+WHERE fb.IND_ACTIVE = 1
+ORDER BY pf.REFERENCE;
 
 DROP TABLE #m; DROP TABLE #c; DROP TABLE #bv;
 """
@@ -378,23 +420,24 @@ GROUP BY x.ID_PAYMENT_FORM;
 
 -- fix billing campaign: successful requests with a creditAmount (Campaign tab rules).
 -- Two steps (raw copy, then JSON parse) - live: ~32s + ~22s; one step was slower.
+-- RJ 2026-11-08 (speed): raw copy starts at the ID_SEQ floor (_msg_floor_sql, no full scan of the
+-- ~123M-row table) and the JSON is parsed once with OPENJSON.
 IF OBJECT_ID('tempdb..#raw') IS NOT NULL DROP TABLE #raw;
-SELECT mi.CREATE_DATE, mi.REQUESTENTITY, LEFT(mi.RESPONSEENTITY, 60) AS RESPONSE_REF
+{_msg_floor_sql(since)}
+SELECT mi.CREATE_DATE, mi.REQUESTENTITY, CAST(LEFT(mi.RESPONSEENTITY, 60) AS varchar(60)) AS RESPONSE_REF
 INTO #raw
 FROM {MESSAGES_TABLE} mi WITH (NOLOCK)
-WHERE mi.REQUESTURL = '{REQUEST_URL}' AND mi.CREATE_DATE > '{since}'
-  AND NULLIF(LTRIM(RTRIM(mi.RESPONSEHEADER)), '') IS NULL;
+WHERE mi.ID_SEQ >= @msg_floor AND mi.REQUESTURL = '{REQUEST_URL}' AND mi.CREATE_DATE > '{since}'
+  AND NULLIF(LTRIM(RTRIM(mi.RESPONSEHEADER)), '') IS NULL
+OPTION (RECOMPILE);
 
 SELECT pf.ID_PAYMENT_FORM, j.ID_ACCOUNT_REF, MAX(r.CREATE_DATE) AS LAST_REQ_DATE,
-       COUNT(DISTINCT j.RCCS_REF) AS RCCS_COUNT
+       COUNT(DISTINCT COALESCE(j.RCCS_REF, r.RESPONSE_REF)) AS RCCS_COUNT
 INTO #cmp
 FROM #raw r
-CROSS APPLY (SELECT
-    CASE WHEN ISJSON(r.REQUESTENTITY) = 1 THEN JSON_VALUE(r.REQUESTENTITY, '$.idAccount') END AS ID_ACCOUNT_REF,
-    COALESCE(CASE WHEN ISJSON(r.REQUESTENTITY) = 1 THEN JSON_VALUE(r.REQUESTENTITY, '$.rccsReference') END,
-             r.RESPONSE_REF) AS RCCS_REF,
-    CASE WHEN ISJSON(r.REQUESTENTITY) = 1 THEN JSON_VALUE(r.REQUESTENTITY, '$.creditAmount') END AS CREDIT_AMOUNT
-) j
+OUTER APPLY OPENJSON(CASE WHEN ISJSON(r.REQUESTENTITY) = 1 THEN r.REQUESTENTITY END) WITH (
+    ID_ACCOUNT_REF varchar(25) '$.idAccount', RCCS_REF varchar(60) '$.rccsReference',
+    CREDIT_AMOUNT nvarchar(100) '$.creditAmount') j
 LEFT JOIN GCCOM_PAYMENT_FORM pf WITH (NOLOCK) ON pf.REFERENCE = j.ID_ACCOUNT_REF
 WHERE NULLIF(LTRIM(RTRIM(j.CREDIT_AMOUNT)), '') IS NOT NULL
 GROUP BY pf.ID_PAYMENT_FORM, j.ID_ACCOUNT_REF;

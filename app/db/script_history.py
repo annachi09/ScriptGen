@@ -58,6 +58,8 @@ KIND_RELEASE = "bill_issuance_release"
 KIND_GENERATED_ROLLBACK = "generated_rollback"
 # RJ 2026-10-13: Reading Discrepancies - pending validation -> available
 KIND_READING_RELEASE = "reading_pending_validation_release"
+# RJ 2026-11-09: SR Quick FIX - SR Incorrect Billing Period (reading lower than previous, INC_BP)
+KIND_SR_INC_BP = "sr_incorrect_billing_period"
 
 
 @dataclass

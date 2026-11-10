@@ -3179,6 +3179,190 @@ be filter of other bill type." + "make very good dashboard good color modern".
   list cleared); `app/config.py` `save_config` now writes a temp file under a lock and swaps it in
   atomically, `load_config` retries a read that races the swap.
 
+### Bill Issuance Validator: 5002NOTEMP check + "Temp Stop PCAL" view (2026-11-08)
+
+RJ: "in the bill issuance validator can you check if we consider 5002NOTEMP on all tabs, what is
+the effect, is there any?" -> "ok proceed with recommendation".
+
+- Finding (live 2026-11-08): no tab used 5002NOTEMP ("Temp Stop PCAL" in
+  `OUC_ADMIN.GCCOM_NOTICE_TMP_STATUS`). Every Case gates on 5000NOTEMP "For validation" on an
+  Invoicing (ESTFAC0012) bill. On Invoicing bills: 5000 = 13,314 notices / 7,009 accounts;
+  5002 = 73,550 notices / 43,537 accounts (November Service bills, set by the bill batch Nov 1-3;
+  90 accounts have both).
+- Effect if 5002 were added to the gate (each tab's own query re-run): Case 1 +1, New Contract
+  Match +36, Case 2 no change, Case 3 ~206 -> ~41,604, Case 4 ~921 -> ~2,933. The Case 3 / release
+  scripts would also flip PCAL temp stops to 1000NOTEMP.
+- Decision: Cases 1-4 unchanged (5000NOTEMP only). New tab **⏸ Temp Stop PCAL (view only)**:
+  `bill_issuance_validator.build_temp_stop_pcal_query()`, route `POST /api/bill-issuance/pcal/detect`
+  (~11 s), file `web/static/biss_pcal.js`. One row per account: notices, bills, bill amount,
+  billing period(s), bill type(s), first / last notice update, "Also pending validation" (has a
+  5000NOTEMP notice too). KPIs, search + period / bill type / also-pending filters, pages of 300,
+  filtered CSV. No generate / release button on purpose.
+- Overview card `billissuance_pcal` = accounts listed (kept out of the daily digest).
+- **Superseded the same day** - RJ: "incorporate them as 1" (chose "detect both, release both"):
+  - `PENDING_NOTICE_STATUSES = ("5000NOTEMP", "5002NOTEMP")` / `PENDING_NOTICE_IN` in
+    `bill_issuance_validator.py`; every Case gate (Case 1 stuck bills + New Contract Match,
+    Case 2, Case 3, Case 4) uses `COD_STATUS IN ('5000NOTEMP', '5002NOTEMP')`.
+  - Release scripts (Case 1 release, Case 2 / 3 release-complete) move BOTH statuses to
+    1000NOTEMP (inner + outer guards).
+  - The view-only Temp Stop PCAL tab, its route and Overview card were removed
+    (`web/static/biss_pcal.js` is no longer loaded; `build_temp_stop_pcal_query` kept, unused).
+  - Expected counts (live 2026-11-08 measurement above): Case 1 +1, New Contract Match +36,
+    Case 2 unchanged, Case 3 ~41.6k, Case 4 ~2.9k. UI texts now say "5000NOTEMP / 5002NOTEMP".
+  - Python change - restart needed, then Ctrl+F5.
+
+### FIX BILLING CAMPAIGN 2026: main table = EWA_GCCOM_FIXED_BILLING (2026-11-09)
+
+RJ: "give me the simple query used for Customers by type" -> "let's redo this the main table will be
+ewa_gccom_fixed_billing" -> "apply this to the dashboard".
+
+- Campaign tab rows = `OUC_ADMIN.EWA_GCCOM_FIXED_BILLING` with `IND_ACTIVE = 1` (one row per
+  enrolled account, 49,269 live) instead of one row per account + RCCS request. Each account shows
+  its LATEST successful `/mobileapp/complaint` request (`#m.RN = 1`) and that request's RCCS (newest
+  complaint when the reference exists twice for the account - 5 accounts were double counted).
+  The creditAmount filter no longer applies (the enrolment decides who counts).
+- New columns: FB_ENROLLMENT_DATE, FB_MONTHLY_AMOUNT, FB_FROM_PERIOD, FB_TO_PERIOD,
+  FB_WITHDRAWAL_DATE, ACC_RCCS_COUNT (distinct RCCS of the account's successful requests - feeds the
+  "Multi RCCS" marker), HAS_REQUEST. Table group "Fixed billing (EWA_GCCOM_FIXED_BILLING)".
+- Live 2026-11-09 (29 s): No Bank 31,936 · Direct Debit Request 9,223 · Benefit 8,077 · Other 33
+  (latest request has another / empty type) · 4,274 accounts with 2+ RCCS · 0 without a request.
+  Same numbers as the standalone "Customers by type" query.
+- Cache key renamed `detectfb` so the old request-based cache is not shown. Overview card = 49,269.
+- Python change - restart needed, then Ctrl+F5.
+
+### FIX BILLING CAMPAIGN 2026: faster queries, last-data cache, idle background refresh (2026-11-08)
+
+RJ: "optimize FIX BILLING CAMPAIGN 2026, also try to have a cache of the last data loaded, and try
+to slowly load the data at the background when in rest mode".
+
+- Measured live before: Campaign 61 s (SQL 53 s, 49,046 rows), Subsidized planned 35 s,
+  BFA categories 67 s (SQL 60 s, 167k rows).
+- Root causes + fixes (`app/core/fix_billing_campaign.py`):
+  - `GCGE_EXTERNAL_MESSAGES_IN` = ~123M rows, clustered PK on ID_SEQ, **no date index**, so
+    `CREATE_DATE > since` scanned the whole table (8-40 s). `_msg_floor_sql()` binary-searches the
+    first ID_SEQ on/after since - 2 days (~27 PK seeks, 2 ms) and the scan starts there: 0.4 s, same
+    57,132 messages, 0 matching rows below the floor.
+  - JSON parsed once per message with `OPENJSON ... WITH` (was 9 x ISJSON/JSON_VALUE per row).
+  - Parsed account / RCCS are `varchar` (JSON_VALUE gave nvarchar, which forced an implicit
+    conversion of `GCCOM_PAYMENT_FORM.REFERENCE`, `GCCC_COMPLAINT.COD_REF_COMPLAINT`,
+    `EWA_DDI_ELIGIBILITY.account` - all varchar - and turned seeks into scans).
+  - Same floor + OPENJSON in the BFA categories query.
+  - Live after: Campaign 30.7 s end-to-end (same 49,046 rows), BFA 37 s (167k rows). The planned
+    tab (readings) is unchanged at ~35 s.
+- Last-data cache (`web/server.py`, `_fbc_cached`): every result is stored as
+  `data/cache/fbc_<kind>_<hash>.json.gz` (survives restarts) + in memory. Requests take
+  `cache: "prefer"` (last loaded result, instant) or `"refresh"` (run + store). The FIRST load of
+  each tab in a browser session uses prefer; Scan / Refresh run the query. The Campaign cache is
+  keyed on `since` only (the scope filter is applied after), so changing the Scope is instant.
+  Summaries say "📦 last loaded <date time> (cached - Scan / Refresh to reload)" or "loaded in Xs at
+  <time>". A cache hit still fills "ℹ Query used". `GET /api/fix-billing-campaign/cache-status`
+  lists the cached sets and their age.
+- Idle background refresh (`web/static/fbc_idle.js`): after 90 s without mouse / keyboard / scroll,
+  every 20 s it refreshes ONE stale data set (older than 15 min: Campaign, Subsidized planned, BFA
+  categories in turn) with the tab's current parameters, never while another request is running.
+  Data you are looking at is not replaced; a "🔄 Newer data loaded in the background at HH:MM -
+  click to show it" link appears next to that tab's summary (instant load from the cache).
+- Python change - restart needed, then Ctrl+F5.
+
+### Bill Issuance Validator Case 5: refresh, clickable cards, coloured main issue (2026-11-08)
+
+RJ: "case 5 refresh is not working. also selecting cards does not filter. Make main issue colorful
+or maybe with its own colors same as its card".
+- Refresh: the page Refresh looked for `#biss5-detect-btn`; Case 5's button is `#bis5-detect-btn`
+  (fixed in HX_REFRESH). The tab's own first-open scan no longer races the app auto-load.
+- KPI cards are filters (click again = off): Accounts held (= all), Can be released, Ready + no
+  data issue, Services incomplete, Commercial, Rate only, No data issue. Active card highlighted,
+  others dimmed; Clear filters resets it.
+- One fixed colour per main issue (`ISSUE_COLORS` in biss_pcal.js), used by the issue bars, the
+  Main issue pill in the table, the row's left edge and the check icons; "No data issue" = green.
+- Verified in the browser: Refresh re-scans; "Services incomplete" / "Can be released" filter the
+  table. Live now: 16 accounts left with 5002NOTEMP, all with services incomplete (the ready ones
+  were released). Static change - Ctrl+F5.
+
+### Bill Issuance Validator Case 2: "Services needing a period update" card fixed (2026-11-08)
+
+RJ (screenshot): "the cards are not updated when refreshed" - the card showed 79 while its tab
+"Needs action - period mismatch" showed 0 rows. Checked live (6 months): 77 accounts, 79 services
+with a MISSING final bill, 0 with a period mismatch. The card summed `needs_update_count`, which
+counts missing bills too. It now sums `period_mismatch_count` of not-complete accounts (same rule as
+the tab), and its KPI filter matches the tab. The 77 "missing bill" accounts are 75 on the Missing
+Rate bill tab + 2 missing a non-Rate bill (All tab, Status "Missing bill"). Also: the page Refresh
+button on Case 5 now clicks `#bis5-detect-btn`. Static change - Ctrl+F5.
+
+### Bill Issuance Validator: Case 5 - Temp Stop PCAL analysis (2026-11-08)
+
+RJ: "create a case 5 and analyze what is wrong with this cases: select * from GCCOM_NOTICE_TMP nt
+join gccom_payment_form pf ... where COD_STATUS = '5002NOTEMP'".
+
+- Live findings (2026-11-08):
+  - 5002NOTEMP "Temp Stop PCAL" was created by user `pcal` (program "invoicing delayed") on
+    2026-10-01. The bill batch stamped it only on bills CREATED 22 Oct - 3 Nov (none from Nov 4).
+  - The stop is account-level: in that window an account is fully held or not (57 mixed).
+  - Held mix: E-C1 + RATE (commercial) ~22.8k accounts, RATE only ~12.6k, E-D1 + RATE ~2k,
+    water C1/D1 + sanitary ~1.5k, Bahraini first account only ~130.
+  - Rate-only: ~12.3k accounts whose ONLY contracted service is the Rate (176) - no electricity /
+    water; ~88% of all such accounts are held. ~4.1k Rate bills are 0 / negative.
+  - Amounts vs the previous period are normal for most bills (electricity avg 166.6 vs 167.3), so it
+    is not a general price-calculation error.
+- `build_case5_temp_stop_query()` + `case5_main_issue()` / `CASE5_ISSUES`, route
+  `POST /api/bill-issuance/case5/detect` (~23 s), UI in `web/static/biss_pcal.js` (tab
+  "Case 5 - Temp Stop PCAL"). One row per held account with checks (count of held bills hitting
+  each): also 5000NOTEMP, service not active, rate only, zero/negative amount, amount >= 2x or
+  <= half of the previous invoiced bill, no previous bill, two active services of the same type,
+  contracted service in `dbo.pcal_cs_change`, estimated. Main issue = first match in that order.
+- Live distribution (39,494 accounts): no data issue 19,314 (17,311 commercial), rate only 12,346,
+  zero/negative 5,192, amount jump 982, service not active 908, PCAL cs change 469, estimated 120,
+  no previous bill 78, also 5000 77, duplicate service 8.
+- UI: KPIs, clickable main-issue bars, search / segment / check filters, pages of 300, filtered
+  CSV. Overview card `billissuance_case5` (in the digest).
+- Python change - restart needed, then Ctrl+F5.
+- RJ 2026-11-08 (later): "i want to know if they can be released, checking the service and the bill
+  generated are complete":
+  - Per account, billable services for the held period = contracted services Active / Suspended /
+    Terminating, or Terminated with END_DATE on/after the period start, and FROM_DATE by the period
+    end. A service is billed when it has a cycle bill (TFGEN00001) of that period in Invoicing
+    (ESTFAC0012) or Invoiced (ESTFAC0005). Columns SERVICES, SERVICES_BILLED, MISSING_SERVICES
+    (e.g. "Water (no bill), Sanitary (no bill)", "Rate (ESTFAC0015)"), RELEASE_READY.
+  - Live: 39,477 of 39,494 accounts can be released (all services billed); 17 are incomplete
+    (missing electricity / water / sanitary bill, or a Rate bill still ESTFAC0015 / ESTFAC0008).
+  - UI: "Can be released" + "Services billed" columns, KPIs (can be released, ready + no data issue,
+    services incomplete), Release filter (ready / ready + no data issue / incomplete).
+  - **Generate release script** for the ready accounts in the current view: reuses
+    `POST /api/bill-issuance/release-complete` with `case: "case5"` (re-runs Case 5 live, keeps only
+    accounts still ready) and `build_release_by_account_script` (5000NOTEMP / 5002NOTEMP ->
+    1000NOTEMP on Invoicing bills, chunks of 1000 accounts). Shown with Copy / Download, never run.
+
+### New menu: SR Quick FIX - tab 1 "SR Incorrect Billing Period" (2026-11-09)
+
+RJ: "create new menu, SR Quick FIX. on the first tab, lets add SR INCORRECT BILLING PERIOD, here, I
+will provide you with the account, and you need to find the sent to bill water and or electricity
+which usually has a reading value lower than the previous reading ... create an update script like
+the following and we expect it will affect sanitary also, JIRA update program will be INC_BP".
+
+- Input: one or more accounts (or **All candidates** = system-wide scan). Readings = account ->
+  `GCCOM_PAYMENT_FORM` -> contracted services 1 (Electricity) / 19 (Water) -> sector supply ->
+  `GCGT_RE_READING` with READ_STATUS 6000STSRED (Sent to bill), ID_BILLING_PERIOD > 10000000230
+  (RJ's example floor, editable). Each reading shows its item-to-bills (status, open ESTAN00001
+  anomalies, all anomalies, how many readings share the ITB).
+- Pre-selected = VALUE < PREV_VALUE with a non-positive usage. Lower value with a positive usage
+  is flagged ⚠ (meter rollover) and not pre-selected.
+- Live facts (2026-11-09): a water reading links to the water AND the sanitary ITB
+  (reading 1049334074 -> ITB 1042568021 water + 1042568025 sanitary, 1 open anomaly each), so
+  RJ's subquery covers sanitary. A multi-register electricity meter shares one ITB across ~30
+  readings (1049715095 -> ITB 1042501273) and its anomaly can be ESTAN00009 - the page says
+  "shared ×N" and "not changed by the script" (RJ's template only resolves ESTAN00001).
+  System-wide scan: 147 lower-than-previous readings in ~2.3 s.
+- Script (`sr_quick_fix.build_fix_script`) = RJ's 3 UPDATEs, plus UPDATE_DATE / UPDATE_USER /
+  UPDATE_PROGRAM (default `INC_BP`, user `RMA`): reading -> 7000STSRED, VALUE = PREV_VALUE,
+  READING_USAGE = READY_USAGE = CORRECTED_USAGE = 0 (guard 6000STSRED); anomalies ESTAN00001 ->
+  ESTAN00005; ITBs STTOBILL00 -> STTOBILL04 (via `GCCOM_READINGS_ITEMSTOBILL`). Rollback restores
+  each reading's scanned VALUE / usages and reopens what this program changed (guard
+  UPDATE_PROGRAM). Both saved in History (`sr_incorrect_billing_period` + generated rollback).
+- Routes: `POST /api/sr-quick-fix/incorrect-bp/detect`, `POST /api/sr-quick-fix/incorrect-bp/generate`
+  (editor; re-scans live and keeps only readings still Sent to bill). Menu id `srquickfix`,
+  page `srquickfix.js`, Overview card `srquickfix_incbp` (system-wide candidates, in the digest).
+- Python change - restart needed, then Ctrl+F5.
+
 ### Billing Statistics: tab 2 "Operations" (2026-11-04)
 
 RJ: "on the same, create a second tab, for operations: [bill_data / notice_data / event_data /

@@ -131,7 +131,7 @@ const SG_ENDPOINT_OWNER = [
   ["/api/bill-issuance/case2/", "billissuance", "case2"],
   ["/api/bill-issuance/case3/", "billissuance", "case3"],
   ["/api/bill-issuance/case4/", "billissuance", "case4"],
-  ["/api/bill-issuance/release-complete", "billissuance", null],
+  ["/api/bill-issuance/case5/", "billissuance", "case5"],   // RJ 2026-11-08 Case 5 Temp Stop PCAL  ["/api/bill-issuance/release-complete", "billissuance", null],
   ["/api/bill-issuance/", "billissuance", "case1"],
   ["/api/incorrect-billing-period/", "incorrectbillingperiod", ""],
   ["/api/reading-validation/", "readingvalidation", ""],
@@ -157,6 +157,7 @@ const SG_ENDPOINT_OWNER = [
   ["/api/fix-billing-campaign/subsidy-planned", "fixbillingcampaign", "planned"],
   ["/api/fix-billing-campaign/bfa-categories", "fixbillingcampaign", "bfacat"],   // RJ 2026-11-01
   ["/api/billing-stats/", "billingstats", null],   // RJ 2026-11-04 Billing Statistics
+  ["/api/sr-quick-fix/incorrect-bp/", "srquickfix", "incbp"],   // RJ 2026-11-09 SR Quick FIX
   ["/api/fix-billing-campaign/", "fixbillingcampaign", "campaign"],
   ["/api/pending-sr/", "pendingsr", ""],
   ["/api/rebilling-monitor/open", "rebillingmonitor", "open"],
@@ -586,7 +587,19 @@ const OVERVIEW_CARDS = [
     page: "billissuance", subAttr: "data-biss-sub", subValue: "case4",
     group: "Bill Issuance Validator",
   },
-  // ---- Billing anomalies (RJ 2026-10-01: "and all that we have created")
+  {
+    // RJ 2026-11-08: Case 5 headline = accounts held by 5002NOTEMP
+    key: "billissuance_case5", icon: "🧾", label: "Case 5 - Temp Stop PCAL", color: "#f59e0b",
+    desc: "Accounts held by 5002NOTEMP on an Invoicing bill.",
+    page: "billissuance", subAttr: "data-biss-sub", subValue: "case5",
+    group: "Bill Issuance Validator",
+  },  // ---- Billing anomalies (RJ 2026-10-01: "and all that we have created")
+  {
+    // RJ 2026-11-09: SR Quick FIX - system-wide sent-to-bill readings lower than previous
+    key: "srquickfix_incbp", icon: "🛠️", label: "SR Incorrect Billing Period", color: "#ef4444",
+    desc: "Sent-to-bill electricity / water readings lower than the previous reading.",
+    page: "srquickfix", subAttr: "data-srq-sub", subValue: "incbp", group: "SR Quick FIX",
+  },
   {
     key: "incorrectbillingperiod", icon: "📅", label: "Incorrect Billing Period", color: "#ec4899",
     desc: "Anomalies with a wrong billing period.",
@@ -4698,7 +4711,8 @@ const BISS_KPI_PRED = {
     needsaction: (a) => !a.complete,
     missingbill: (a) => a.missing_bill_count > 0,
     complete: (a) => a.complete,
-    services: (a) => a.needs_update_count > 0,
+    // RJ 2026-11-08: period mismatch only (was needs_update_count, which also counts missing bills)
+    services: (a) => !a.complete && a.period_mismatch_count > 0,
   },
   biss3: {
     active: (r) => r.with_active_contract === "YES",
@@ -5145,7 +5159,7 @@ const BISS2_TABS = {
   "complete": {
     match: (a) => a.complete,
     mode: null,
-    hint: "Every service's final bill already aligned (or already invoiced). Generate = release script for the pending notices (5000NOTEMP -> 1000NOTEMP).",
+    hint: "Every service's final bill already aligned (or already invoiced). Generate = release script for the pending notices (5000NOTEMP / 5002NOTEMP -> 1000NOTEMP).",
   },
   "all": { match: null, mode: "", hint: "Every scanned account - use the Status dropdown to narrow." },
 };
@@ -5186,7 +5200,11 @@ function biss2RenderKpiRow() {
   const total = biss2Accounts.length;
   const needsAction = biss2Accounts.filter((a) => !a.complete).length;
   const complete = total - needsAction;
-  const servicesNeedingUpdate = biss2Accounts.reduce((sum, a) => sum + a.needs_update_count, 0);
+  // RJ 2026-11-08: "the cards are not updated" - this card summed needs_update_count, which also
+  // counts MISSING bills (79 live) while its tab "Needs action - period mismatch" shows 0. It now
+  // counts only services whose final bill exists but sits in the wrong period, same as the tab.
+  const servicesNeedingUpdate = biss2Accounts.filter((a) => !a.complete)
+    .reduce((sum, a) => sum + (a.period_mismatch_count || 0), 0);
   // RJ, 2026-09-14: surface the missing-bill reason on its own card too,
   // not just as a filter option - see biss2VisibleIndices' own comment.
   const missingBillAccounts = biss2Accounts.filter((a) => a.missing_bill_count > 0).length;
@@ -10051,7 +10069,8 @@ const HX_REFRESH = {
   disconnectiontnb: () => ({ btn: "#dtnb-detect-btn" }),
   billissuance: () => {
     const sub = hxActiveSub("data-biss-sub") || "case1";
-    return { btn: sub === "case1" ? "#billiss-detect-btn" : `#biss${sub.replace("case", "")}-detect-btn` };
+    // RJ 2026-11-08: Case 5's scan button is #bis5-detect-btn
+    return { btn: sub === "case1" ? "#billiss-detect-btn" : sub === "case5" ? "#bis5-detect-btn" : `#biss${sub.replace("case", "")}-detect-btn` };
   },
   incorrectbillingperiod: () => ({ btn: "#ibp-detect-btn" }),
   // Refresh bypasses the server cache (RJ 2026-10-07 cache).
@@ -10061,6 +10080,7 @@ const HX_REFRESH = {
   tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn", rccslist: "#trl-detect-btn", sanlbd: "#tslb-detect-btn", duprccs: "#tdr-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
   fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn", bfacat: "#fbk-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),
+  srquickfix: () => ({ btn: "#srq-detect-btn" }),   // RJ 2026-11-09 SR Quick FIX (re-runs the last scan)
   billingstats: () => ({ btn: "#bst-refresh-btn" }),   // RJ 2026-11-04 (page loads itself on open, like Anomalies Statistics)   // multi (RJ 2026-10-28) re-runs the campaign Scan
 };
 
@@ -12270,6 +12290,9 @@ const FBC_GROUPS = [
   ["Subsidy wallet", "#10b981", [["wallet_credit_amount", "Credit (movement WALMOV0001)", "money"], ["wallet_credit_date", "Credit date", "date"], ["wallet_balance", "Balance", "money"], ["cod_behaviour", "Behaviour", "beh"], ["wallet_fixed_day", "Payment day (wallet FIXED_DAY)", "num"], ["wallet_updated", "Wallet updated", "date"]]],
   // RJ 2026-10-18 v2: "for third table for json, just show 1 column for JSON and just display,
   // request CREDIT, NO_BANK, DEDUCTION" - JSON opens the raw request on demand.
+  // RJ 2026-11-09: main table = EWA_GCCOM_FIXED_BILLING (1 row per active enrolment)
+  ["Fixed billing (EWA_GCCOM_FIXED_BILLING)", "#14b8a6", [["fb_enrollment_date", "Enrolled", "date"], ["fb_monthly_amount", "Monthly amount", "money"],
+    ["fb_from_period", "From period", "mono"], ["has_request", "Has request"]]],
   ["Request (JSON)", "#0ea5e9", [["req_id", "JSON", "json"], ["req_date", "Request date", "date"],["req_credit_amount", "CREDIT", "money"],
     ["req_nobank_amount", "NO_BANK", "money"], ["req_deduction_amount", "DEDUCTION", "money"], ["req_deduction_day", "Payment day (request deductionDay)", "num"]]],
   ["RCCS (GCCC_COMPLAINT)", "#f59e0b", [["rccs_ref", "RCCS", "mono"], ["rccs_accounts", "Accounts on RCCS", "shared"], ["rccs_status_en", "Status", "rst"], ["rccs_date", "Created", "date"],
@@ -12296,7 +12319,12 @@ const fbcIsCancelled = (r) => String(r.rccs_status || "") === FBC_CANCELLED;
 // per-account RCCS count within the pool (cancelled in / out) -> Map account -> n
 function fbcRccsCounts(includeCancelled) {
   const m = new Map();
-  fbcRows.forEach((r) => { if (includeCancelled || !fbcIsCancelled(r)) m.set(r.account, (m.get(r.account) || 0) + 1); });
+  // RJ 2026-11-09: rows are now 1 per fixed-billing account - the RCCS count comes from the server
+  // (ACC_RCCS_COUNT = distinct RCCS of the account's successful requests)
+  fbcRows.forEach((r) => {
+    if (r.acc_rccs_count !== undefined && r.acc_rccs_count !== "") m.set(r.account, Number(String(r.acc_rccs_count).replace(/,/g, "")) || 0);
+    else if (includeCancelled || !fbcIsCancelled(r)) m.set(r.account, (m.get(r.account) || 0) + 1);
+  });
   return m;
 }
 let fbcMainCounts = new Map();
@@ -12693,7 +12721,27 @@ $("#fbc-clear-btn").addEventListener("click", () => {
   fbcUpdateTerms();
   fbcRender();
 });
-$("#fbc-scope").addEventListener("change", () => $("#fbc-detect-btn").click());
+// RJ 2026-11-08: a scope change re-uses the last loaded data (scope is applied server-side in Python)
+$("#fbc-scope").addEventListener("change", () => { $("#fbc-detect-btn").dataset.prefer = "1"; $("#fbc-detect-btn").click(); });
+
+// RJ 2026-11-08: "have a cache of the last data loaded" - the FIRST load of each FIX BILLING tab in
+// this browser session asks for the last loaded result ("prefer": instant, from the server's disk
+// cache); Scan / Refresh afterwards run the query ("refresh"). data-prefer="1" forces one prefer.
+const FBC_LOADED_ONCE = {};
+function fbcCacheMode(kind, btn) {
+  const forced = btn && btn.dataset.prefer === "1";
+  if (btn) delete btn.dataset.prefer;
+  const mode = forced || !FBC_LOADED_ONCE[kind] ? "prefer" : "refresh";
+  FBC_LOADED_ONCE[kind] = true;
+  return mode;
+}
+function fbcCacheNote(data) {
+  const at = data.cached_at ? new Date(data.cached_at) : null;
+  const when = at ? at.toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+  return data.from_cache
+    ? `📦 last loaded ${when} (cached - Scan / Refresh to reload)`
+    : `loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s${when ? ` at ${when}` : ""}`;
+}
 
 // ---- RJ 2026-10-23: FIX BILLING tab 2 "Subsidized - planned billing" -------------------------
 // "for all the subsidized account, i want to see the planned billing date on their readings for
@@ -12784,7 +12832,7 @@ $("#fbk-detect-btn").addEventListener("click", async () => {
   btn.disabled = true; fbkLoaded = true;
   $("#fbk-summary").textContent = "Loading (about 2 minutes)…";
   try {
-    const data = await api("/api/fix-billing-campaign/bfa-categories", { method: "POST", body: { billing_period: Number($("#fbk-bp").value), since: $("#fbk-since").value || "2026-10-16", include_all_others: $("#fbk-all-others").checked } });
+    const data = await api("/api/fix-billing-campaign/bfa-categories", { method: "POST", body: { billing_period: Number($("#fbk-bp").value), since: $("#fbk-since").value || "2026-10-16", include_all_others: $("#fbk-all-others").checked, cache: fbcCacheMode("bfa", btn) } });
     fbkRows = data.rows || [];
     fbkCats = data.categories || [];
     fbkTotals = data.totals || {};
@@ -12792,7 +12840,7 @@ $("#fbk-detect-btn").addEventListener("click", async () => {
     $("#fbk-dash").hidden = false;
     const pName = (fbkRows[0] && fbkRows[0].billing_period_name) || data.billing_period;
     const gen = fbkRows.filter((r) => r.bill_generated === "YES").length;
-    $("#fbk-summary").textContent = `${data.count.toLocaleString()} account(s) listed${fbkAllOthers ? "" : " (Others: only those with an Invoicing bill or a campaign request - tick 'List all Others' to list all)"} · ${gen.toLocaleString()} with an Invoicing bill in ${pName} · campaign requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
+    $("#fbk-summary").textContent = `${data.count.toLocaleString()} account(s) listed${fbkAllOthers ? "" : " (Others: only those with an Invoicing bill or a campaign request - tick 'List all Others' to list all)"} · ${gen.toLocaleString()} with an Invoicing bill in ${pName} · campaign requests after ${data.since} - ${fbcCacheNote(data)}.`;
     fbkRender();
   } catch (err) {
     $("#fbk-summary").textContent = "";
@@ -13017,10 +13065,10 @@ $("#fsp-detect-btn").addEventListener("click", async () => {
   btn.disabled = true; fspLoaded = true;
   $("#fsp-summary").textContent = "Loading… (about a minute)";
   try {
-    const data = await api("/api/fix-billing-campaign/subsidy-planned", { method: "POST", body: { billing_period: Number($("#fsp-bp").value) || 10000000237 } });
+    const data = await api("/api/fix-billing-campaign/subsidy-planned", { method: "POST", body: { billing_period: Number($("#fsp-bp").value) || 10000000237, cache: fbcCacheMode("planned", btn) } });
     fspRows = data.rows || [];
     $("#fsp-dash").hidden = false; $("#fsp-filter-row").hidden = false;
-    $("#fsp-summary").textContent = `${fspRows.length.toLocaleString()} subsidized account(s) - period ${data.billing_period}, planned billing date = reading date + ${data.planned_days} days - loaded in ${(data.elapsed_ms / 1000).toFixed(1)}s.`;
+    $("#fsp-summary").textContent = `${fspRows.length.toLocaleString()} subsidized account(s) - period ${data.billing_period}, planned billing date = reading date + ${data.planned_days} days - ${fbcCacheNote(data)}.`;
     fspRender();
   } catch (err) {
     $("#fsp-summary").textContent = "";
@@ -13157,7 +13205,8 @@ $("#fbc-detect-btn").addEventListener("click", async () => {
   btn.disabled = true;
   $("#fbc-summary").textContent = "Loading (about 15s)…";
   try {
-    const data = await api("/api/fix-billing-campaign/detect", { method: "POST", body: { scope: $("#fbc-scope").value, since: $("#fbc-since").value || "2026-10-16" } });
+    const data = await api("/api/fix-billing-campaign/detect", { method: "POST", body: { scope: $("#fbc-scope").value, since: $("#fbc-since").value || "2026-10-16", cache: fbcCacheMode("detect", btn) } });
+    window.fbcLastData = data;
     fbcRows = data.rows || [];
     fbcSel.clear();   // RJ 2026-10-25: a new Scan starts with no rows selected
     fbcRows.forEach((r) => { r.category = fbcCategory(r); });
@@ -13177,7 +13226,7 @@ $("#fbc-detect-btn").addEventListener("click", async () => {
     // RJ 2026-10-29: all successful requests shown; multi-RCCS accounts are only marked
     // RJ 2026-11-01: cancelled RCCS included by default; "Wallet with cancelled RCCS" card filters them
     const wN = new Set(fbcRows.filter((r) => r.has_wallet).map((r) => r.id_wallet)).size;
-    $("#fbc-summary").textContent = `${data.count.toLocaleString()} successful request(s) / RCCS from ${accN.toLocaleString()} account(s) · ${wN.toLocaleString()} wallet(s) · ${canc.toLocaleString()} cancelled RCCS (${fbcRows.filter((r) => r.has_wallet && fbcIsCancelled(r)).length.toLocaleString()} with a wallet) · ${new Set(fbcRows.filter((r) => fbcRccsN(r) > 1).map((r) => r.account)).size.toLocaleString()} account(s) marked Multi RCCS${capped} - successful requests after ${data.since} - loaded in ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s.`;
+    $("#fbc-summary").textContent = `${accN.toLocaleString()} account(s) enrolled in fixed billing (EWA_GCCOM_FIXED_BILLING, active) - each with its latest successful request / RCCS ·${wN.toLocaleString()} wallet(s) · ${canc.toLocaleString()} cancelled RCCS (${fbcRows.filter((r) => r.has_wallet && fbcIsCancelled(r)).length.toLocaleString()} with a wallet) · ${new Set(fbcRows.filter((r) => fbcRccsN(r) > 1).map((r) => r.account)).size.toLocaleString()} account(s) marked Multi RCCS${capped} - successful requests after ${data.since} - ${fbcCacheNote(data)}.`;
     fbcRender();
   } catch (err) {
     $("#fbc-summary").textContent = "";

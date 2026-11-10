@@ -107,6 +107,12 @@ OFFERED_SERVICE_LOOKUP_DESC_COLUMN = "NAME_TYPE"
 
 # --- Fixed business constants (RJ's own codes, confirmed live) -----------
 NOTICE_STATUS_PENDING = "5000NOTEMP"
+# RJ 2026-11-08: "incorporate them as 1" (chose: detect both, release both) - 5002NOTEMP "Temp Stop
+# PCAL" counts as pending exactly like 5000NOTEMP "For validation" in every Case gate AND in the
+# release scripts (both -> 1000NOTEMP). The separate view-only PCAL tab was removed.
+NOTICE_STATUS_TEMP_STOP_PCAL = "5002NOTEMP"
+PENDING_NOTICE_STATUSES = (NOTICE_STATUS_PENDING, NOTICE_STATUS_TEMP_STOP_PCAL)
+PENDING_NOTICE_IN = "(" + ", ".join(f"'{s}'" for s in PENDING_NOTICE_STATUSES) + ")"
 # ESTFAC0012 "En proceso de puesta al cobro" (in process of being issued).
 BILL_STATUS_ISSUING = "ESTFAC0012"
 # ESTFAC0015 "En espera de otros servicios" (waiting for other services) -
@@ -501,7 +507,7 @@ def build_unclassified_query(limit: int | None = UNCLASSIFIED_DEFAULT_LIMIT) -> 
         f"  JOIN {bill_tbl} b ON b.ID_PAYMENT_FORM = pf1.ID_PAYMENT_FORM\n"
         f"  JOIN {notice_tbl} tmp ON tmp.ID_BILL = b.ID_BILL\n"
         f"  WHERE b.BILLING_STATUS = {format_sql_literal(BILL_STATUS_ISSUING)}\n"
-        f"    AND tmp.COD_STATUS = {format_sql_literal(NOTICE_STATUS_PENDING)}\n"
+        f"    AND tmp.COD_STATUS IN {PENDING_NOTICE_IN}\n"
         f")\n"
         f"SELECT {top_clause}pf.REFERENCE, pa.ID_PAYMENT_FORM,\n"
         f"  b.ID_BILL, b.ID_BILLING_PERIOD, b.BILL_TYPE,\n"
@@ -621,7 +627,7 @@ def build_stuck_bills_query(
         f"  JOIN {pf_tbl} pf ON pf.ID_PAYMENT_FORM = b.ID_PAYMENT_FORM\n"
         f"  JOIN period_counts pc ON pc.ID_PAYMENT_FORM = b.ID_PAYMENT_FORM\n"
         f"    AND pc.ID_BILLING_PERIOD = b.ID_BILLING_PERIOD\n"
-        f"  WHERE nt.COD_STATUS = {format_sql_literal(NOTICE_STATUS_PENDING)}\n"
+        f"  WHERE nt.COD_STATUS IN {PENDING_NOTICE_IN}\n"
         f"    AND b.BILLING_STATUS = {format_sql_literal(BILL_STATUS_ISSUING)}\n"
         f"    AND b.ID_OFFERED_SERVICE = {format_sql_literal(OFFERED_SERVICE_RATE)}\n"
         f"    AND pc.BILL_COUNT = 1\n"
@@ -765,8 +771,8 @@ def build_release_notice_script(
         f"-- Rate bills selected: {len(seen_ids)}",
         f"-- Program: {program}",
         f"-- User: {user}",
-        "-- Releases the pending-validation notice (GCCOM_NOTICE_TMP.COD_STATUS",
-        "-- 5000NOTEMP 'For validation' -> 1000NOTEMP 'Pendiente de generar",
+        "-- Releases the pending notice (GCCOM_NOTICE_TMP.COD_STATUS 5000NOTEMP 'For",
+        "-- validation' or 5002NOTEMP 'Temp Stop PCAL' -> 1000NOTEMP 'Pendiente de generar",
         "-- factura') for each selected Rate bill's own blocking notice.",
         "-- Does NOT touch GCCOM_BILL itself - only GCCOM_NOTICE_TMP.",
     ]
@@ -795,11 +801,11 @@ def build_release_notice_script(
         f"  SELECT nt.ID_NOTICE_TMP\n"
         f"  FROM {notice_tbl} nt\n"
         f"  JOIN {bill_tbl} b ON b.ID_BILL = nt.ID_BILL\n"
-        f"  WHERE nt.COD_STATUS = {format_sql_literal(NOTICE_STATUS_PENDING)}\n"
+        f"  WHERE nt.COD_STATUS IN {PENDING_NOTICE_IN}\n"
         f"    AND b.BILLING_STATUS = {format_sql_literal(BILL_STATUS_ISSUING)}\n"
         f"    AND b.ID_BILL IN ({id_list})\n"
         f")\n"
-        f"AND COD_STATUS = {format_sql_literal(NOTICE_STATUS_PENDING)};"
+        f"AND COD_STATUS IN {PENDING_NOTICE_IN};"
     )
 
     header.append("-- Statements: 1")
@@ -846,7 +852,7 @@ def build_release_by_account_script(
         f"-- Complete accounts selected: {len(seen)}",
         f"-- Program: {program}",
         f"-- User: {user}",
-        "-- Releases every pending-validation notice (5000NOTEMP -> 1000NOTEMP) on an",
+        "-- Releases every pending notice (5000NOTEMP / 5002NOTEMP -> 1000NOTEMP) on an",
         "-- invoicing bill (ESTFAC0012) of the selected accounts. Only GCCOM_NOTICE_TMP changes.",
     ]
     if not seen:
@@ -867,10 +873,10 @@ def build_release_by_account_script(
             f"  FROM {notice_tbl} t\n"
             f"  JOIN {bill_tbl} b ON b.ID_BILL = t.ID_BILL\n"
             f"   AND t.ID_PAYMENT_FORM IN ({chunk})\n"
-            f"   AND t.COD_STATUS = {format_sql_literal(NOTICE_STATUS_PENDING)}\n"
+            f"   AND t.COD_STATUS IN {PENDING_NOTICE_IN}\n"
             f"   AND b.BILLING_STATUS = {format_sql_literal(BILL_STATUS_ISSUING)}\n"
             f")\n"
-            f"AND COD_STATUS = {format_sql_literal(NOTICE_STATUS_PENDING)};"
+            f"AND COD_STATUS IN {PENDING_NOTICE_IN};"
         )
     header += [f"-- Statements: {len(stmts)}", ""]
     sql_text = "\n".join(header) + "\n\n".join(stmts) + "\n\n-- Review the statement(s) above before running.\n"
@@ -1038,7 +1044,7 @@ def build_new_contract_match_query(limit: int | None = NEW_CONTRACT_MATCH_DEFAUL
         f"  SELECT b2.ID_PAYMENT_FORM, COUNT(*) AS PENDING_COUNT\n"
         f"  FROM {notice_tbl} t2\n"
         f"  JOIN {bill_tbl} b2 ON b2.ID_BILL = t2.ID_BILL\n"
-        f"  WHERE t2.COD_STATUS = {format_sql_literal(NOTICE_STATUS_PENDING)}\n"
+        f"  WHERE t2.COD_STATUS IN {PENDING_NOTICE_IN}\n"
         f"  GROUP BY b2.ID_PAYMENT_FORM\n"
         f"),\n"
         f"period_counts AS (\n"
@@ -1061,7 +1067,7 @@ def build_new_contract_match_query(limit: int | None = NEW_CONTRACT_MATCH_DEFAUL
         f"  JOIN period_counts prc ON prc.ID_PAYMENT_FORM = b.ID_PAYMENT_FORM\n"
         f"    AND prc.ID_BILLING_PERIOD = b.ID_BILLING_PERIOD\n"
         f"  WHERE b.BILLING_STATUS = {format_sql_literal(BILL_STATUS_ISSUING)}\n"
-        f"    AND t.COD_STATUS = {format_sql_literal(NOTICE_STATUS_PENDING)}\n"
+        f"    AND t.COD_STATUS IN {PENDING_NOTICE_IN}\n"
         f"    AND b.LAST_BILLING_DATE = cs.FROM_DATE\n"
         f"    AND b.BILL_TYPE = {format_sql_literal(BILL_TYPE_CYCLE)}\n"
         f"    AND cs.STATUS = {format_sql_literal(CONTRACT_STATUS_ACTIVE)}\n"
@@ -1242,7 +1248,7 @@ def build_terminated_period_mismatch_query(
         f"      SELECT 1 FROM {notice_tbl} nt\n"
         f"      JOIN {bill_tbl} nb ON nb.ID_BILL = nt.ID_BILL\n"
         f"      WHERE nt.ID_PAYMENT_FORM = cs.ID_PAYMENT_FORM\n"
-        f"        AND nt.COD_STATUS = {format_sql_literal(NOTICE_STATUS_PENDING)}\n"
+        f"        AND nt.COD_STATUS IN {PENDING_NOTICE_IN}\n"
         f"        AND nb.BILLING_STATUS = {format_sql_literal(BILL_STATUS_ISSUING)}\n"
         f"    )\n"
         f"),\n"
@@ -1392,7 +1398,7 @@ def build_bills_complete_query(
         f"  JOIN {bill_tbl} b ON b.ID_PAYMENT_FORM = pf1.ID_PAYMENT_FORM\n"
         f"  JOIN {notice_tbl} tmp ON tmp.ID_BILL = b.ID_BILL\n"
         f"  WHERE b.BILLING_STATUS = {format_sql_literal(BILL_STATUS_ISSUING)}\n"
-        f"    AND tmp.COD_STATUS = {format_sql_literal(NOTICE_STATUS_PENDING)}\n"
+        f"    AND tmp.COD_STATUS IN {PENDING_NOTICE_IN}\n"
         f"    AND tmp.UPDATE_DATE < GETDATE()\n"
         f"),\n"
         f"period_bills AS (\n"
@@ -1855,3 +1861,219 @@ def build_missing_rate_anomaly_script(
     if revert:
         sql_text = sql_text.rstrip("\n") + "\n\n/* REVERT - copy and run separately when needed:\n" + revert.strip("\n") + "\n*/\n"
     return MissingRateAnomalyScript(sql_text=sql_text, anomaly_count=n, warnings=warnings)
+
+
+# ---------------------------------------------------------------------------
+# Temp Stop PCAL view (RJ 2026-11-08). RJ: "check if we consider 5002NOTEMP on all tabs, what is the
+# effect" -> live check: no tab used it; adding it to the pending gate would push ~41k accounts into
+# Case 3 (and its release script would flip PCAL temp stops to 1000NOTEMP). RJ: "ok proceed with
+# recommendation" = keep Cases 1-4 on 5000NOTEMP only and show 5002NOTEMP in its own READ-ONLY tab
+# (no release / generate script).
+# Live 2026-11-08: OUC_ADMIN.GCCOM_NOTICE_TMP_STATUS 5002NOTEMP = "Temp Stop PCAL"
+# (5001NOTEMP "Temp Stop" has no rows). On Invoicing bills: 73,550 notices / 43,537 accounts, almost
+# all November Service bills, set by StatementGenerationBillBatchMain on Nov 1-3. ~6.6 s.
+# RJ 2026-11-08 (later): "incorporate them as 1" -> 5002NOTEMP is now part of every Case gate and
+# release script (PENDING_NOTICE_STATUSES at the top); the view-only tab and its route were removed.
+# This builder is no longer called by the app - kept only as an ad-hoc per-account PCAL breakdown.
+# ---------------------------------------------------------------------------
+
+
+def build_temp_stop_pcal_query() -> str:
+    """One row per account with a 5002NOTEMP notice on a bill still Invoicing (ESTFAC0012):
+    notices, bills, amount, billing periods, bill types, first/last notice update, and whether the
+    account ALSO has a 5000NOTEMP (pending validation) notice - i.e. is also in Cases 1-4."""
+    bill_tbl = _qualified(BILL_SCHEMA, BILL_TABLE)
+    pf_tbl = _qualified(BILL_SCHEMA, PAYMENT_FORM_TABLE)
+    notice_tbl = _qualified(NOTICE_SCHEMA, NOTICE_TABLE)
+    pcal = format_sql_literal(NOTICE_STATUS_TEMP_STOP_PCAL)
+    pend = format_sql_literal(NOTICE_STATUS_PENDING)
+    issuing = format_sql_literal(BILL_STATUS_ISSUING)
+    return f"""
+SET NOCOUNT ON;
+IF OBJECT_ID('tempdb..#n') IS NOT NULL DROP TABLE #n;
+SELECT t.ID_PAYMENT_FORM, t.UPDATE_DATE, b.ID_BILL, b.ID_BILLING_PERIOD, b.BILL_TYPE, b.TOTAL_AMOUNT
+INTO #n
+FROM {notice_tbl} t WITH (NOLOCK)
+JOIN {bill_tbl} b WITH (NOLOCK) ON b.ID_BILL = t.ID_BILL
+WHERE t.COD_STATUS = {pcal} AND b.BILLING_STATUS = {issuing};
+
+SELECT pf.REFERENCE, a.ID_PAYMENT_FORM, a.NOTICES, a.BILLS, a.AMOUNT, p.PERIODS, bt.BILL_TYPES,
+       CONVERT(varchar(19), a.FIRST_UPDATE, 120) AS FIRST_UPDATE, CONVERT(varchar(19), a.LAST_UPDATE, 120) AS LAST_UPDATE,
+       CASE WHEN EXISTS (SELECT 1 FROM {notice_tbl} t2 WITH (NOLOCK)
+                         JOIN {bill_tbl} b2 WITH (NOLOCK) ON b2.ID_BILL = t2.ID_BILL
+                         WHERE t2.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM AND t2.COD_STATUS = {pend}
+                           AND b2.BILLING_STATUS = {issuing}) THEN 1 ELSE 0 END AS ALSO_PENDING_VALIDATION
+FROM (SELECT ID_PAYMENT_FORM, COUNT(*) AS NOTICES, COUNT(DISTINCT ID_BILL) AS BILLS, SUM(TOTAL_AMOUNT) AS AMOUNT,
+             MIN(UPDATE_DATE) AS FIRST_UPDATE, MAX(UPDATE_DATE) AS LAST_UPDATE
+      FROM #n GROUP BY ID_PAYMENT_FORM) a
+LEFT JOIN (SELECT x.ID_PAYMENT_FORM, STRING_AGG(CAST(COALESCE(d.TEXT, bp.DESCRIPTION, CAST(x.ID_BILLING_PERIOD AS varchar(20))) AS varchar(60)), ', ')
+                  WITHIN GROUP (ORDER BY x.ID_BILLING_PERIOD) AS PERIODS
+           FROM (SELECT DISTINCT ID_PAYMENT_FORM, ID_BILLING_PERIOD FROM #n) x
+           LEFT JOIN GCCOM_BILLING_PERIOD bp ON bp.ID_BILLING_PERIOD = x.ID_BILLING_PERIOD
+           LEFT JOIN GCTS_DICTIONARY d ON d.ID = bp.PERIOD_NAME_XI18N AND d.LOCALE = 'EN'
+           GROUP BY x.ID_PAYMENT_FORM) p ON p.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM
+LEFT JOIN (SELECT y.ID_PAYMENT_FORM, STRING_AGG(CAST(COALESCE(d.TEXT, v.NAME_TYPE, y.BILL_TYPE) AS varchar(60)), ', ')
+                  WITHIN GROUP (ORDER BY y.BILL_TYPE) AS BILL_TYPES
+           FROM (SELECT DISTINCT ID_PAYMENT_FORM, BILL_TYPE FROM #n) y
+           LEFT JOIN OUC_COMMON_ADMIN.GCGT_ATTRIBUTE_VALUES v ON v.COD_DEVELOP = y.BILL_TYPE AND v.COD_MASTER_ATTRIBUTE = 'GENBILLTYP'
+           LEFT JOIN GCTS_DICTIONARY d ON d.ID = v.NAME_TYPE_XI18N AND d.LOCALE = 'EN'
+           GROUP BY y.ID_PAYMENT_FORM) bt ON bt.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM
+LEFT JOIN {pf_tbl} pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = a.ID_PAYMENT_FORM
+ORDER BY pf.REFERENCE;
+
+DROP TABLE #n;
+"""
+
+
+# ---------------------------------------------------------------------------
+# Case 5 - Temp Stop PCAL analysis (RJ 2026-11-08). RJ: "create a case 5 and analyze what is wrong
+# with this cases: select * from GCCOM_NOTICE_TMP nt join gccom_payment_form pf ... where
+# COD_STATUS = '5002NOTEMP'".
+#
+# Live findings (2026-11-08, November period):
+#  - 5002NOTEMP was created by user "pcal" (program "invoicing delayed") on 2026-10-01; the bill
+#    batch stamped it on bills CREATED 2026-10-22 .. 2026-11-03 only (none after Nov 4).
+#  - The stop is ACCOUNT-level: within that window an account is either fully held or not held
+#    (only 57 mixed accounts).
+#  - Held account mix: E-C1 + RATE (commercial) ~22.8k, RATE only ~12.6k, E-D1 + RATE ~2k, water
+#    C1/D1 + sanitary ~1.5k; Bahraini first account (E-D2/W-D2) only ~130.
+#  - Rate-only accounts: ~12.3k accounts whose ONLY contracted service is the Rate (176) - no
+#    electricity / water service - and ~88% of all such accounts are held. Many Rate bills are
+#    0 / negative (~4.1k bills).
+#  - Amounts vs the previous period are normal for most bills (avg Nov 166.6 vs Oct 167.3 on
+#    electricity), so the hold is NOT a general price-calculation error.
+# Case 5 lists every held account (5002NOTEMP on an Invoicing bill) with data checks per account
+# and one "main issue" (first match in CASE5_ISSUES order). Read only - no script.
+# ---------------------------------------------------------------------------
+CASE5_ISSUES = [
+    ("also_5000", "Also pending validation (5000NOTEMP)"),
+    ("cs_not_active", "Service not active (terminated / suspended / terminating)"),
+    ("rate_only", "Rate only - no electricity / water service on the account"),
+    ("zero_neg", "Zero or negative bill amount"),
+    ("amount_jump", "Amount 2x higher or half of the previous bill"),
+    ("no_prev", "No previous invoiced bill (first bill of the service)"),
+    ("dup_active_cs", "Two active services of the same type"),
+    ("pcal_cs_change", "Contracted service changed (dbo.pcal_cs_change)"),
+    ("estimated", "Estimated reading"),
+]
+CASE5_NO_ISSUE = "No data issue found - held by the PCAL stop only"
+RATE_OFFERED_SERVICE = 176
+
+
+def case5_main_issue(row: dict) -> str:
+    """First matching issue label for a Case 5 account row (lower-case keys), else CASE5_NO_ISSUE."""
+    for key, label in CASE5_ISSUES:
+        try:
+            if int(str(row.get(key) or 0).replace(",", "") or 0) > 0:
+                return label
+        except ValueError:
+            continue
+    return CASE5_NO_ISSUE
+
+
+def build_case5_temp_stop_query() -> str:
+    """One row per account with a 5002NOTEMP notice on an Invoicing bill + per-account checks
+    (counts of held bills hitting each check). Live ~23 s, ~39.5k accounts on 2026-11-08."""
+    bill_tbl = _qualified(BILL_SCHEMA, BILL_TABLE)
+    pf_tbl = _qualified(BILL_SCHEMA, PAYMENT_FORM_TABLE)
+    notice_tbl = _qualified(NOTICE_SCHEMA, NOTICE_TABLE)
+    pcal = format_sql_literal(NOTICE_STATUS_TEMP_STOP_PCAL)
+    pend = format_sql_literal(NOTICE_STATUS_PENDING)
+    issuing = format_sql_literal(BILL_STATUS_ISSUING)
+    return f"""
+SET NOCOUNT ON;
+IF OBJECT_ID('tempdb..#n') IS NOT NULL DROP TABLE #n;
+IF OBJECT_ID('tempdb..#b') IS NOT NULL DROP TABLE #b;
+IF OBJECT_ID('tempdb..#a') IS NOT NULL DROP TABLE #a;
+IF OBJECT_ID('tempdb..#s') IS NOT NULL DROP TABLE #s;
+IF OBJECT_ID('tempdb..#c') IS NOT NULL DROP TABLE #c;
+
+-- held bills: 5002NOTEMP notice on a bill still Invoicing
+SELECT nt.ID_NOTICE_TMP, nt.ID_PAYMENT_FORM AS PF, nt.UPDATE_DATE AS NOTICE_DATE, b.ID_BILL, b.ID_BILLING_PERIOD AS BP,
+       b.ID_CONTRACTED_SERVICE AS CS, b.ID_OFFERED_SERVICE AS OS, b.TOTAL_AMOUNT AS AMT, b.IND_ESTIMATED AS EST
+INTO #n
+FROM {notice_tbl} nt WITH (NOLOCK)
+JOIN {bill_tbl} b WITH (NOLOCK) ON b.ID_BILL = nt.ID_BILL
+WHERE nt.COD_STATUS = {pcal} AND b.BILLING_STATUS = {issuing};
+CREATE CLUSTERED INDEX cx ON #n (PF);
+
+-- per bill: service status, tariff, previous-period invoiced bill of the same service, PCAL cs change,
+-- number of active services of the same type on the account
+SELECT n.*, cs.STATUS AS CS_STATUS, f.RATE_CODE AS FARE, pv.TOTAL_AMOUNT AS PREV_AMT,
+       CASE WHEN EXISTS (SELECT 1 FROM dbo.pcal_cs_change p WHERE p.cs_new = n.CS) THEN 1 ELSE 0 END AS PCAL_CHANGE,
+       (SELECT COUNT(*) FROM GCCOM_CONTRACTED_SERVICE c2 WITH (NOLOCK)
+         WHERE c2.ID_PAYMENT_FORM = n.PF AND c2.ID_OFFERED_SERVICE = n.OS
+           AND c2.STATUS IN ('ESTSC00002', 'ESTSC00007', 'ESTSC00003')) AS SAME_OS_ACTIVE
+INTO #b
+FROM #n n
+LEFT JOIN GCCOM_CONTRACTED_SERVICE cs WITH (NOLOCK) ON cs.ID_CONTRACTED_SERVICE = n.CS
+OUTER APPLY (SELECT TOP 1 f.RATE_CODE FROM GCCOM_BILLING_SERVICE bs WITH (NOLOCK)
+             JOIN OUC_COMMON_ADMIN.GCCOM_FARE f ON f.ID_FARE = bs.ID_FARE
+             WHERE bs.ID_CONTRACTED_SERVICE = n.CS) f
+OUTER APPLY (SELECT TOP 1 p.TOTAL_AMOUNT FROM {bill_tbl} p WITH (NOLOCK)
+             WHERE p.ID_CONTRACTED_SERVICE = n.CS AND p.ID_BILLING_PERIOD = n.BP - 1 AND p.BILL_TYPE = 'TFGEN00001'
+               AND p.BILLING_STATUS IN ('ESTFAC0005', 'ESTFAC8801') ORDER BY p.ID_BILL DESC) pv;
+
+SELECT b.PF, COUNT(*) AS NOTICES, COUNT(DISTINCT b.ID_BILL) AS BILLS, SUM(b.AMT) AS AMOUNT, MAX(b.BP) AS BP,
+       STRING_AGG(CAST(ISNULL(b.FARE, '?') AS varchar(max)), '+') WITHIN GROUP (ORDER BY b.FARE) AS FARES,
+       MAX(CASE WHEN b.FARE LIKE '_-C%' THEN 1 ELSE 0 END) AS IS_COMMERCIAL,
+       MAX(CASE WHEN b.FARE IN ('E-D2', 'W-D2', 'E-D2-NM') THEN 1 ELSE 0 END) AS IS_BFA,
+       MAX(CASE WHEN b.FARE IN ('E-D1', 'W-D1', 'E-D1-NM') THEN 1 ELSE 0 END) AS IS_D1,
+       SUM(CASE WHEN b.PREV_AMT IS NULL THEN 1 ELSE 0 END) AS NO_PREV,
+       SUM(CASE WHEN b.PREV_AMT > 0 AND (b.AMT >= b.PREV_AMT * 2 OR b.AMT <= b.PREV_AMT * 0.5) THEN 1 ELSE 0 END) AS AMOUNT_JUMP,
+       SUM(CASE WHEN b.AMT <= 0 THEN 1 ELSE 0 END) AS ZERO_NEG,
+       SUM(CASE WHEN b.EST = 1 THEN 1 ELSE 0 END) AS ESTIMATED,
+       SUM(CASE WHEN b.CS_STATUS <> 'ESTSC00002' THEN 1 ELSE 0 END) AS CS_NOT_ACTIVE,
+       SUM(CASE WHEN b.SAME_OS_ACTIVE > 1 THEN 1 ELSE 0 END) AS DUP_ACTIVE_CS,
+       SUM(b.PCAL_CHANGE) AS PCAL_CS_CHANGE,
+       MIN(b.NOTICE_DATE) AS FIRST_NOTICE, MAX(b.NOTICE_DATE) AS LAST_NOTICE
+INTO #a FROM #b b GROUP BY b.PF;
+CREATE UNIQUE CLUSTERED INDEX cx ON #a (PF);
+
+-- RJ 2026-11-08: "i want to know if they can be released, checking the service and the bill generated
+-- are complete". Billable services of the account for the held period = active / suspended /
+-- terminating, or terminated with END_DATE on/after the period start, and started by the period end.
+-- A service is billed when it has a cycle bill of that period that is Invoicing or Invoiced.
+SELECT a.PF, a.BP, cs.ID_OFFERED_SERVICE AS OS,
+       (SELECT TOP 1 bb.BILLING_STATUS FROM {bill_tbl} bb WITH (NOLOCK)
+         WHERE bb.ID_CONTRACTED_SERVICE = cs.ID_CONTRACTED_SERVICE AND bb.ID_BILLING_PERIOD = a.BP
+           AND bb.BILL_TYPE = 'TFGEN00001'
+         ORDER BY CASE WHEN bb.BILLING_STATUS IN ({issuing}, 'ESTFAC0005') THEN 0 ELSE 1 END, bb.ID_BILL DESC) AS BILL_STATUS
+INTO #s
+FROM #a a
+JOIN GCCOM_BILLING_PERIOD bpx ON bpx.ID_BILLING_PERIOD = a.BP
+JOIN GCCOM_CONTRACTED_SERVICE cs WITH (NOLOCK) ON cs.ID_PAYMENT_FORM = a.PF
+WHERE (cs.STATUS IN ('ESTSC00002', 'ESTSC00007', 'ESTSC00003')
+       OR (cs.STATUS = 'ESTSC00004' AND cs.END_DATE >= bpx.INITIAL_DATE))
+  AND (cs.FROM_DATE IS NULL OR cs.FROM_DATE <= bpx.END_DATE);
+
+SELECT PF, COUNT(*) AS SERVICES,
+       SUM(CASE WHEN BILL_STATUS IN ({issuing}, 'ESTFAC0005') THEN 1 ELSE 0 END) AS SERVICES_BILLED,
+       STRING_AGG(CASE WHEN ISNULL(BILL_STATUS, '') NOT IN ({issuing}, 'ESTFAC0005')
+                       THEN CAST(CASE OS WHEN 1 THEN 'Electricity' WHEN 19 THEN 'Water' WHEN 190 THEN 'Sanitary'
+                                         WHEN 176 THEN 'Rate' ELSE CAST(OS AS varchar(10)) END
+                                 + ' (' + ISNULL(BILL_STATUS, 'no bill') + ')' AS varchar(max)) END, ', ') AS MISSING_SERVICES
+INTO #c FROM #s GROUP BY PF;
+
+SELECT pf.REFERENCE, a.PF AS ID_PAYMENT_FORM, a.NOTICES, a.BILLS, a.AMOUNT,
+       ISNULL(c.SERVICES, 0) AS SERVICES, ISNULL(c.SERVICES_BILLED, 0) AS SERVICES_BILLED, c.MISSING_SERVICES,
+       CASE WHEN c.SERVICES > 0 AND c.SERVICES = c.SERVICES_BILLED THEN 1 ELSE 0 END AS RELEASE_READY,
+       COALESCE(d.TEXT, bp.DESCRIPTION) AS BILLING_PERIOD, a.FARES,
+       CASE WHEN a.IS_COMMERCIAL = 1 THEN 'Commercial' WHEN a.IS_BFA = 1 THEN 'Bahraini first account'
+            WHEN a.IS_D1 = 1 THEN 'Domestic (other)' ELSE 'Other / Rate only' END AS SEGMENT,
+       CASE WHEN NOT EXISTS (SELECT 1 FROM GCCOM_CONTRACTED_SERVICE cr WITH (NOLOCK)
+                             WHERE cr.ID_PAYMENT_FORM = a.PF AND cr.ID_OFFERED_SERVICE <> {RATE_OFFERED_SERVICE}) THEN 1 ELSE 0 END AS RATE_ONLY,
+       a.NO_PREV, a.AMOUNT_JUMP, a.ZERO_NEG, a.ESTIMATED, a.CS_NOT_ACTIVE, a.DUP_ACTIVE_CS, a.PCAL_CS_CHANGE,
+       CASE WHEN EXISTS (SELECT 1 FROM {notice_tbl} t2 WITH (NOLOCK) JOIN {bill_tbl} b2 WITH (NOLOCK) ON b2.ID_BILL = t2.ID_BILL
+                         WHERE t2.ID_PAYMENT_FORM = a.PF AND t2.COD_STATUS = {pend} AND b2.BILLING_STATUS = {issuing})
+            THEN 1 ELSE 0 END AS ALSO_5000,
+       CONVERT(varchar(19), a.FIRST_NOTICE, 120) AS FIRST_NOTICE, CONVERT(varchar(19), a.LAST_NOTICE, 120) AS LAST_NOTICE
+FROM #a a
+LEFT JOIN #c c ON c.PF = a.PF
+LEFT JOIN {pf_tbl} pf WITH (NOLOCK) ON pf.ID_PAYMENT_FORM = a.PF
+LEFT JOIN GCCOM_BILLING_PERIOD bp ON bp.ID_BILLING_PERIOD = a.BP
+LEFT JOIN GCTS_DICTIONARY d ON d.ID = bp.PERIOD_NAME_XI18N AND d.LOCALE = 'EN'
+ORDER BY pf.REFERENCE;
+
+DROP TABLE #n; DROP TABLE #b; DROP TABLE #a; DROP TABLE #s; DROP TABLE #c;
+"""

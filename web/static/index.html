@@ -151,6 +151,9 @@
         <button class="nav-item" data-page="billingstats" title="Billing Statistics">
           <span class="nav-icon">💹</span><span class="nav-label">Billing Statistics</span>
         </button>
+        <button class="nav-item" data-page="srquickfix" title="SR Quick FIX"><!-- RJ 2026-11-09 -->
+          <span class="nav-icon">🛠️</span><span class="nav-label">SR Quick FIX</span>
+        </button>
         <button class="nav-item" data-page="tempdashboard" title="Temp Dashboard">
           <span class="nav-icon">🧪</span><span class="nav-label">Temp Dashboard</span>
         </button>
@@ -2601,13 +2604,14 @@
           <button type="button" class="da-subnav-btn" data-biss-sub="case2">Case 2 - Terminated Account Period Mismatch</button>
           <button type="button" class="da-subnav-btn" data-biss-sub="case3">Case 3 - All Contract Status - Bills Complete</button>
           <button type="button" class="da-subnav-btn" data-biss-sub="case4">Case 4 - Unclassified</button>
+          <button type="button" class="da-subnav-btn" data-biss-sub="case5">Case 5 - Temp Stop PCAL</button><!-- RJ 2026-11-08 -->
         </nav>
 
         <div class="da-subpage is-active" data-biss-sub="case1">
         <p class="page-subtitle" style="margin:-6px 0 14px;">Two patterns, one table: a Rate bill (ID_OFFERED_SERVICE 176) still being put to collection that's either blocking the account's next Electricity/Water bill, or belongs to a brand-new contract whose very first cycle bill is still pending.</p>
 
         <div class="biss-info-banner">
-          ℹ️ <strong>Stuck Bill.</strong> Starts from every account with a pending notice (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP, "For validation") on a bill still "En proceso de puesta al cobro" (ESTFAC0012), narrows to the ones where that billing period's <strong>only</strong> bill is a Rate (176) bill, then checks the SAME account's Electricity/Water (1 or 19) bill for any of the <strong>next up to 11</strong> billing periods (RJ, 2026-09-14: confirmed live that a valid stuck bill can lag the Rate bill by more than one period — the closest matching period is shown when more than one qualifies). A row here means that next bill is sitting at ESTFAC0015 ("En espera de otros servicios") — blocked behind the Rate bill above it.
+          ℹ️ <strong>Stuck Bill.</strong> Starts from every account with a pending notice (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP / 5002NOTEMP, "For validation") on a bill still "En proceso de puesta al cobro" (ESTFAC0012), narrows to the ones where that billing period's <strong>only</strong> bill is a Rate (176) bill, then checks the SAME account's Electricity/Water (1 or 19) bill for any of the <strong>next up to 11</strong> billing periods (RJ, 2026-09-14: confirmed live that a valid stuck bill can lag the Rate bill by more than one period — the closest matching period is shown when more than one qualifies). A row here means that next bill is sitting at ESTFAC0015 ("En espera de otros servicios") — blocked behind the Rate bill above it.
         </div>
 
         <div class="biss-info-banner" style="margin-top:10px;">
@@ -2704,7 +2708,7 @@
         <p class="page-subtitle" style="margin:-6px 0 14px;">Finds accounts whose services are all Terminated, checks each service's own final bill (the one dated its termination date), and flags accounts where those final bills don't all share the same billing period.</p>
 
         <div class="biss-info-banner">
-          ℹ️ <strong>How this works.</strong> For each Terminated service (GCCOM_CONTRACTED_SERVICE.STATUS = ESTSC00004) <strong>whose account also has a pending notice</strong> (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP, "For validation") — accounts with nothing pending review aren't shown — finds that service's own final bill: the GCCOM_BILL row dated exactly its termination date and either "En proceso de puesta al cobro" (invoicing, ESTFAC0012) or "Puesta al cobro" (invoiced, ESTFAC0005). Only accounts where <strong>every</strong> service is Terminated are shown. An account is <strong>Complete</strong> when every service's final bill already exists and already shares the account's target period (the <strong>latest</strong> billing period among its matched final bills); otherwise it <strong>Needs action</strong> — either a service's final bill period needs realigning, or a service has no matching final bill at all and needs investigating.
+          ℹ️ <strong>How this works.</strong> For each Terminated service (GCCOM_CONTRACTED_SERVICE.STATUS = ESTSC00004) <strong>whose account also has a pending notice</strong> (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP / 5002NOTEMP, "For validation") — accounts with nothing pending review aren't shown — finds that service's own final bill: the GCCOM_BILL row dated exactly its termination date and either "En proceso de puesta al cobro" (invoicing, ESTFAC0012) or "Puesta al cobro" (invoiced, ESTFAC0005). Only accounts where <strong>every</strong> service is Terminated are shown. An account is <strong>Complete</strong> when every service's final bill already exists and already shares the account's target period (the <strong>latest</strong> billing period among its matched final bills); otherwise it <strong>Needs action</strong> — either a service's final bill period needs realigning, or a service has no matching final bill at all and needs investigating.
         </div>
 
         <div class="card">
@@ -2806,7 +2810,7 @@
 
         <div class="card biss-rel-card" data-biss-rel="case2">
           <div class="card-header"><h2>Release Script — Complete Accounts</h2></div>
-          <p class="hint-text">Releases the pending notices (<code>5000NOTEMP</code> → <code>1000NOTEMP</code>) of the <strong>✅ Complete</strong> accounts only, on bills still invoicing (<code>ESTFAC0012</code>). The account list is re-checked live right before generating; checked complete accounts are used if any, otherwise every complete account in the scan.</p>
+          <p class="hint-text">Releases the pending notices (<code>5000NOTEMP / 5002NOTEMP</code> → <code>1000NOTEMP</code>) of the <strong>✅ Complete</strong> accounts only, on bills still invoicing (<code>ESTFAC0012</code>). The account list is re-checked live right before generating; checked complete accounts are used if any, otherwise every complete account in the scan.</p>
           <div class="key-panel-row" style="margin:10px 0;flex-wrap:wrap;">
             <label class="field-label">Program</label>
             <input class="text-input text-input-sm" data-rel-program value="VALIDATION RELEASE_TERMINATED" style="width:250px;" />
@@ -2828,7 +2832,7 @@
         <p class="page-subtitle" style="margin:-6px 0 14px;">Finds accounts whose total contracted-service count (every non-deleted status) exactly matches their still-invoicing cycle-bill count for one billing period — nothing's missing, so that period's billing is already complete.</p>
 
         <div class="biss-info-banner">
-          ℹ️ <strong>How this works.</strong> For each account with a pending notice (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP, "For validation") on a bill still "En proceso de puesta al cobro" (ESTFAC0012) — same gate Case 1 and Case 2 use — counts ALL its contracted services (Active/Vigente, Suspended/Suspendido, "Baja pendiente de facturar", and Terminated/Baja) and compares that to how many of its cycle bills (BILL_TYPE = TFGEN00001) are still invoicing for ONE billing period. A row here means those two counts are <strong>exactly equal</strong> — every service already has its bill issuing for that period. <strong>With Active Contract</strong> is <strong>YES</strong> when the account still has at least one non-Terminated service, <strong>NO</strong> when every service is already Terminated.
+          ℹ️ <strong>How this works.</strong> For each account with a pending notice (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP / 5002NOTEMP, "For validation") on a bill still "En proceso de puesta al cobro" (ESTFAC0012) — same gate Case 1 and Case 2 use — counts ALL its contracted services (Active/Vigente, Suspended/Suspendido, "Baja pendiente de facturar", and Terminated/Baja) and compares that to how many of its cycle bills (BILL_TYPE = TFGEN00001) are still invoicing for ONE billing period. A row here means those two counts are <strong>exactly equal</strong> — every service already has its bill issuing for that period. <strong>With Active Contract</strong> is <strong>YES</strong> when the account still has at least one non-Terminated service, <strong>NO</strong> when every service is already Terminated.
         </div>
 
         <div class="card">
@@ -2890,7 +2894,7 @@
 
         <div class="card biss-rel-card" data-biss-rel="case3">
           <div class="card-header"><h2>Release Script — Complete Accounts</h2></div>
-          <p class="hint-text">Releases the pending notices (<code>5000NOTEMP</code> → <code>1000NOTEMP</code>) of the complete accounts on bills still invoicing (<code>ESTFAC0012</code>). The account list is re-checked live right before generating, using the current Year / Billing period / With Active Contract filters; a search narrows it to the visible accounts.</p>
+          <p class="hint-text">Releases the pending notices (<code>5000NOTEMP / 5002NOTEMP</code> → <code>1000NOTEMP</code>) of the complete accounts on bills still invoicing (<code>ESTFAC0012</code>). The account list is re-checked live right before generating, using the current Year / Billing period / With Active Contract filters; a search narrows it to the visible accounts.</p>
           <div class="key-panel-row" style="margin:10px 0;flex-wrap:wrap;">
             <label class="field-label">Program</label>
             <input class="text-input text-input-sm" data-rel-program value="VALIDATION RELEASE_TERMINATED" style="width:250px;" />
@@ -2912,7 +2916,7 @@
         <p class="page-subtitle" style="margin:-6px 0 14px;">Every account pending validation that Case 1, Case 2, and Case 3 all left unexplained — the accounts nobody's rule has caught yet, for manual review.</p>
 
         <div class="biss-info-banner">
-          ℹ️ <strong>How this works.</strong> Starts from the same "pending validation" gate every other Case uses (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP, on a bill still "En proceso de puesta al cobro" / ESTFAC0012), then calls Case 1, Case 2, and Case 3's own detection logic directly and excludes any account they already flag. What's left is <strong>Unclassified</strong> — accounts with something pending review that none of the other Cases currently explain. This list automatically stays correct as Case 1/2/3's own rules change, and will keep excluding any future Case added later.
+          ℹ️ <strong>How this works.</strong> Starts from the same "pending validation" gate every other Case uses (GCCOM_NOTICE_TMP, COD_STATUS = 5000NOTEMP / 5002NOTEMP, on a bill still "En proceso de puesta al cobro" / ESTFAC0012), then calls Case 1, Case 2, and Case 3's own detection logic directly and excludes any account they already flag. What's left is <strong>Unclassified</strong> — accounts with something pending review that none of the other Cases currently explain. This list automatically stays correct as Case 1/2/3's own rules change, and will keep excluding any future Case added later.
         </div>
 
         <div class="card">
@@ -2951,6 +2955,88 @@
           </div>
         </div>
         </div><!-- /biss-subpage: case4 -->
+
+        <!-- RJ 2026-11-08: Case 5 - Temp Stop PCAL (5002NOTEMP) analysis, rendered by biss_pcal.js -->
+        <div class="da-subpage" data-biss-sub="case5">
+        <p class="page-subtitle" style="margin:-6px 0 14px;">Every account with a <strong>5002NOTEMP "Temp Stop PCAL"</strong> notice on a bill still Invoicing (ESTFAC0012), with what looks wrong on each. Read only.</p>
+        <div class="biss-info-banner">
+          ℹ️ <strong>What we found.</strong> 5002NOTEMP was set by the bill batch only on bills created 22 Oct - 3 Nov, and it holds the <em>whole account</em>. Most held accounts are commercial (E-C1 + Rate) or <strong>Rate only</strong> (the account's only contracted service is the Rate - no electricity / water). Amounts vs last month are normal for most bills, so this is not a general calculation error. Each account gets one <strong>main issue</strong> from the checks (first match): also pending validation, service not active, rate only, zero/negative amount, amount jump vs previous bill, no previous bill, duplicate active service, PCAL contract change, estimated reading - or <em>no data issue found</em>.
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h2>Temp Stop PCAL accounts</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="bis5-detect-btn">🔍 Scan Case 5</button>
+              <button type="button" class="btn btn-pill" id="bis5-export-btn" hidden>⬇ Export filtered CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="bis5-summary">Click Scan (about 25 s).</div>
+          <div class="kpi-row" id="bis5-kpi-row" style="margin:18px 0 4px;"></div>
+          <div id="bis5-issues" class="bis5-issues"></div>
+          <div class="key-panel-row" style="margin:10px 0 0;gap:16px;flex-wrap:wrap;align-items:center;">
+            <input type="text" id="bis5-search" class="text-input text-input-sm" placeholder="Search account #..." style="width:200px;" />
+            <select id="bis5-seg" class="text-input text-input-sm"><option value="">All segments</option></select>
+            <select id="bis5-check" class="text-input text-input-sm"><option value="">Any check</option></select>
+            <select id="bis5-ready" class="text-input text-input-sm" title="Can be released = every billable service of the account has its bill for the period (Invoicing or Invoiced)">
+              <option value="">Release: all</option>
+              <option value="ready">✅ Can be released (services complete)</option>
+              <option value="clean">✨ Can be released + no data issue</option>
+              <option value="not">❌ Services incomplete</option>
+            </select>
+            <button type="button" class="btn btn-pill-sm" id="bis5-clear">✕ Clear filters</button>
+            <span class="hint-text" id="bis5-filtered-count"></span>
+          </div>
+          <div class="grid-wrap" style="margin-top:12px;">
+            <table class="data-grid" id="bis5-table">
+              <thead><tr><th>Account</th><th>Can be released</th><th>Services billed</th><th>Segment</th><th>Main issue</th><th>Checks</th><th>Tariffs</th><th>Bills</th><th>Bill amount</th><th>Billing period</th><th>Notice date</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="key-panel-row" style="margin-top:10px;gap:10px;justify-content:flex-end;align-items:center;">
+            <button type="button" class="btn btn-pill-sm" id="bis5-prev">◀ Prev</button>
+            <span class="hint-text" id="bis5-page"></span>
+            <button type="button" class="btn btn-pill-sm" id="bis5-next">Next ▶</button>
+          </div>
+        </div>
+        <!-- RJ 2026-11-08: release script for ready accounts (shown, never executed) -->
+        <div class="card">
+          <div class="card-header"><h2>Release script</h2>
+            <div class="card-header-actions"><button type="button" class="btn btn-pill" id="bis5-release-btn" hidden>🔓 Generate release script</button></div>
+          </div>
+          <p class="hint-text">Releases the held notices (<code>5002NOTEMP</code> / <code>5000NOTEMP</code> → <code>1000NOTEMP</code>) on Invoicing bills of the <strong>✅ ready</strong> accounts in the current view (use the filters to narrow, e.g. "Can be released + no data issue"). The accounts are re-checked live right before generating; any that are no longer complete are left out.</p>
+          <div id="bis5-release-wrap" hidden>
+            <div class="hint-text" id="bis5-release-info"></div>
+            <div class="key-panel-row" style="gap:8px;margin:8px 0;">
+              <button type="button" class="btn btn-pill-sm" id="bis5-copy-btn">📋 Copy</button>
+              <button type="button" class="btn btn-pill-sm" id="bis5-download-btn">⬇ Download .sql</button>
+            </div>
+            <pre class="script-output" id="bis5-release-out"></pre>
+          </div>
+        </div>
+        <style>
+          .bis5-issues { margin: 14px 0 4px; display: flex; flex-direction: column; gap: 6px; }
+          .bis5-bar { display: grid; grid-template-columns: minmax(200px, 380px) 1fr 120px; gap: 10px; align-items: center; cursor: pointer; padding: 4px 6px; border-radius: 8px; }
+          .bis5-bar:hover { background: color-mix(in srgb, var(--c) 10%, transparent); }
+          .bis5-bar.is-on { background: color-mix(in srgb, var(--c) 16%, transparent); box-shadow: inset 0 0 0 1px var(--c); }
+          .bis5-bar.is-dim { opacity: .45; }
+          .bis5-bar-name { font-size: 13px; font-weight: 600; }
+          .bis5-bar-track { height: 10px; border-radius: 999px; background: color-mix(in srgb, var(--c) 14%, transparent); overflow: hidden; }
+          .bis5-bar-track > span { display: block; height: 100%; background: var(--c); border-radius: 999px; }
+          .bis5-bar-val { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+          .bis5-bar-val small { font-weight: 500; opacity: .7; }
+          .bis5-flag { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; margin-right: 4px; cursor: help;
+            border-radius: 6px; background: color-mix(in srgb, var(--c) 16%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 45%, transparent); }
+          /* RJ 2026-11-08: coloured main issue + clickable KPI cards */
+          .bis5-issue-pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; white-space: nowrap;
+            color: var(--c); background: color-mix(in srgb, var(--c) 14%, transparent); border: 1px solid color-mix(in srgb, var(--c) 45%, transparent); }
+          .bis5-kpi { border-top: 3px solid var(--k); }
+          .bis5-kpi.kpi-card-clickable { cursor: pointer; }
+          .bis5-kpi.is-active { box-shadow: 0 0 0 2px var(--k); background: color-mix(in srgb, var(--k) 10%, var(--card-bg, #fff)); }
+          .bis5-kpi.is-dim { opacity: .55; }
+          .bis5-kpi .kpi-value { color: var(--k); }
+        </style>
+        </div><!-- /biss-subpage: case5 -->
+
       </section>
 
       <!-- ===== Incorrect Billing Period page ===== -->
@@ -3194,6 +3280,78 @@
         </div>
 
         <div id="as-root" class="as-root" aria-live="polite"></div>
+      </section>
+
+      <!-- ===== SR Quick FIX (RJ 2026-11-09) - srquickfix.js =====
+           "create new menu, SR Quick FIX. on the first tab, lets add SR INCORRECT BILLING PERIOD" -->
+      <section class="page" id="page-srquickfix">
+        <header class="page-header">
+          <h1>SR Quick FIX</h1>
+          <p class="page-subtitle">Quick correction scripts for service requests. Scripts are shown only - never executed.</p>
+        </header>
+        <nav class="da-subnav" aria-label="SR Quick FIX functions">
+          <button type="button" class="da-subnav-btn is-active" data-srq-sub="incbp">SR Incorrect Billing Period</button>
+        </nav>
+
+        <div class="da-subpage is-active" data-srq-sub="incbp">
+          <div class="biss-info-banner">
+            ℹ️ Enter the account(s) from the SR. The scan lists every <strong>Sent to bill (6000STSRED)</strong> electricity / water reading
+            of the account; the ones with <strong>VALUE lower than PREV_VALUE</strong> are pre-selected. The script sets the reading to
+            <strong>Billed (7000STSRED)</strong> with VALUE = PREV_VALUE and zero usage, resolves its open anomalies (ESTAN00001 → ESTAN00005)
+            and cancels its anomalous item-to-bills (STTOBILL00 → STTOBILL04). A water reading is linked to the <strong>water and the sanitary</strong>
+            item-to-bill, so sanitary is fixed too. ⚠ = lower value but positive usage (meter rollover - not pre-selected).
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <h2>Readings of the account</h2>
+              <div class="card-header-actions">
+                <button type="button" class="btn btn-pill" id="srq-detect-btn">🔍 Scan account(s)</button>
+                <button type="button" class="btn btn-pill" id="srq-all-btn" title="System-wide: every sent-to-bill electricity / water reading lower than the previous one">🌐 All candidates</button>
+              </div>
+            </div>
+            <div class="key-panel-row" style="gap:12px;flex-wrap:wrap;align-items:flex-end;">
+              <label class="field" style="flex:1 1 320px;"><span class="hint-text">Account(s) - one per line or comma separated</span>
+                <textarea id="srq-accounts" class="text-input" rows="2" placeholder="e.g. 1049653825"></textarea></label>
+              <label class="field"><span class="hint-text">Billing period &gt;</span>
+                <input type="number" id="srq-floor" class="text-input text-input-sm" value="10000000230" style="width:150px;" /></label>
+            </div>
+            <div class="hint-text" id="srq-summary" style="margin-top:10px;">Enter an account and click Scan, or click All candidates.</div>
+            <div class="kpi-row" id="srq-kpi-row" style="margin:14px 0 4px;"></div>
+            <div class="key-panel-row" style="margin:10px 0 0;gap:16px;flex-wrap:wrap;align-items:center;">
+              <label class="hint-text"><input type="checkbox" id="srq-only-lower" checked /> Only readings lower than previous</label>
+              <input type="text" id="srq-search" class="text-input text-input-sm" placeholder="Search account / NISS / reading..." style="width:240px;" />
+              <span class="hint-text" id="srq-filtered-count"></span>
+            </div>
+            <div class="grid-wrap" style="margin-top:12px;">
+              <table class="data-grid" id="srq-table">
+                <thead><tr><th><input type="checkbox" id="srq-check-all" title="Select all shown" /></th><th>Account</th><th>NISS</th><th>Service</th><th>Reading</th><th>Billing period</th>
+                  <th>Prev date → Date</th><th>Prev value</th><th>Value</th><th>Reading usage</th><th>Ready usage</th><th>Item-to-bills (status · open anomalies)</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header"><h2>Update script</h2>
+              <div class="card-header-actions"><button type="button" class="btn btn-pill" id="srq-gen-btn" disabled>🛠 Generate script</button></div>
+            </div>
+            <div class="key-panel-row" style="gap:12px;flex-wrap:wrap;align-items:flex-end;">
+              <label class="field"><span class="hint-text">JIRA / UPDATE_PROGRAM</span><input type="text" id="srq-program" class="text-input text-input-sm" value="INC_BP" style="width:160px;" /></label>
+              <label class="field"><span class="hint-text">UPDATE_USER</span><input type="text" id="srq-user" class="text-input text-input-sm" value="RMA" style="width:110px;" /></label>
+              <label class="hint-text"><input type="checkbox" id="srq-clean" /> Clean script (no comments)</label>
+            </div>
+            <div id="srq-out-wrap" hidden style="margin-top:10px;">
+              <div class="hint-text" id="srq-out-info"></div>
+              <div class="key-panel-row" style="gap:8px;margin:8px 0;">
+                <button type="button" class="btn btn-pill-sm" id="srq-copy-btn">📋 Copy</button>
+                <button type="button" class="btn btn-pill-sm" id="srq-download-btn">⬇ Download .sql</button>
+                <button type="button" class="btn btn-pill-sm" id="srq-rb-copy-btn">📋 Copy rollback</button>
+                <button type="button" class="btn btn-pill-sm" id="srq-rb-download-btn">⬇ Download rollback</button>
+              </div>
+              <pre class="script-output" id="srq-out"></pre>
+              <details style="margin-top:8px;"><summary class="hint-text">Rollback script</summary><pre class="script-output" id="srq-rb-out"></pre></details>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- ===== Billing Statistics page (RJ 2026-11-04) - rendered by billingstats.js =====
@@ -3564,6 +3722,9 @@
   <script src="/app.js"></script>
   <script src="/anomstats.js"></script>
   <script src="/billingstats.js"></script><!-- RJ 2026-11-04 Billing Statistics -->
+  <script src="/fbc_idle.js"></script><!-- RJ 2026-11-08 FIX BILLING idle background refresh -->
+  <script src="/biss_pcal.js"></script><!-- RJ 2026-11-08 Bill Issuance Case 5 - Temp Stop PCAL -->
+  <script src="/srquickfix.js"></script><!-- RJ 2026-11-09 SR Quick FIX -->
   <script src="/docs-content.js"></script>
   <script src="/docs-queries.js"></script>
   <script src="/docs.js"></script>
