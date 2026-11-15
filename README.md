@@ -3362,6 +3362,57 @@ the following and we expect it will affect sanitary also, JIRA update program wi
   (editor; re-scans live and keeps only readings still Sent to bill). Menu id `srquickfix`,
   page `srquickfix.js`, Overview card `srquickfix_incbp` (system-wide candidates, in the digest).
 - Python change - restart needed, then Ctrl+F5.
+- RJ 2026-11-12: "we need to make sure that the reading is anomalous in GCCOM_ANOMALOUS or
+  RE_ANOMALOUS and the anomaly has id_SERVREQ to be qualified on this and the anomaly is incorrect
+  billing period":
+  - Live schema: `GCCOM_ANOMALOUS.ID_SERVREQ` and `GCGT_RE_ANOMALOUS.ID_SERVREQ` both exist. Billing
+    anomaly type = `ID_PRINCIPAL_ANOMALY` -> `GCCOM_BILL_ANOMALY_COMPANY`; "Incorrect billing period"
+    = `ANOMALY_COD = 'ERRPERIOD'`. Reading anomalies (reading -> `GCGT_RE_ANOMALY.ID_READING` ->
+    `GCGT_RE_ANOMALOUS`, type via `GCGT_RE_ANOMALY_PARAM` -> `GCGT_RE_ANOMALY_MASTER`) have **no**
+    incorrect-billing-period code; the SR-linked ones on these readings are 3300ANMCOD "Lower reading
+    than the previous one" / 2800ANMCOD "Reading period very short".
+  - `sr_quick_fix.build_sr_anomalies_query` lists every SR-linked anomaly of the readings from both
+    tables (type, status, SR code / type / status). A reading **qualifies** when one of them is an
+    ERRPERIOD billing anomaly with ID_SERVREQ (`is_qualifying`; `RE_QUALIFYING_CODES` is empty until a
+    reading-anomaly code is named). Pre-selected = qualified + lower than previous + not a rollover.
+    Non-qualified readings are greyed out and cannot be ticked; `/generate` drops them server-side.
+  - Live (system-wide lower-than-previous, 147 readings): 8 readings qualify - all ERRPERIOD
+    ESTAN00001 on SRs of type "Change of Tenant (Backdated)" (SREQTYP205), each also with an SR-linked
+    3300ANMCOD reading anomaly on the same SR. Reading 1049334074 (earlier example) has no SR-linked
+    anomaly, so it no longer qualifies.
+  - New column "SR anomalies (qualifies?)", KPIs Lower than previous / Qualified / Lower but not
+    qualified; the script comment shows the SR code. Overview card = qualified count.
+  - Python change - restart needed, then Ctrl+F5.
+- RJ 2026-11-12 (later): "no need for re anomaly, i want you to display the SR and the type of SR and
+  status also only unresolved SR":
+  - Reading anomalies (GCGT_RE_ANOMALOUS) removed. `build_sr_anomalies_query` now returns only
+    ERRPERIOD `GCCOM_ANOMALOUS` rows whose SR is **unresolved** - status not in
+    `SR_RESOLVED_STATUSES` = SREQSTA003 Solved, SREQSTA004 Cancelled, SREQSTA203 End not applicable,
+    SREQSTA207 Resolved final, SREQSTA208 Resolved, reject rebill (live `GCCOM_SERVREQUEST_STATUS`).
+    SR type / status in English via `GCCOM_SERVREQUEST_TYPE` / `GCCOM_SERVREQUEST_STATUS` + GCTS_DICTIONARY.
+  - Table columns **SR** (SR_CODE; hover = ID_SERVREQ, created date, anomaly ids), **SR type**,
+    **SR status** (one line per distinct SR).
+  - Live: the same 8 readings qualify, 6 SRs, all "Change of Tenant (Backdated)" in status
+    "Move Out Billing" (SREQSTA018). ~1.3 s.
+  - Python change - restart needed, then Ctrl+F5.
+- RJ 2026-11-12 (later): "we only need the one with SR, the rest remove, also I am expecting 1 SR only
+  for each account, if there are multiple sector supply involve, add it as a sub data":
+  - Only qualified readings are returned (`/detect` drops the rest; `scanned_count` = how many sent-to-bill
+    readings were looked at).
+  - **Account fix found live:** the old account -> contracted service -> sector supply -> reading join put
+    a reading under every account that ever had a contract on that supply (change of tenant: the 8
+    readings showed under 65 accounts). `build_readings_query` is now driven by the anomaly: reading ->
+    ERRPERIOD anomaly on an unresolved SR -> `AN.ID_BILLING_SERVICE` -> contracted service -> payment form
+    = the account. The reading's own service (1 / 19) comes from the account's contract on the reading's
+    supply (OUTER APPLY). SR details are matched to that same account. Result: 8 readings, 6 accounts,
+    exactly 1 SR each; 2 accounts have 2 sector supplies (electricity + water).
+  - The SR readings are VALUE 0 with a wrap-around usage (e.g. 67056 -> 0, usage 932944), so the earlier
+    "rollover" exclusion is dropped: every qualified reading lower than previous is pre-selected.
+  - UI: one row per account (SR, SR type, SR status, supplies / readings / selected; account checkbox
+    selects all its readings; ⚠ if more than 1 SR). ▸ opens the sector supplies (NISS + service) with
+    their readings as sub rows. KPIs: Accounts with SR, SRs, Sector supplies, Readings, Lower than
+    previous, With sanitary, Accounts with >1 SR, Selected. Overview card = accounts with an SR.
+  - Python change - restart needed, then Ctrl+F5.
 
 ### Billing Statistics: tab 2 "Operations" (2026-11-04)
 

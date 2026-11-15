@@ -1475,7 +1475,7 @@ _OVERVIEW_COUNTERS = {
     "billissuance_case5": lambda conn, user: bill_issuance_case5_detect(user=user)["account_count"],
     # RJ 2026-11-09: SR Quick FIX headline = system-wide candidate readings (sent to bill,
     # VALUE < PREV_VALUE, not a rollover) - the page's "All candidates" scan.
-    "srquickfix_incbp": lambda conn, user: sr_inc_bp_detect(None, user=user)["candidate_count"],
+    "srquickfix_incbp": lambda conn, user: sr_inc_bp_detect(None, user=user)["account_count"],  # RJ 2026-11-12: accounts with an unresolved SR
     "billingstats": lambda conn, user: sum(int(str(r.get("accounts") or 0).replace(",", "") or 0)
                                            for r in billing_stats_detect(BillingStatsRequest(), user=user)["rows"]
                                            if "ESTFAC0005" in str(r.get("statuses") or "").split("|")),
@@ -4898,7 +4898,19 @@ def _sr_inc_bp_scan(conn, accounts: list[str], period_floor) -> tuple[list[dict]
         ms += ires.elapsed_ms
         for it in _row_dicts(ires):
             items.setdefault(str(it.get("id_reading")), []).append(it)
+    # RJ 2026-11-12: qualified only with an SR-linked "Incorrect billing period" anomaly
+    anoms: dict[str, list[dict]] = {}
+    for s in range(0, len(ids), 1000):
+        ares = mssql.run_query(conn, sr_quick_fix.build_sr_anomalies_query(ids[s:s + 1000]))
+        ms += ares.elapsed_ms
+        for a in _row_dicts(ares):
+            a["qualifying"] = sr_quick_fix.is_qualifying(a)
+            anoms.setdefault(str(a.get("id_reading")), []).append(a)
     for r in rows:
+        # only the SR anomalies of THIS account (the anomaly's own payment form)
+        r["sr_anomalies"] = [a for a in anoms.get(str(r.get("id_reading")), []) if str(a.get("account")) == str(r.get("account"))]
+        r["qualified"] = any(a["qualifying"] for a in r["sr_anomalies"])
+        r["sr_codes"] = sorted({str(a.get("sr_code")) for a in r["sr_anomalies"] if a["qualifying"] and a.get("sr_code")})
         its = items.get(str(r.get("id_reading")), [])
         r["items"] = its
         r["lower_than_prev"] = str(r.get("lower_than_prev")) == "1"
@@ -4911,7 +4923,9 @@ def _sr_inc_bp_scan(conn, accounts: list[str], period_floor) -> tuple[list[dict]
         r["has_sanitary"] = any(str(i.get("id_offered_service")) == "190" for i in its)
         r["shared_itb"] = max([int(str(i.get("shared_readings") or 0).replace(",", "") or 0) for i in its] or [0])
         r["open_anomalies"] = sum(int(str(i.get("open_anomalies") or 0).replace(",", "") or 0) for i in its)
-        r["candidate"] = r["lower_than_prev"] and not r["rollover"]
+        # RJ 2026-11-12: the SR cases are VALUE 0 with a wrap-around usage (e.g. prev 67056 -> 0,
+        # usage 932944), so a positive usage is NOT a reason to skip once the SR qualifies it.
+        r["candidate"] = r["lower_than_prev"] and r["qualified"]
     return rows, ms
 
 
@@ -4926,13 +4940,40 @@ def sr_inc_bp_detect(body: Optional[SrIncBpDetectRequest] = None, user: str = De
         rows, ms = _sr_inc_bp_scan(conn, accounts, body.period_floor)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    scanned = len(rows)
+    # RJ 2026-11-12: "we only need the one with SR, the rest remove" - only qualified readings
+    # (Incorrect billing period anomaly on an unresolved SR) are returned.
+    rows = [r for r in rows if r["qualified"]]
+    # "I am expecting 1 SR only for each account, if there are multiple sector supply involved,
+    # add it as a sub data" - one group per account (its SR(s)), sector supplies as sub rows.
+    groups: dict[str, dict] = {}
+    for r in rows:
+        g = groups.setdefault(str(r.get("account")), {"account": r.get("account"), "srs": {}, "supplies": {}})
+        for a in r["sr_anomalies"]:
+            g["srs"].setdefault(str(a.get("id_servreq")), {
+                k: a.get(k) for k in ("id_servreq", "sr_code", "servreq_type", "servreq_type_desc",
+                                      "servreq_status", "servreq_status_desc", "creation_sr_date")})
+        sup = g["supplies"].setdefault(str(r.get("niss")), {"niss": r.get("niss"), "service_desc": r.get("service_desc"),
+                                                             "id_offered_service": r.get("id_offered_service"), "readings": []})
+        sup["readings"].append(r)
+    acc_groups = []
+    for g in groups.values():
+        g["srs"] = list(g["srs"].values())
+        g["supplies"] = list(g["supplies"].values())
+        g["multi_sr"] = len(g["srs"]) > 1
+        acc_groups.append(g)
     found = {str(r.get("account")) for r in rows}
     return {
-        "rows": rows, "count": len(rows), "accounts": accounts,
+        "rows": rows, "groups": acc_groups, "count": len(rows), "scanned_count": scanned, "accounts": accounts,
         "missing_accounts": [a for a in accounts if a not in found],
         "candidate_count": sum(1 for r in rows if r["candidate"]),
-        "account_count": len({r.get("account") for r in rows if r["candidate"]}),
-        "sanitary_count": sum(1 for r in rows if r["candidate"] and r["has_sanitary"]),
+        "lower_count": sum(1 for r in rows if r["lower_than_prev"]),
+        "qualified_count": len(rows),
+        "account_count": len(acc_groups),
+        "sr_count": len({a.get("id_servreq") for r in rows for a in r["sr_anomalies"]}),
+        "multi_sr_accounts": [g["account"] for g in acc_groups if g["multi_sr"]],
+        "supply_count": sum(len(g["supplies"]) for g in acc_groups),
+        "sanitary_count": sum(1 for r in rows if r["has_sanitary"]),
         "rollover_count": sum(1 for r in rows if r["rollover"]),
         "elapsed_ms": ms, "scope": "accounts" if accounts else "all",
     }
@@ -4960,9 +5001,11 @@ def sr_inc_bp_generate(body: SrIncBpGenerateRequest, user: str = Depends(require
         rows, _ms = _sr_inc_bp_scan(conn, sr_quick_fix.clean_accounts(body.accounts), body.period_floor)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    selected = [r for r in rows if str(r.get("id_reading")) in scope]
+    # RJ 2026-11-12: only readings with an SR-linked Incorrect billing period anomaly qualify
+    selected = [r for r in rows if str(r.get("id_reading")) in scope and r["qualified"]]
     if not selected:
-        raise HTTPException(status_code=400, detail="None of the selected readings are still Sent to bill - re-scan.")
+        raise HTTPException(status_code=400, detail="None of the selected readings qualify (still Sent to bill with an SR-linked "
+                                                    "Incorrect billing period anomaly) - re-scan.")
     program = body.program.strip() or sr_quick_fix.DEFAULT_PROGRAM
     audit_user = body.audit_user.strip() or sr_quick_fix.DEFAULT_USER
     sql_text = sr_quick_fix.build_fix_script(selected, program=program, user=audit_user, clean=body.clean)

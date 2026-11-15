@@ -597,7 +597,7 @@ const OVERVIEW_CARDS = [
   {
     // RJ 2026-11-09: SR Quick FIX - system-wide sent-to-bill readings lower than previous
     key: "srquickfix_incbp", icon: "🛠️", label: "SR Incorrect Billing Period", color: "#ef4444",
-    desc: "Sent-to-bill electricity / water readings lower than the previous reading.",
+    desc: "Accounts with sent-to-bill readings lower than previous and an Incorrect billing period anomaly on an unresolved SR.",
     page: "srquickfix", subAttr: "data-srq-sub", subValue: "incbp", group: "SR Quick FIX",
   },
   {

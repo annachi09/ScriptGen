@@ -86,26 +86,43 @@ def build_readings_query(accounts: list[str] | None, period_floor: int | None = 
     LOWER_THAN_PREV = 1 when VALUE < PREV_VALUE (the usual SR incorrect billing period case).
     No accounts = system-wide scan of the candidates only (VALUE < PREV_VALUE) - the
     "All candidates" button and the Overview card."""
+    # RJ 2026-11-12 ("we only need the one with SR ... 1 SR only for each account"): driven by the
+    # SR anomaly. Found live: joining account -> contracted service -> sector supply -> readings
+    # put the same reading under every account that ever had a contract on that supply (8 readings
+    # showed under 65 accounts after a change of tenant). The account is now the one the
+    # Incorrect billing period anomaly belongs to (AN.ID_BILLING_SERVICE -> contracted service ->
+    # payment form): 8 readings -> 6 accounts -> 1 SR each.
     if accounts:
         acc_where = "PF.REFERENCE IN (" + ", ".join(format_sql_literal(a) for a in accounts) + ")"
     else:
         acc_where = "RR.VALUE < RR.PREV_VALUE"
     floor = f"\n  AND RR.ID_BILLING_PERIOD > {int(period_floor)}" if period_floor else ""
     svc = ", ".join(str(s) for s in SERVICES)
+    closed = ", ".join(f"'{s}'" for s in SR_RESOLVED_STATUSES)
     return (
-        "SELECT DISTINCT PF.REFERENCE AS ACCOUNT, SS.NISS, CS.ID_OFFERED_SERVICE, OS.NAME_TYPE AS SERVICE_DESC,\n"
+        "SELECT DISTINCT PF.REFERENCE AS ACCOUNT, SS.NISS,\n"
+        "  COALESCE(RS.ID_OFFERED_SERVICE, CS.ID_OFFERED_SERVICE) AS ID_OFFERED_SERVICE, OS.NAME_TYPE AS SERVICE_DESC,\n"
         "  RR.ID_READING, RR.ID_BILLING_PERIOD, RR.READ_STATUS, RR.READING_TYPE,\n"
         "  RR.READING_PREV_DATE, RR.READING_DATE, RR.PREV_VALUE, RR.VALUE,\n"
         "  RR.READING_USAGE, RR.READY_USAGE, RR.CORRECTED_USAGE,\n"
         "  CASE WHEN RR.VALUE < RR.PREV_VALUE THEN 1 ELSE 0 END AS LOWER_THAN_PREV\n"
-        "FROM GCCOM_PAYMENT_FORM PF\n"
-        f"JOIN GCCOM_CONTRACTED_SERVICE CS ON CS.ID_PAYMENT_FORM = PF.ID_PAYMENT_FORM AND CS.ID_OFFERED_SERVICE IN ({svc})\n"
-        "JOIN GCCOM_SECTOR_SUPPLY SS ON SS.ID_SECTOR_SUPPLY = CS.ID_SECTOR_SUPPLY\n"
-        f"LEFT JOIN {OFFERED_TBL} OS ON OS.ID_OFFERED_SERVICE = CS.ID_OFFERED_SERVICE\n"
-        f"JOIN {READING_TBL} RR ON RR.ID_SECTOR_SUPPLY = CS.ID_SECTOR_SUPPLY\n"
+        f"FROM {READING_TBL} RR\n"
+        f"JOIN {RIT_TBL} RIT ON RIT.ID_READING = RR.ID_READING\n"
+        f"JOIN {ANOMALOUS_TBL} AN ON AN.ID_ITEM_TO_BILL = RIT.ID_ITEM_TO_BILL AND AN.ID_SERVREQ IS NOT NULL\n"
+        f"JOIN {BILL_ANOM_TYPE_TBL} G ON G.ID_BILL_ANOM_COMP = AN.ID_PRINCIPAL_ANOMALY AND G.ANOMALY_COD = '{INC_BP_BILL_CODE}'\n"
+        f"JOIN OUC_COMMON_ADMIN.GCCOM_SERVICE_REQUEST SR ON SR.ID_SERVREQ = AN.ID_SERVREQ AND SR.SERVREQ_STATUS NOT IN ({closed})\n"
+        "JOIN GCCOM_BILLING_SERVICE BS ON BS.ID_BILLING_SERVICE = AN.ID_BILLING_SERVICE\n"
+        "JOIN GCCOM_CONTRACTED_SERVICE CS ON CS.ID_CONTRACTED_SERVICE = BS.ID_CONTRACTED_SERVICE\n"
+        "JOIN GCCOM_PAYMENT_FORM PF ON PF.ID_PAYMENT_FORM = CS.ID_PAYMENT_FORM\n"
+        "JOIN GCCOM_SECTOR_SUPPLY SS ON SS.ID_SECTOR_SUPPLY = RR.ID_SECTOR_SUPPLY\n"
+        # the reading's own service (electricity / water) on this account; the anomaly may be the sanitary one
+        f"OUTER APPLY (SELECT TOP 1 C2.ID_OFFERED_SERVICE FROM GCCOM_CONTRACTED_SERVICE C2\n"
+        f"             WHERE C2.ID_SECTOR_SUPPLY = RR.ID_SECTOR_SUPPLY AND C2.ID_PAYMENT_FORM = CS.ID_PAYMENT_FORM\n"
+        f"               AND C2.ID_OFFERED_SERVICE IN ({svc})) RS\n"
+        f"LEFT JOIN {OFFERED_TBL} OS ON OS.ID_OFFERED_SERVICE = COALESCE(RS.ID_OFFERED_SERVICE, CS.ID_OFFERED_SERVICE)\n"
         f"WHERE {acc_where}\n"
         f"  AND RR.READ_STATUS = '{READ_SENT_TO_BILL}'{floor}\n"
-        "ORDER BY 1, 3, 5;"
+        "ORDER BY 1, 2, 5;"
     )
 
 
@@ -131,6 +148,57 @@ def build_items_query(reading_ids: list[int]) -> str:
     )
 
 
+# RJ 2026-11-12: "we need to make sure that the reading is anomalous in GCCOM_ANOMALOUS or
+# RE_ANOMALOUS and the anomaly has id_SERVREQ to be qualified on this and the anomaly is incorrect
+# billing period". Billing anomaly type = GCCOM_ANOMALOUS.ID_PRINCIPAL_ANOMALY ->
+# GCCOM_BILL_ANOMALY_COMPANY; "Incorrect billing period" = ANOMALY_COD 'ERRPERIOD'.
+#
+# RJ 2026-11-12 (later): "no need for re anomaly, i want you to display the SR and the type of SR
+# and status also only unresolved SR". So: GCCOM_ANOMALOUS only (ERRPERIOD + ID_SERVREQ), and the
+# SR must be unresolved. SR statuses live (GCCOM_SERVREQUEST_STATUS, EN): closed ones =
+# SREQSTA003 Solved, SREQSTA004 Cancelled, SREQSTA203 End not applicable, SREQSTA207 Resolved
+# final, SREQSTA208 Resolved, reject rebill (same set as Pending Service Request + 208).
+BILL_ANOM_TYPE_TBL = "GCCOM_BILL_ANOMALY_COMPANY"
+INC_BP_BILL_CODE = "ERRPERIOD"
+SR_RESOLVED_STATUSES = ("SREQSTA003", "SREQSTA004", "SREQSTA203", "SREQSTA207", "SREQSTA208")
+
+
+def build_sr_anomalies_query(reading_ids: list[int]) -> str:
+    """Incorrect billing period (ERRPERIOD) billing anomalies of the readings that are linked to an
+    UNRESOLVED service request, with the SR code, type and status (English descriptions)."""
+    ids = ", ".join(str(i) for i in reading_ids)
+    closed = ", ".join(f"'{s}'" for s in SR_RESOLVED_STATUSES)
+    return (
+        "SELECT DISTINCT RIT.ID_READING, AN.ID_ANOMALOUS, AN.ANOMALOUS_STATUS AS ANOM_STATUS,\n"
+        "  G.ANOMALY_COD AS ANOM_CODE, G.DESCRIPTION AS ANOM_DESC, AN.ID_SERVREQ,\n"
+        "  SR.SR_CODE, SR.SERVREQ_TYPE, TD.TEXT AS SERVREQ_TYPE_DESC,\n"
+        "  SR.SERVREQ_STATUS, SD.TEXT AS SERVREQ_STATUS_DESC, SR.CREATION_SR_DATE, PF.REFERENCE AS ACCOUNT\n"
+        f"FROM {RIT_TBL} RIT\n"
+        f"JOIN {ANOMALOUS_TBL} AN ON AN.ID_ITEM_TO_BILL = RIT.ID_ITEM_TO_BILL\n"
+        "JOIN GCCOM_BILLING_SERVICE BS ON BS.ID_BILLING_SERVICE = AN.ID_BILLING_SERVICE\n"
+        "JOIN GCCOM_CONTRACTED_SERVICE CS ON CS.ID_CONTRACTED_SERVICE = BS.ID_CONTRACTED_SERVICE\n"
+        "JOIN GCCOM_PAYMENT_FORM PF ON PF.ID_PAYMENT_FORM = CS.ID_PAYMENT_FORM\n"
+        f"JOIN {BILL_ANOM_TYPE_TBL} G ON G.ID_BILL_ANOM_COMP = AN.ID_PRINCIPAL_ANOMALY\n"
+        "JOIN OUC_COMMON_ADMIN.GCCOM_SERVICE_REQUEST SR ON SR.ID_SERVREQ = AN.ID_SERVREQ\n"
+        "LEFT JOIN OUC_COMMON_ADMIN.GCCOM_SERVREQUEST_TYPE T ON T.COD_DEVELOP = SR.SERVREQ_TYPE\n"
+        "LEFT JOIN GCTS_DICTIONARY TD ON TD.ID = T.NAME_TYPE_XI18N AND TD.LOCALE = 'EN'\n"
+        "LEFT JOIN OUC_ADMIN.GCCOM_SERVREQUEST_STATUS SS ON SS.COD_DEVELOP = SR.SERVREQ_STATUS\n"
+        "LEFT JOIN GCTS_DICTIONARY SD ON SD.ID = SS.NAME_TYPE_XI18N AND SD.LOCALE = 'EN'\n"
+        f"WHERE RIT.ID_READING IN ({ids})\n"
+        f"  AND G.ANOMALY_COD = '{INC_BP_BILL_CODE}'\n"
+        f"  AND SR.SERVREQ_STATUS NOT IN ({closed})\n"
+        "ORDER BY 1, 2;"
+    )
+
+
+def is_qualifying(anom: dict) -> bool:
+    """Every row of build_sr_anomalies_query qualifies (ERRPERIOD + unresolved SR); kept as a
+    guard in case a caller passes other rows."""
+    return (str(anom.get("anom_code") or "").strip() == INC_BP_BILL_CODE
+            and bool(str(anom.get("id_servreq") or "").strip())
+            and str(anom.get("servreq_status") or "") not in SR_RESOLVED_STATUSES)
+
+
 def _sub(id_list: str) -> str:
     return f"(SELECT ID_ITEM_TO_BILL FROM {RIT_TBL} WHERE ID_READING IN ({id_list}))"
 
@@ -149,7 +217,8 @@ def build_fix_script(readings: list[dict], *, program: str = DEFAULT_PROGRAM,
         for r in readings:
             parts.append(f"--   account {r.get('account')}  {r.get('service_desc') or r.get('id_offered_service')}"
                          f"  reading {r.get('id_reading')}  prev {r.get('prev_value')} -> value {r.get('value')}"
-                         f"  (usage {r.get('reading_usage')})  period {r.get('id_billing_period')}")
+                         f"  (usage {r.get('reading_usage')})  period {r.get('id_billing_period')}"
+                         + (f"  SR {', '.join(r.get('sr_codes') or [])}" if r.get("sr_codes") else ""))
         parts.append("-- Reading -> Billed with VALUE = PREV_VALUE and zero usage; its open anomalies -> resolved;"
                      "\n-- its anomalous item-to-bills (water reading = water + sanitary) -> cancelled.\n")
     for s in range(0, len(ids), CHUNK):

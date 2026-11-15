@@ -3296,10 +3296,14 @@
         <div class="da-subpage is-active" data-srq-sub="incbp">
           <div class="biss-info-banner">
             ℹ️ Enter the account(s) from the SR. The scan lists every <strong>Sent to bill (6000STSRED)</strong> electricity / water reading
-            of the account; the ones with <strong>VALUE lower than PREV_VALUE</strong> are pre-selected. The script sets the reading to
+            of the account. A reading <strong>qualifies</strong> only when it has an <strong>Incorrect billing period</strong> anomaly
+            (GCCOM_ANOMALOUS, ERRPERIOD) <strong>linked to an unresolved service request</strong> (ID_SERVREQ; SR not Solved / Cancelled /
+            End not applicable / Resolved final / Resolved reject rebill) - all other readings are left out. One row per
+            <strong>account with its SR</strong> (▸ opens its sector supplies and readings; an account with more than 1 SR is flagged ⚠).
+            Readings with <strong>VALUE lower than PREV_VALUE</strong> are pre-selected. The script sets the reading to
             <strong>Billed (7000STSRED)</strong> with VALUE = PREV_VALUE and zero usage, resolves its open anomalies (ESTAN00001 → ESTAN00005)
             and cancels its anomalous item-to-bills (STTOBILL00 → STTOBILL04). A water reading is linked to the <strong>water and the sanitary</strong>
-            item-to-bill, so sanitary is fixed too. ⚠ = lower value but positive usage (meter rollover - not pre-selected).
+            item-to-bill, so sanitary is fixed too.
           </div>
           <div class="card">
             <div class="card-header">
@@ -3318,14 +3322,14 @@
             <div class="hint-text" id="srq-summary" style="margin-top:10px;">Enter an account and click Scan, or click All candidates.</div>
             <div class="kpi-row" id="srq-kpi-row" style="margin:14px 0 4px;"></div>
             <div class="key-panel-row" style="margin:10px 0 0;gap:16px;flex-wrap:wrap;align-items:center;">
-              <label class="hint-text"><input type="checkbox" id="srq-only-lower" checked /> Only readings lower than previous</label>
-              <input type="text" id="srq-search" class="text-input text-input-sm" placeholder="Search account / NISS / reading..." style="width:240px;" />
+              <input type="text" id="srq-search" class="text-input text-input-sm" placeholder="Search account / SR / NISS / reading..." style="width:260px;" />
               <span class="hint-text" id="srq-filtered-count"></span>
             </div>
             <div class="grid-wrap" style="margin-top:12px;">
               <table class="data-grid" id="srq-table">
-                <thead><tr><th><input type="checkbox" id="srq-check-all" title="Select all shown" /></th><th>Account</th><th>NISS</th><th>Service</th><th>Reading</th><th>Billing period</th>
-                  <th>Prev date → Date</th><th>Prev value</th><th>Value</th><th>Reading usage</th><th>Ready usage</th><th>Item-to-bills (status · open anomalies)</th></tr></thead>
+                <thead><tr><th><input type="checkbox" id="srq-check-all" title="Select all shown" /></th><th>Account<br><small>↳ NISS / reading</small></th>
+                  <th>SR<br><small>billing period</small></th><th>SR type<br><small>prev date → date</small></th><th>SR status<br><small>prev value</small></th>
+                  <th>Value</th><th>Reading usage</th><th>Ready usage</th><th colspan="4">Item-to-bills (status · open anomalies)</th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
