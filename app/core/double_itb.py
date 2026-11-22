@@ -244,7 +244,12 @@ SELECT a.ID_ITEM_TO_BILL AS ANOM_ID, cs.ID_OFFERED_SERVICE AS ID_OFFERED_SERVICE
          WHERE an.ANOMALOUS_STATUS IN ({', '.join(format_sql_literal(s) for s in ANOMALOUS_OPEN_STATUSES)})
            AND an.ID_ITEM_TO_BILL IN (SELECT g.ID_ITEM_TO_BILL FROM GCCOM_ITEMS_TO_BILL g
                                       WHERE g.ID_BILLING_SERVICE = sk.SBS AND g.INI_DATE = sk.SINI AND g.END_DATE = sk.SEND
-                                        AND g.STATUS = {anomalous})) AS ANOM_STATES
+                                        AND g.STATUS = {anomalous})) AS ANOM_STATES,
+       -- RJ 2026-11-19 (Sanitary-only tab): the duplicate's OWN open anomalies (before-state for rollback)
+       (SELECT STRING_AGG(CAST(an2.ID_ANOMALOUS AS varchar(20)) + ':' + an2.ANOMALOUS_STATUS, ',')
+          FROM OUC_ADMIN.GCCOM_ANOMALOUS an2
+         WHERE an2.ID_ITEM_TO_BILL = a.ID_ITEM_TO_BILL
+           AND an2.ANOMALOUS_STATUS IN ({', '.join(format_sql_literal(s) for s in ANOMALOUS_OPEN_STATUSES)})) AS SELF_ANOM_STATES
 FROM GCCOM_ITEMS_TO_BILL a
 CROSS APPLY (
     SELECT TOP 1 b.ID_ITEM_TO_BILL, b.ID_BILL FROM GCCOM_ITEMS_TO_BILL b
@@ -298,6 +303,11 @@ def build_fix_script(rows: list[dict], *, user: str = FIX_USER_DEFAULT, program:
                  f"{r.get('billed_id')} / bill {r.get('billed_id_bill')}"]
         rb = [f"-- [{i}] ROLLBACK account {acct}, duplicate ITB {anom}"]
         is_water = str(r.get("id_offered_service") or "") == str(OFFERED_WATER)
+        # RJ 2026-11-19: "for double itb why we dont have update script for sanitary tab? we need do the same as
+        # what we have in water" - a Sanitary-only duplicate (water OK) gets the same treatment as the Sanitary
+        # side of a Water duplicate: ITB cancelled, its open GCCOM_ANOMALOUS cancelled, readings -> Billed,
+        # rebilling of its (Sanitary) billed bill when ready usage > 0.
+        is_sanitary = str(r.get("id_offered_service") or "") == str(OFFERED_SANITARY)
         san_ids = [x for x in str(r.get("san_anom_ids") or "").split(",") if x.strip().isdigit()]
         san_group = [x for x in str(r.get("san_group_ids") or "").split(",") if x.strip().isdigit()] or san_ids
         cancel_ids = [str(int(anom))]
@@ -360,6 +370,19 @@ def build_fix_script(rows: list[dict], *, user: str = FIX_USER_DEFAULT, program:
                 f"WHERE ID_ITEM_TO_BILL IN ({', '.join(str(int(x)) for x in san_group)}) "
                 f"AND ANOMALOUS_STATUS IN ({', '.join(format_sql_literal(s) for s in ANOMALOUS_OPEN_STATUSES)});",
             ]
+        if is_sanitary:
+            n_anom_items += 1
+            lines += [
+                f"-- Sanitary duplicate (water OK): cancel its own open anomalies (GCCOM_ANOMALOUS)",
+                f"UPDATE OUC_ADMIN.GCCOM_ANOMALOUS SET ANOMALOUS_STATUS = {format_sql_literal(ANOMALOUS_STATUS_CANCELLED)}, "
+                f"UPDATE_DATE = GETDATE(), UPDATE_USER = {u}, UPDATE_PROGRAM = {p} "
+                f"WHERE ID_ITEM_TO_BILL = {int(anom)} "
+                f"AND ANOMALOUS_STATUS IN ({', '.join(format_sql_literal(s) for s in ANOMALOUS_OPEN_STATUSES)});",
+            ]
+            for prev, ids_ in _parse_states(r.get("self_anom_states")).items():
+                rb.append(f"UPDATE OUC_ADMIN.GCCOM_ANOMALOUS SET ANOMALOUS_STATUS = {st(prev)}, UPDATE_DATE = GETDATE(), "
+                          f"UPDATE_USER = {u}, UPDATE_PROGRAM = {p} WHERE ID_ANOMALOUS IN ({', '.join(ids_)}) "
+                          f"AND ANOMALOUS_STATUS = {st(ANOMALOUS_STATUS_CANCELLED)};")
         reading_ids = [x for x in str(r.get("reading_ids") or "").split(",") if x.strip().isdigit()]
         if reading_ids:
             n_read += len(reading_ids)

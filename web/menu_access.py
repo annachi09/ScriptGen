@@ -54,7 +54,7 @@ from web.auth import ROLES, ROLE_ADMIN
 # these ARE the ids used everywhere (server config, the admin panel, and
 # the frontend's own nav-item lookup), so there's exactly one place
 # (here) that has to change if a page is ever added/renamed/removed.
-MENU_IDS = ("overview", "workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "readingvalidation", "tnbcycledisc", "wrongstuckhierarchy", "disconnectiontnb", "doubleitb", "wrongbill", "wrongbilledconsumption", "billissuance", "incorrectbillingperiod", "bulkchecker", "anomalystats", "rebillingmonitor", "pendingsr", "tempdashboard", "readingdiscrepancies", "fixbillingcampaign", "billingstats", "srquickfix", "documentation", "tools", "settings")
+MENU_IDS = ("overview", "workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "readingvalidation", "tnbcycledisc", "wrongstuckhierarchy", "disconnectiontnb", "doubleitb", "wrongbill", "wrongbilledconsumption", "billissuance", "incorrectbillingperiod", "bulkchecker", "anomalystats", "rebillingmonitor", "pendingsr", "tempdashboard", "readingdiscrepancies", "fixbillingcampaign", "billingstats", "srquickfix", "mptools", "documentation", "tools", "settings")
 
 MENU_LABELS = {
     "overview": "Overview",
@@ -63,26 +63,28 @@ MENU_LABELS = {
     "history": "History",
     "dashboard": "Dashboard",
     "ai": "AI Assist",
-    "dateanomaly": "DIFF DATES Anomaly",
+    # RJ 2026-11-18: labels renamed to one Title Case style (acronyms kept) - mirror of MENU_NAMES in navx.js
+    "dateanomaly": "Diff Dates Anomalies",
     "hierarchy": "Hierarchy Analysis",
-    "readingvalidation": "Reading Validation/Modif",
-    "tnbcycledisc": "TNB CYCLE/DISC Analysis",
-    "wrongstuckhierarchy": "Wrong Stuck in Hierarchy ITB",
-    "disconnectiontnb": "Disconnection TNB",
-    "doubleitb": "DOUBLE ITB",
-    "wrongbill": "Wrong Bill",
+    "readingvalidation": "Reading Validation",
+    "tnbcycledisc": "TNB Cycle & Disconnection",
+    "wrongstuckhierarchy": "Stuck Hierarchy ITBs",
+    "disconnectiontnb": "TNB Disconnections",
+    "doubleitb": "Double ITBs",
+    "wrongbill": "Wrong Bills",
     "wrongbilledconsumption": "Wrong Billed Consumption",
     "billissuance": "Bill Issuance Validator",
     "incorrectbillingperiod": "Incorrect Billing Period",
     "bulkchecker": "Bulk Checker",
-    "anomalystats": "Anomalies Statistics",
+    "anomalystats": "Anomaly Statistics",
     "rebillingmonitor": "Rebilling Monitor",
-    "pendingsr": "Pending Service Request",
+    "pendingsr": "Pending Service Requests",
     "tempdashboard": "Temp Dashboard",
     "readingdiscrepancies": "Reading Discrepancies",  # RJ 2026-10-13
-    "fixbillingcampaign": "FIX BILLING CAMPAIGN 2026",  # RJ 2026-10-18
+    "fixbillingcampaign": "Fix Billing Campaign 2026",  # RJ 2026-10-18
     "billingstats": "Billing Statistics",  # RJ 2026-11-04
-    "srquickfix": "SR Quick FIX",  # RJ 2026-11-09
+    "srquickfix": "SR Quick Fix",  # RJ 2026-11-09
+    "mptools": "MP Tools",  # RJ 2026-11-18
     "documentation": "Documentation",
     "tools": "Tools",
     "settings": "Settings",

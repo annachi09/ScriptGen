@@ -7,7 +7,9 @@
   <link rel="stylesheet" href="/styles.css" />
   <!-- RJ 2026-10-02 visual polish layer (same layout) - remove this line to go back to the previous look -->
   <link rel="stylesheet" href="/polish.css" />
-  <link rel="stylesheet" href="/billingstats.css" /><!-- RJ 2026-11-04 Billing Statistics -->
+  <link rel="stylesheet" href="/billingstats.css" />
+<!-- RJ 2026-11-04 Billing Statistics -->
+  <link rel="stylesheet" href="/navx.css" /><!-- RJ 2026-11-18 new sidebar + tab cards -->
 </head>
 <body>
 
@@ -153,6 +155,9 @@
         </button>
         <button class="nav-item" data-page="srquickfix" title="SR Quick FIX"><!-- RJ 2026-11-09 -->
           <span class="nav-icon">🛠️</span><span class="nav-label">SR Quick FIX</span>
+        </button>
+        <button class="nav-item" data-page="mptools" title="MP Tools"><!-- RJ 2026-11-18 -->
+          <span class="nav-icon">🔌</span><span class="nav-label">MP Tools</span>
         </button>
         <button class="nav-item" data-page="tempdashboard" title="Temp Dashboard">
           <span class="nav-icon">🧪</span><span class="nav-label">Temp Dashboard</span>
@@ -975,7 +980,8 @@
           </div>
           <p class="hint-text">Click a column header to sort. Click a row to highlight its reading chain (previous/next reading, per the reference mode above). Editable cells (Prev. Date, Reading Date, Reading Type, Prev. Value, Reading, Metered Usage, Corrected Usage, Bill Ready Usage) have a light-blue background — edit one, then Tab or click away to apply it; date/value edits automatically update the linked reading too.</p>
 
-          <div class="grid-wrap">
+          <!-- RJ 2026-11-17: own scroll box - headers + first column frozen, horizontal scrollbar always visible -->
+          <div class="grid-wrap rv-grid-wrap">
             <table class="data-grid" id="rv-table">
               <thead><tr></tr></thead>
               <tbody></tbody>
@@ -992,6 +998,7 @@
             <input id="rv-program" class="text-input text-input-sm" value="JIRAXXXX" style="width:200px;" />
             <label class="field-label">Audit user</label>
             <input id="rv-audit-user" class="text-input text-input-sm" value="RMA" style="width:100px;" />
+            <label class="hint-text" title="No comment lines in the script (RJ 2026-11-17)"><input type="checkbox" id="rv-clean" /> Clean script (no comments)</label>
             <button type="button" class="btn btn-primary" id="rv-generate-btn" disabled title="Edit a cell in the table above to enable Generate">📝 Generate Update Script</button>
             <button type="button" class="btn btn-pill-sm" id="rv-reset-edits-btn">↺ Reset edits</button>
           </div>
@@ -1680,6 +1687,42 @@
             <table class="data-grid" id="dsan-table"><thead><tr></tr></thead><tbody></tbody></table>
           </div>
         </div>
+        <!-- RJ 2026-11-19: "for double itb why we dont have update script for sanitary tab? we need do the same as what we have in water" -->
+        <div class="card">
+          <div class="card-header"><h2>Generate Fix Script</h2></div>
+          <p class="hint-text">Same fix as the Water &amp; Electricity tab, for the checked <strong>Sanitary</strong> duplicates:
+            (1) the duplicate Sanitary item to bill is cancelled - <code>STTOBILL00 → STTOBILL04</code>; (2) its open anomalies
+            (GCCOM_ANOMALOUS ESTAN00009 / 00001) are cancelled - <code>ESTAN00005</code>, like the Sanitary items of a Water duplicate;
+            (3) its readings go to Billed - <code>7000STSRED</code>; (4) if its ready usage is &gt; 0, a rebilling activity
+            (In process <code>ESTREF0002</code>, Massive substitutive <code>TIPREF0005</code>) is inserted for the bill of the Billed
+            Sanitary twin and that bill is set to Disputed (<code>ESTFAC0010</code>). Rollback included. The state is re-read
+            from the database right before generating.</p>
+          <div class="key-panel-row" style="margin:10px 0;flex-wrap:wrap;">
+            <label class="field-label">User</label>
+            <input id="dsan-user" class="text-input text-input-sm" value="RMA" style="width:90px;" />
+            <label class="field-label">Program</label>
+            <input id="dsan-program" class="text-input text-input-sm" value="DOUBLE_ITB_SAN" style="width:150px;" />
+            <label class="field-label" title="GCCOM_REBILLING_ACTIVITY.CREATION_USER">Creation user</label>
+            <input id="dsan-creation-user" class="text-input text-input-sm" value="10000008456" style="width:120px;" />
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="dsan-batch" checked /> Process rebilling by batch</label>
+            <label class="hint-text" style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="dsan-clean" /> Clean script (no comments)</label>
+            <button type="button" class="btn btn-primary" id="dsan-generate-btn" disabled>📝 Generate Fix Script</button>
+          </div>
+          <div class="hint-text" id="dsan-gen-summary"></div>
+          <div class="card-header-actions" style="margin-bottom:6px;">
+            <button type="button" class="btn btn-pill" id="dsan-copy-script-btn">📋 Copy</button>
+            <button type="button" class="btn btn-pill" id="dsan-download-btn">⬇ Download .sql</button>
+          </div>
+          <pre class="script-output" id="dsan-output">No fix script generated yet — Scan, check the rows, then Generate.</pre>
+          <details class="hx-hint" id="dsan-rollback-wrap" hidden style="margin-top:10px;">
+            <summary>↩ Rollback script (undo of the fix above)</summary>
+            <div class="card-header-actions" style="margin:6px 0;">
+              <button type="button" class="btn btn-pill" data-rb-copy="#dsan-rollback">📋 Copy rollback</button>
+              <button type="button" class="btn btn-pill" data-rb-download="#dsan-rollback" data-rb-name="double_itb_sanitary_fix_ROLLBACK.sql">⬇ Download rollback</button>
+            </div>
+            <pre class="script-output" id="dsan-rollback"></pre>
+          </details>
+        </div>
         </div>
       </section>
 
@@ -2177,6 +2220,12 @@
               <div class="fbc-wallet" id="fbc-wallet"></div>
             </div>
             <div class="rbo-kpis fbc-kpis" id="fbc-kpi-row"></div>
+
+            <!-- RJ 2026-11-17: "show the fix day in the details from the ewa subsidy wallet" -->
+            <section class="rbo-panel">
+              <header><h3>📅 Wallet payment day <small>(EWA_GCCOM_SUBSIDY_WALLET.FIXED_DAY)</small></h3><span class="rbo-sub" id="fbc-fday-sub"></span></header>
+              <div id="fbc-fday"></div>
+            </section>
 
             <div class="rbo-section-title"><span>2</span>Type × RCCS status <small>number of customers - click a status to filter</small></div>
             <section class="rbo-panel fbc-status-panel">
@@ -3217,11 +3266,28 @@
               <button type="button" class="hx-icon-btn" id="bc-detail-close-btn" title="Close (Esc)">✕</button>
             </div>
           </div>
-          <p class="hint-text hx-modal-note">Click a summary card to filter - click again to clear. Row colour = its card's colour. 📖 Readings opens the supply's reading history on top.</p>
+          <p class="hint-text hx-modal-note">Click a summary card to filter - click again to clear. Accounts with problems are listed first; click an account to open it, click a bill row for all its details. 📖 Readings opens the supply's reading history.</p>
           <div class="kpi-row kpi-row-compact" id="bc-detail-kpi-row"></div>
-          <div class="key-panel-row">
-            <label class="field-label">Search</label>
+          <!-- RJ 2026-11-19 ("all agree"): grouped-by-account view, Flat toggle, density, column chooser,
+               per-column filters and a row detail drawer. Wired in app.js (bcDetail* view helpers). -->
+          <div class="bc-tb">
             <input id="bc-detail-search-box" class="text-input text-input-sm" placeholder="Search all columns…" style="width:220px;" />
+            <div class="bc-seg" id="bc-view-seg" role="group" aria-label="View">
+              <button type="button" data-bc-view="grouped">By account</button>
+              <button type="button" data-bc-view="flat">Flat</button>
+            </div>
+            <div class="bc-seg" id="bc-density-seg" role="group" aria-label="Density">
+              <button type="button" data-bc-density="comfortable">Comfortable</button>
+              <button type="button" data-bc-density="compact">Compact</button>
+            </div>
+            <span class="bc-tb-sp"></span>
+            <button type="button" class="btn btn-pill-sm" id="bc-expand-all" title="Expand every account">Expand all</button>
+            <button type="button" class="btn btn-pill-sm" id="bc-collapse-all" title="Collapse every account">Collapse all</button>
+            <button type="button" class="btn btn-pill-sm" id="bc-clear-filters" title="Clear column filters">Clear filters</button>
+            <div class="bc-cols-wrap">
+              <button type="button" class="btn btn-pill-sm" id="bc-cols-btn" aria-expanded="false">Columns ▾</button>
+              <div class="bc-cols-pop" id="bc-cols-pop" hidden></div>
+            </div>
           </div>
           <div class="grid-wrap hx-modal-body">
             <table class="data-grid" id="bc-detail-table">
@@ -3229,6 +3295,11 @@
               <tbody></tbody>
             </table>
           </div>
+          <aside class="bc-drawer" id="bc-drawer" hidden>
+            <div class="bc-drawer-head"><b id="bc-drawer-title">Bill</b>
+              <button type="button" class="hx-icon-btn" id="bc-drawer-close" title="Close">✕</button></div>
+            <div class="bc-drawer-body" id="bc-drawer-body"></div>
+          </aside>
          </div>
         </div>
 
@@ -3282,6 +3353,74 @@
         <div id="as-root" class="as-root" aria-live="polite"></div>
       </section>
 
+      <!-- ===== MP Tools (RJ 2026-11-18) - mptools.js ===== -->
+      <section class="page" id="page-mptools">
+        <header class="page-header">
+          <h1>MP Tools</h1>
+          <p class="page-subtitle">Measuring point fixes. Scripts are shown only - never executed.</p>
+        </header>
+        <nav class="da-subnav" aria-label="MP Tools functions">
+          <button type="button" class="da-subnav-btn is-active" data-mpt-sub="tmpact">TMP Activate MP</button>
+        </nav>
+        <div class="da-subpage is-active" data-mpt-sub="tmpact">
+          <div class="biss-info-banner">
+            ℹ️ Enter <strong>ID_MEASURING_POINT</strong>(s) and / or <strong>NISS</strong> (e.g. 10084569-301). The scan shows each
+            measuring point (GCGT_RE_MEASUREMENT_POINT) with its open status-history row and its readings in
+            <strong>Calculated usage (4000STSRED)</strong>. The script: 1) those readings → <strong>Available (1000STSRED)</strong>,
+            IND_USAGE_TO_CAL = 1; 2) MP <strong>Inactive 3000STAMPO → Connected 1000STAMPO</strong>; 3) the open
+            GCGT_RE_MP_STATUS_HIST row (END_DATE null) 3000STAMPO → 1000STAMPO. The <strong>revert</strong> puts back only the MP and
+            the MP status history.
+          </div>
+          <div class="card">
+            <div class="card-header"><h2>Measuring points</h2>
+              <div class="card-header-actions">
+                <!-- RJ 2026-11-18: "create a detect all button ... all Inactive mp where there is a reading in status available or calculated usage" -->
+                <select id="mpt-all-since" class="text-input text-input-sm" title="Detect all: only readings dated in this window" style="width:auto;">
+                  <option value="3">Readings: last 3 months</option>
+                  <option value="6" selected>Readings: last 6 months</option>
+                  <option value="12">Readings: last 12 months</option>
+                  <option value="0">Readings: any date</option>
+                </select>
+                <button type="button" class="btn btn-pill-sm" id="mpt-all-btn" title="Every Inactive (3000STAMPO) MP with a reading in Available or Calculated usage">🔎 Detect all</button>
+                <button type="button" class="btn btn-pill" id="mpt-detect-btn">🔍 Scan</button></div>
+            </div>
+            <label class="field" style="display:block;"><span class="hint-text">ID_MEASURING_POINT and / or NISS - one per line or comma separated (or use Detect all)</span>
+              <textarea id="mpt-inputs" class="text-input" rows="2" placeholder="e.g. 735693 or 10084569-301"></textarea></label>
+            <div class="hint-text" id="mpt-summary" style="margin-top:10px;">Enter an MP id or NISS and press Enter / Scan.</div>
+            <div class="kpi-row" id="mpt-kpi-row" style="margin:14px 0 4px;"></div>
+            <div class="grid-wrap" style="margin-top:12px;">
+              <table class="data-grid" id="mpt-table">
+                <thead><tr><th><input type="checkbox" id="mpt-check-all" title="Select all" /></th><th>NISS</th><th>MP</th><th>MP type</th><th>MP status</th>
+                  <th>Open status hist (END_DATE null)</th><th>Readings in Calculated usage</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header"><h2>Update script</h2>
+              <div class="card-header-actions"><button type="button" class="btn btn-pill" id="mpt-gen-btn" disabled>🛠 Generate script</button></div>
+            </div>
+            <div class="key-panel-row" style="gap:12px;flex-wrap:wrap;align-items:flex-end;">
+              <label class="field"><span class="hint-text">JIRA / UPDATE_PROGRAM</span><input type="text" id="mpt-program" class="text-input text-input-sm" value="TMP_ACTIVATE_MP" style="width:180px;" /></label>
+              <label class="field"><span class="hint-text">UPDATE_USER</span><input type="text" id="mpt-user" class="text-input text-input-sm" value="RMA" style="width:110px;" /></label>
+              <label class="hint-text"><input type="checkbox" id="mpt-clean" /> Clean script (no comments)</label>
+            </div>
+            <div id="mpt-out-wrap" hidden style="margin-top:10px;">
+              <div class="hint-text" id="mpt-out-info"></div>
+              <div class="key-panel-row" style="gap:8px;margin:8px 0;">
+                <button type="button" class="btn btn-pill-sm" id="mpt-copy-btn">📋 Copy</button>
+                <button type="button" class="btn btn-pill-sm" id="mpt-download-btn">⬇ Download .sql</button>
+                <button type="button" class="btn btn-pill-sm" id="mpt-rb-copy-btn">📋 Copy revert</button>
+                <button type="button" class="btn btn-pill-sm" id="mpt-rb-download-btn">⬇ Download revert</button>
+              </div>
+              <pre class="script-output" id="mpt-out"></pre>
+              <div class="hint-text" style="margin-top:8px;"><b>Revert</b> (measuring point + MP status history only)</div>
+              <pre class="script-output" id="mpt-rb-out"></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- ===== SR Quick FIX (RJ 2026-11-09) - srquickfix.js =====
            "create new menu, SR Quick FIX. on the first tab, lets add SR INCORRECT BILLING PERIOD" -->
       <section class="page" id="page-srquickfix">
@@ -3291,7 +3430,81 @@
         </header>
         <nav class="da-subnav" aria-label="SR Quick FIX functions">
           <button type="button" class="da-subnav-btn is-active" data-srq-sub="incbp">SR Incorrect Billing Period</button>
+          <button type="button" class="da-subnav-btn" data-srq-sub="sanh2o">Sanitary Anomaly - H2O Pending</button><!-- RJ 2026-11-17 -->
         </nav>
+
+        <!-- RJ 2026-11-17: tab 2 - SANITARY ANOMALY - H2O Pending (srq_sanh2o.js) -->
+        <div class="da-subpage" data-srq-sub="sanh2o">
+          <nav class="da-subnav" aria-label="Sanitary Anomaly - H2O Pending" style="margin-top:0;">
+            <button type="button" class="da-subnav-btn is-active" data-sh2o-sub="bysr">By SR code</button>
+            <button type="button" class="da-subnav-btn" data-sh2o-sub="all">Detect all cases</button>
+          </nav>
+          <div class="da-subpage is-active" data-sh2o-sub="bysr">
+            <div class="biss-info-banner">
+              ℹ️ Enter the SR code(s). The scan lists every <strong>unresolved</strong> anomaly (GCCOM_ANOMALOUS) linked to the SR
+              (anything but Solved without billing / Solved billed / Solved after review / Resolved billed by batch). The script
+              <strong>resolves the anomaly</strong> (→ ESTAN00005 Solved after review) and, for the anomaly's readings, moves every
+              item-to-bill still <strong>STTOBILL00 Anomalous → STTOBILL01 Pending</strong> - water <strong>and sanitary</strong>.
+            </div>
+            <div class="card">
+              <div class="card-header"><h2>Anomalies of the SR</h2>
+                <div class="card-header-actions"><button type="button" class="btn btn-pill" id="sh2o-detect-btn">🔍 Scan SR(s)</button></div>
+              </div>
+              <label class="field" style="display:block;"><span class="hint-text">SR code(s) - one per line or comma separated</span>
+                <textarea id="sh2o-codes" class="text-input" rows="2" placeholder="e.g. R2026083158022"></textarea></label>
+            </div>
+          </div>
+          <!-- RJ 2026-11-18: "the detect all cases will find GCCOM_ANOMALOUS which is not solved having WATERNOTBI and has ID_SERVREQ" -->
+          <div class="da-subpage" data-sh2o-sub="all">
+            <div class="biss-info-banner">
+              ℹ️ Lists every <strong>unresolved</strong> anomaly (GCCOM_ANOMALOUS) of type <strong>WATERNOTBI - Water Service Anomaly</strong>
+              that is <strong>linked to a service request</strong> (ID_SERVREQ filled), system-wide. Same script as "By SR code":
+              resolve the anomaly (→ ESTAN00005) and move its readings' item-to-bills STTOBILL00 → STTOBILL01 (water + sanitary).
+            </div>
+            <div class="card">
+              <div class="card-header"><h2>Detect all WATERNOTBI cases</h2>
+                <div class="card-header-actions"><button type="button" class="btn btn-pill" id="sh2o-all-btn">🔍 Detect all cases</button></div>
+              </div>
+              <p class="hint-text" style="margin:0;">Read only - the results show in the table below.</p>
+            </div>
+          </div>
+          <!-- shared by both sub-tabs: results + script -->
+          <div class="sh2o-shared">
+            <div class="card">
+              <div class="card-header"><h2 id="sh2o-results-title">Anomalies</h2></div>
+              <div class="hint-text" id="sh2o-summary">Enter an SR code and click Scan, or use "Detect all cases".</div>
+              <div class="kpi-row" id="sh2o-kpi-row" style="margin:14px 0 4px;"></div>
+              <div class="grid-wrap" style="margin-top:12px;">
+                <table class="data-grid" id="sh2o-table">
+                  <thead><tr><th><input type="checkbox" id="sh2o-check-all" title="Select all" /></th><th>SR</th><th>SR type / status</th><th>Account</th>
+                    <th>Anomaly</th><th>Type</th><th>Status</th><th>Service</th><th>Readings</th><th>Item-to-bills (→ 01 if Anomalous)</th></tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-header"><h2>Update script</h2>
+                <div class="card-header-actions"><button type="button" class="btn btn-pill" id="sh2o-gen-btn" disabled>🛠 Generate script</button></div>
+              </div>
+              <div class="key-panel-row" style="gap:12px;flex-wrap:wrap;align-items:flex-end;">
+                <label class="field"><span class="hint-text">JIRA / UPDATE_PROGRAM</span><input type="text" id="sh2o-program" class="text-input text-input-sm" value="SAN_H2O_PEND" style="width:170px;" /></label>
+                <label class="field"><span class="hint-text">UPDATE_USER</span><input type="text" id="sh2o-user" class="text-input text-input-sm" value="RMA" style="width:110px;" /></label>
+                <label class="hint-text"><input type="checkbox" id="sh2o-clean" /> Clean script (no comments)</label>
+              </div>
+              <div id="sh2o-out-wrap" hidden style="margin-top:10px;">
+                <div class="hint-text" id="sh2o-out-info"></div>
+                <div class="key-panel-row" style="gap:8px;margin:8px 0;">
+                  <button type="button" class="btn btn-pill-sm" id="sh2o-copy-btn">📋 Copy</button>
+                  <button type="button" class="btn btn-pill-sm" id="sh2o-download-btn">⬇ Download .sql</button>
+                  <button type="button" class="btn btn-pill-sm" id="sh2o-rb-copy-btn">📋 Copy rollback</button>
+                  <button type="button" class="btn btn-pill-sm" id="sh2o-rb-download-btn">⬇ Download rollback</button>
+                </div>
+                <pre class="script-output" id="sh2o-out"></pre>
+                <details style="margin-top:8px;"><summary class="hint-text">Rollback script</summary><pre class="script-output" id="sh2o-rb-out"></pre></details>
+              </div>
+            </div>
+          </div>
+        </div>
 
         <div class="da-subpage is-active" data-srq-sub="incbp">
           <div class="biss-info-banner">
@@ -3482,10 +3695,34 @@
       <section class="page" id="page-settings">
         <header class="page-header">
           <h1>Settings</h1>
-          <p class="page-subtitle">Your account, connections, AI Assist, and (for admins) user management — the web equivalent of the desktop app's Config dialog.</p>
+          <p class="page-subtitle">Everything ScriptGen needs in one place - your account, the database connection and its SSH tunnel, AI, e-mail alerts and (admins) users and menu access.</p>
         </header>
 
-        <div class="card">
+        <!-- RJ 2026-11-19: "add also the settings of ssh in the settings, group all settings in one menu in nice way
+             and modern" - status strip + left section nav; one panel visible at a time (settings.js) -->
+        <div class="set-status" id="set-status">
+          <button type="button" class="set-stat" data-go="connections"><span class="set-stat-dot" id="set-st-db"></span><span><b>Database</b><small id="set-st-db-txt">checking…</small></span></button>
+          <button type="button" class="set-stat" data-go="ssh"><span class="set-stat-dot" id="set-st-ssh"></span><span><b>SSH tunnel</b><small id="set-st-ssh-txt">-</small></span></button>
+          <button type="button" class="set-stat" data-go="ai"><span class="set-stat-dot" id="set-st-ai"></span><span><b>AI Assist</b><small id="set-st-ai-txt">-</small></span></button>
+          <button type="button" class="set-stat" data-go="email"><span class="set-stat-dot" id="set-st-em"></span><span><b>E-mail alerts</b><small id="set-st-em-txt">-</small></span></button>
+        </div>
+        <div class="set-layout">
+        <nav class="set-nav" id="set-nav" aria-label="Settings sections">
+          <div class="set-nav-group">Personal</div>
+          <button type="button" class="set-nav-btn is-active" data-set="account"><span class="set-ico">👤</span><span><b>My account</b><small>Password, role</small></span></button>
+          <div class="set-nav-group" data-admin>Connectivity</div>
+          <button type="button" class="set-nav-btn" data-set="connections" data-admin><span class="set-ico">🗄️</span><span><b>Database</b><small>SQL Server connections</small></span></button>
+          <button type="button" class="set-nav-btn" data-set="ssh" data-admin><span class="set-ico">🔐</span><span><b>SSH tunnel</b><small>Built-in, no MobaXterm</small></span></button>
+          <div class="set-nav-group" data-admin>Services</div>
+          <button type="button" class="set-nav-btn" data-set="ai" data-admin><span class="set-ico">✨</span><span><b>AI Assist</b><small>Gemini model and key</small></span></button>
+          <button type="button" class="set-nav-btn" data-set="email" data-admin><span class="set-ico">✉️</span><span><b>E-mail alerts</b><small>SMTP, daily digest</small></span></button>
+          <div class="set-nav-group" data-admin>Access</div>
+          <button type="button" class="set-nav-btn" data-set="users" data-admin><span class="set-ico">👥</span><span><b>Users</b><small>Accounts and roles</small></span></button>
+          <button type="button" class="set-nav-btn" data-set="access" data-admin><span class="set-ico">🧭</span><span><b>Menu access</b><small>Pages per role</small></span></button>
+        </nav>
+        <div class="set-body">
+
+        <div class="card set-panel is-active" data-set="account">
           <div class="card-header"><h2>My Account</h2></div>
           <p class="hint-text">Signed in as <strong id="account-username-text"></strong> — role: <span class="badge" id="account-role-badge"></span></p>
           <form id="change-password-form" class="form-grid">
@@ -3501,7 +3738,7 @@
 
         <div id="admin-settings-section" hidden>
 
-        <div class="card">
+        <div class="card set-panel" data-set="users">
           <div class="card-header">
             <h2>Users</h2>
             <div class="card-header-actions">
@@ -3538,7 +3775,7 @@
           </form>
         </div>
 
-        <div class="card">
+        <div class="card set-panel" data-set="access">
           <div class="card-header">
             <h2>Menu Access</h2>
             <div class="card-header-actions">
@@ -3554,9 +3791,9 @@
           </div>
         </div>
 
-        <div class="card">
+        <div class="card set-panel" data-set="connections">
           <div class="card-header">
-            <h2>Connections</h2>
+            <h2>Database connections</h2>
             <div class="card-header-actions">
               <button type="button" class="btn btn-pill" id="add-connection-btn">＋ Add Connection</button>
             </div>
@@ -3589,7 +3826,55 @@
           </form>
         </div>
 
-        <div class="card">
+        <!-- RJ 2026-11-19: built-in SSH tunnel -->
+        <div class="card set-panel" data-set="ssh">
+          <div class="card-header"><h2>SSH tunnel</h2>
+            <div class="card-header-actions">
+              <span class="set-tunnel-pill" id="ssh-pill">Stopped</span>
+              <button type="button" class="btn btn-pill" id="ssh-start-btn">▶ Start</button>
+              <button type="button" class="btn btn-pill" id="ssh-stop-btn">■ Stop</button>
+            </div>
+          </div>
+          <p class="hint-text">ScriptGen opens the tunnel itself - no MobaXterm / PuTTY needed. It forwards
+            <code>127.0.0.1:<span id="ssh-lp-echo">1433</span></code> → SSH server → the SQL Server, so the database
+            connection stays <code>localhost:<span id="ssh-lp-echo2">1433</span></code>. Close any other tunnel on the same
+            local port first. Passwords are stored encrypted.</p>
+          <div class="set-diagram" id="ssh-diagram">
+            <span class="set-node">💻 This PC<br><small>127.0.0.1:<b id="ssh-d-lp">1433</b></small></span><span class="set-arrow">→</span>
+            <span class="set-node">🔐 SSH server<br><small id="ssh-d-ssh">host:22</small></span><span class="set-arrow">→</span>
+            <span class="set-node">🗄️ SQL Server<br><small id="ssh-d-db">host:1433</small></span>
+          </div>
+          <div class="set-fieldset"><div class="set-legend">SSH server</div>
+            <div class="form-grid">
+              <div><label class="field-label">SSH host</label><input id="ssh-host" class="text-input" placeholder="jump.example.com or 10.x.x.x" /></div>
+              <div><label class="field-label">SSH port</label><input id="ssh-port" class="text-input" type="number" value="22" /></div>
+              <div><label class="field-label">SSH user</label><input id="ssh-user" class="text-input" autocomplete="off" /></div>
+              <div><label class="field-label">Authentication</label>
+                <select id="ssh-auth" class="text-input"><option value="password">Password</option><option value="key">Private key file</option></select></div>
+              <div data-ssh-auth="password"><label class="field-label">SSH password</label><input id="ssh-password" class="text-input" type="password" autocomplete="new-password" placeholder="(leave blank to keep existing)" /></div>
+              <div data-ssh-auth="key" hidden><label class="field-label">Private key file (OpenSSH / PEM)</label><input id="ssh-key-path" class="text-input" placeholder="C:\Users\you\.ssh\id_rsa" /></div>
+              <div data-ssh-auth="key" hidden><label class="field-label">Key passphrase</label><input id="ssh-key-pass" class="text-input" type="password" autocomplete="new-password" placeholder="(blank = none / keep existing)" /></div>
+            </div>
+          </div>
+          <div class="set-fieldset"><div class="set-legend">Forwarding</div>
+            <div class="form-grid">
+              <div><label class="field-label">SQL Server host (as seen from the SSH server)</label><input id="ssh-remote-host" class="text-input" placeholder="db-server or 10.x.x.x" /></div>
+              <div><label class="field-label">SQL Server port</label><input id="ssh-remote-port" class="text-input" type="number" value="1433" /></div>
+              <div><label class="field-label">Local port on this PC</label><input id="ssh-local-port" class="text-input" type="number" value="1433" /></div>
+              <div><label class="field-label">Keep-alive (seconds)</label><input id="ssh-keepalive" class="text-input" type="number" value="30" min="5" /></div>
+            </div>
+          </div>
+          <label class="hint-text set-check"><input type="checkbox" id="ssh-enabled" /> Use the built-in tunnel</label>
+          <label class="hint-text set-check"><input type="checkbox" id="ssh-autostart" checked /> Open it automatically when ScriptGen starts (reconnects by itself if it drops)</label>
+          <div class="generate-row">
+            <button type="button" class="btn btn-secondary" id="ssh-test-btn">Test</button>
+            <button type="button" class="btn btn-primary" id="ssh-save-btn">Save</button>
+            <span class="hint-text" id="ssh-result"></span>
+          </div>
+          <div class="hint-text" id="ssh-status-line" style="margin-top:6px;"></div>
+        </div>
+
+        <div class="card set-panel" data-set="email">
           <div class="card-header"><h2>📧 Email alerts</h2></div>
           <p class="hint-text">SMTP account ScriptGen uses to send alert e-mails (Wrong Bill CASE 1 - Unusual high Sanitary). For Gmail use smtp.gmail.com, port 587, TLS on, and a Google <em>App password</em> (not your normal password). Alerts only run while ScriptGen is running.</p>
           <div class="form-grid">
@@ -3615,7 +3900,7 @@
           </div>
         </div>
 
-        <div class="card">
+        <div class="card set-panel" data-set="ai">
           <div class="card-header"><h2>AI Assist (Gemini)</h2></div>
           <div class="form-grid">
             <div><label class="field-label">Model</label><input id="ai-model-field" class="text-input" value="gemini-3.6-flash" /></div>
@@ -3632,6 +3917,8 @@
         </div>
 
         </div><!-- /#admin-settings-section -->
+        </div><!-- /.set-body -->
+        </div><!-- /.set-layout -->
       </section>
 
       <!-- Reading-history popup (task #143), shared by Hierarchy Analysis's
@@ -3729,6 +4016,11 @@
   <script src="/fbc_idle.js"></script><!-- RJ 2026-11-08 FIX BILLING idle background refresh -->
   <script src="/biss_pcal.js"></script><!-- RJ 2026-11-08 Bill Issuance Case 5 - Temp Stop PCAL -->
   <script src="/srquickfix.js"></script><!-- RJ 2026-11-09 SR Quick FIX -->
+  <script src="/mptools.js"></script><!-- RJ 2026-11-18 MP Tools -->
+  <script src="/settings.js"></script><!-- RJ 2026-11-19 Settings: sections + built-in SSH tunnel -->
+  <script src="/sg-std.js"></script><!-- RJ 2026-11-19 page standard kit (docs/UI_STANDARD.md) -->
+  <script src="/navx.js"></script><!-- RJ 2026-11-18 new sidebar (search + favorite tiles + spaces) and tab cards -->
+  <script src="/srq_sanh2o.js"></script><!-- RJ 2026-11-17 SR Quick FIX - Sanitary Anomaly - H2O Pending -->
   <script src="/docs-content.js"></script>
   <script src="/docs-queries.js"></script>
   <script src="/docs.js"></script>

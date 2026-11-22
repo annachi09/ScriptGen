@@ -1,0 +1,454 @@
+/* RJ 2026-11-18 - new navigation (navx.js): sidebar A + C (search, favorite tiles, spaces, live badges)
+   and in-page tabs as small cards (label + live count + short description). The sidebar is dark in both
+   themes, so its colors are light-on-dark washes. */
+
+/* ---------- sidebar: search ---------- */
+#navx-top { padding: 4px 8px 6px; }
+.navx-search { position: relative; display: flex; align-items: center; gap: 6px; padding: 0 8px; height: 34px;
+  border-radius: 10px; background: rgba(255, 255, 255, .06); border: 1px solid rgba(255, 255, 255, .08); }
+.navx-search:focus-within { border-color: var(--accent); background: rgba(255, 255, 255, .09); }
+.navx-search-ico { color: rgba(255, 255, 255, .5); font-size: 15px; }
+#navx-search { flex: 1; min-width: 0; background: transparent; border: 0; outline: 0; color: #fff; font: inherit; font-size: 13px; }
+#navx-search::placeholder { color: rgba(255, 255, 255, .45); }
+.navx-search kbd { font-family: inherit; font-size: 10px; line-height: 1; padding: 3px 4px; border-radius: 5px; color: rgba(255, 255, 255, .55);
+  border: 1px solid rgba(255, 255, 255, .15); white-space: nowrap; }
+.navx-results { margin-top: 6px; padding: 4px; border-radius: 10px; background: #1d1f2d; border: 1px solid rgba(255, 255, 255, .1);
+  max-height: 320px; overflow: auto; }
+.navx-results button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: 7px;
+  background: transparent; color: rgba(255, 255, 255, .85); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.navx-results button:hover, .navx-results button.is-hl { background: rgba(99, 102, 241, .28); color: #fff; }
+.navx-r-txt { display: flex; flex-direction: column; min-width: 0; }
+.navx-r-txt small { font-size: 11px; color: rgba(255, 255, 255, .5); }
+.navx-r-empty { padding: 8px; font-size: 12px; color: rgba(255, 255, 255, .5); }
+
+/* ---------- sidebar: favorites tiles ---------- */
+.navx-fav-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin: 12px 2px 6px;
+  font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: rgba(255, 255, 255, .45); }
+.navx-fav-head .nav-fav-only { width: auto; margin: 0; padding: 2px 8px; font-size: 11px; text-transform: none; letter-spacing: 0; }
+.navx-favs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.navx-tile { position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 9px 4px 7px;
+  border-radius: 10px; border: 1px solid rgba(255, 255, 255, .08); background: rgba(255, 255, 255, .04);
+  color: rgba(255, 255, 255, .8); font: inherit; cursor: pointer; transition: background .15s, border-color .15s, transform .15s; }
+.navx-tile:hover { background: rgba(255, 255, 255, .09); transform: translateY(-1px); }
+.navx-tile.is-active { background: rgba(99, 102, 241, .25); border-color: rgba(129, 140, 248, .6); color: #fff; }
+.navx-tile-ico { font-size: 18px; line-height: 1; }
+.navx-tile-lbl { max-width: 100%; font-size: 11px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.navx-tile-n { position: absolute; top: 3px; right: 4px; font-size: 10px; padding: 0 5px; border-radius: 8px; background: #ef4444; color: #fff; }
+.navx-fav-empty { grid-column: 1 / -1; font-size: 11.5px; color: rgba(255, 255, 255, .45); padding: 6px 2px; }
+
+/* ---------- sidebar: spaces ---------- */
+/* RJ 2026-11-18 (later): "what i want you to design better is this.. make it appealing its so badly
+   grouped" - the spaces are now one segmented switcher: 5 equal cells (icon + short label) in a single
+   rounded track, the active cell lit; the favorites toggle is a star icon button inside the search bar.
+   (The bigger menu-item restyle was reverted - "the menu text before is better".) */
+.navx-spaces { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 2px; margin: 10px 0 6px; padding: 3px;
+  border-radius: 12px; background: rgba(255, 255, 255, .05); border: 1px solid rgba(255, 255, 255, .07); }
+.navx-spaces button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-width: 0;
+  padding: 6px 2px 5px; border: 0; border-radius: 9px; background: transparent; color: rgba(255, 255, 255, .55);
+  font: inherit; cursor: pointer; transition: background .15s, color .15s; }
+.navx-sp-ico { font-size: 16px; line-height: 1; filter: grayscale(.6); opacity: .85; transition: filter .15s, opacity .15s, transform .15s; }
+.navx-sp-lbl { font-size: 10px; line-height: 1.1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.navx-spaces button:hover { color: #fff; background: rgba(255, 255, 255, .06); }
+.navx-spaces button:hover .navx-sp-ico { filter: none; opacity: 1; transform: translateY(-1px); }
+.navx-spaces button.is-active { color: #fff; background: linear-gradient(180deg, rgba(129, 140, 248, .45), rgba(99, 102, 241, .3));
+  box-shadow: inset 0 0 0 1px rgba(165, 180, 252, .45), 0 4px 12px -6px rgba(99, 102, 241, .8); }
+.navx-spaces button.is-active .navx-sp-ico { filter: none; opacity: 1; }
+.navx-space-title { display: flex; align-items: center; justify-content: space-between; margin: 0 4px 2px; font-size: 10.5px;
+  letter-spacing: .06em; text-transform: uppercase; color: rgba(255, 255, 255, .4); }
+.navx-space-title b { font-weight: 600; color: rgba(165, 180, 252, .9); letter-spacing: 0; text-transform: none; font-size: 11px; }
+.nav-item.navx-out { display: none !important; }
+/* favorites toggle = star icon in the search bar */
+.navx-search .nav-fav-only { width: 26px; height: 24px; margin: 0; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 7px; border: 1px solid rgba(255, 255, 255, .12); background: transparent; color: rgba(255, 255, 255, .55);
+  font-size: 13px; line-height: 1; overflow: hidden; }
+.navx-search .nav-fav-only:hover { color: #fbbf24; border-color: rgba(251, 191, 36, .5); }
+.navx-search .nav-fav-only.is-active { color: #1a1206; background: #fbbf24; border-color: #fbbf24; }
+
+/* ---------- sidebar: live badges ---------- */
+/* RJ 2026-11-18: "the numbers in the menu, make it smaller" - mini pill (9.5px), compact numbers
+   (1.2k / 12k), a severity dot instead of a full red fill: red >= 100, amber > 0. */
+.navx-badge { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; height: 15px; padding: 0 5px 0 4px; border-radius: 8px;
+  font-size: 9.5px; font-weight: 600; line-height: 1; letter-spacing: .01em; font-variant-numeric: tabular-nums;
+  background: rgba(255, 255, 255, .06); border: 1px solid rgba(255, 255, 255, .08); color: rgba(255, 255, 255, .72); }
+.navx-badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: #f59e0b; flex: none; }
+.navx-badge[data-sev="hot"]::before { background: #f43f5e; box-shadow: 0 0 0 2px rgba(244, 63, 94, .22); }
+.nav-item:hover .navx-badge { color: #fff; border-color: rgba(255, 255, 255, .16); }
+.nav-item.is-active .navx-badge { background: rgba(255, 255, 255, .16); border-color: transparent; color: #fff; }
+.nav-item .navx-badge + .nav-fav { margin-left: 2px; }
+.sidebar.is-collapsed #navx-top, .sidebar.is-collapsed .navx-badge { display: none; }
+
+/* ---------- sidebar: pinned favorites ---------- */
+/* RJ 2026-11-18: "be creative with the favorite" - starred menus are pinned in a gold-labelled group under
+   Overview; the star only appears on hover (gold when pinned), with a little pop when toggled. */
+.navx-pin-head { display: flex; align-items: center; gap: 6px; margin: 8px 10px 2px; font-size: 10px; font-weight: 600;
+  letter-spacing: .08em; text-transform: uppercase; color: rgba(251, 191, 36, .85); }
+.navx-pin-head span { font-size: 10px; text-shadow: 0 0 8px rgba(251, 191, 36, .6); }
+.navx-pin-head i { flex: 1; height: 1px; background: linear-gradient(90deg, rgba(251, 191, 36, .45), rgba(251, 191, 36, 0)); }
+.navx-pin-end { height: 1px; margin: 6px 10px 6px; background: rgba(255, 255, 255, .07); }
+.nav-item.is-fav .nav-icon { position: relative; }
+.nav-item.is-fav .nav-icon::after { content: ""; position: absolute; right: -3px; top: -2px; width: 5px; height: 5px; border-radius: 50%;
+  background: #fbbf24; box-shadow: 0 0 6px rgba(251, 191, 36, .8); }
+.nav-item .nav-fav { font-size: 12px !important; opacity: 0 !important; color: rgba(255, 255, 255, .45) !important; }
+.nav-item:hover .nav-fav { opacity: 1 !important; }
+.nav-item.is-fav .nav-fav { color: #fbbf24 !important; }
+.nav-item .nav-fav:hover { color: #fbbf24 !important; }
+.nav-item .nav-fav:active { transform: scale(1.5) rotate(-15deg); }
+.sidebar.is-collapsed .navx-pin-head { margin: 6px 8px; font-size: 0; }
+.sidebar.is-collapsed .navx-pin-head span { font-size: 10px; }
+
+/* ---------- sidebar: grouped collapsible sections (option C) ---------- */
+/* RJ 2026-11-18: "implement c and big ICONS for D when collapsed" */
+.navx-grp { display: flex; align-items: center; gap: 7px; width: 100%; margin: 10px 0 2px; padding: 5px 10px; border: 0; border-radius: 8px;
+  background: transparent; color: rgba(255, 255, 255, .5); font: inherit; font-size: 10.5px; font-weight: 600; letter-spacing: .07em;
+  text-transform: uppercase; cursor: pointer; text-align: left; transition: background .15s, color .15s; }
+.navx-grp:hover { background: rgba(255, 255, 255, .05); color: rgba(255, 255, 255, .85); }
+.navx-grp[hidden] { display: none; }
+.navx-grp-chev { width: 10px; font-size: 10px; transition: transform .18s; }
+.navx-grp.is-closed .navx-grp-chev { transform: rotate(-90deg); }
+.navx-grp-ico { font-size: 12px; filter: grayscale(.5); }
+.navx-grp-lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.navx-grp-n { font-size: 9.5px; letter-spacing: 0; padding: 1px 6px; border-radius: 8px; background: rgba(255, 255, 255, .06);
+  color: rgba(255, 255, 255, .5); font-variant-numeric: tabular-nums; }
+.navx-grp-n.is-open-count { background: rgba(244, 63, 94, .18); color: #fda4af; }   /* closed group: total open count */
+
+/* ---------- collapsed sidebar = icon rail with big icons (option D) ---------- */
+.sidebar.is-collapsed .nav-item.navx-out:not([hidden]) { display: flex !important; }   /* closed groups still show in the rail */
+.sidebar.is-collapsed .navx-grp { height: 1px; margin: 8px 12px; padding: 0; background: rgba(255, 255, 255, .1); font-size: 0; pointer-events: none; }
+.sidebar.is-collapsed .navx-grp > * { display: none; }
+.sidebar.is-collapsed .navx-pin-head { height: 1px; margin: 8px 12px; background: rgba(251, 191, 36, .45); }
+.sidebar.is-collapsed .navx-pin-head > *, .sidebar.is-collapsed .navx-pin-end { display: none; }
+.sidebar.is-collapsed .nav-item { height: 46px; min-height: 46px; flex-shrink: 0; margin: 2px 6px; padding: 0; border-radius: 12px; justify-content: center; }
+.sidebar.is-collapsed .nav-item .nav-icon { font-size: 24px; line-height: 1; margin: 0; width: auto; transition: transform .15s; }
+.sidebar.is-collapsed .nav-item:hover .nav-icon { transform: scale(1.12); }
+.sidebar.is-collapsed .nav-item.is-fav .nav-icon::after { right: -4px; top: -3px; width: 7px; height: 7px; }
+/* the expand / collapse button: easy to find in both states */
+.sidebar-collapse-btn { width: 26px !important; height: 26px !important; font-size: 14px !important; border-radius: 8px !important;
+  color: rgba(255, 255, 255, .75) !important; background: rgba(255, 255, 255, .06) !important; }
+.sidebar-collapse-btn:hover { background: rgba(99, 102, 241, .45) !important; color: #fff !important; }
+.sidebar.is-collapsed .sidebar-brand { flex-direction: column; gap: 8px; }
+.sidebar.is-collapsed .sidebar-collapse-btn { width: 40px !important; height: 30px !important; }
+
+/* ---------- sidebar: hover card ---------- */
+/* RJ 2026-11-18: "when i hover on the menu, add a small description of what it is doing, make it user
+   friendly" - a dark glass card beside the sidebar: icon + name, one plain-language line, the live open
+   count and a pin hint. Appears after a short pause, then follows the mouse instantly between menus. */
+.navx-tip { position: fixed; z-index: 9999; width: 270px; padding: 10px 12px 9px; border-radius: 12px; pointer-events: none;
+  background: rgba(24, 26, 40, .97); border: 1px solid rgba(129, 140, 248, .28); color: rgba(255, 255, 255, .85);
+  box-shadow: 0 14px 34px -12px rgba(0, 0, 0, .6), 0 0 0 1px rgba(0, 0, 0, .2);
+  backdrop-filter: blur(8px); opacity: 0; transform: translateX(-6px); transition: opacity .14s, transform .14s, top .12s; }
+.navx-tip.is-on { opacity: 1; transform: none; }
+.navx-tip::before { content: ""; position: absolute; left: -6px; top: calc(var(--arrow-y, 20px) - 6px); width: 10px; height: 10px;
+  background: inherit; border-left: 1px solid rgba(129, 140, 248, .28); border-bottom: 1px solid rgba(129, 140, 248, .28); transform: rotate(45deg); }
+.navx-tip-head { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
+.navx-tip-head b { font-size: 13px; font-weight: 600; color: #fff; }
+.navx-tip-ico { font-size: 15px; line-height: 1; }
+.navx-tip-pin { margin-left: auto; font-size: 10px; font-weight: 600; color: #fbbf24; }
+.navx-tip p { margin: 0; font-size: 12px; line-height: 1.45; color: rgba(255, 255, 255, .75); }
+.navx-tip-n { display: flex; align-items: center; gap: 6px; margin-top: 7px; font-size: 11.5px; font-weight: 600; color: #fff; font-variant-numeric: tabular-nums; }
+.navx-tip-n i { width: 7px; height: 7px; border-radius: 50%; background: #f59e0b; }
+.navx-tip-n i[data-sev="hot"] { background: #f43f5e; box-shadow: 0 0 0 3px rgba(244, 63, 94, .22); }
+.navx-tip-foot { margin-top: 7px; padding-top: 6px; border-top: 1px solid rgba(255, 255, 255, .07); font-size: 10.5px; color: rgba(255, 255, 255, .4); }
+
+/* ---------- in-page tabs as cards (option 3) ---------- */
+.da-subnav.navx-cards, :root[data-theme="dark"] .da-subnav.navx-cards {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px;
+  padding: 0; border: 0; background: transparent; box-shadow: none; margin-bottom: 16px; width: 100%;
+}
+.navx-cards .da-subnav-btn {
+  position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left;
+  padding: 10px 12px 10px 14px; border-radius: 12px; background: var(--card-bg); border: 1px solid var(--card-border);
+  color: var(--text-secondary); font-weight: 500; line-height: 1.3; overflow: hidden;
+  transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.navx-cards .da-subnav-btn::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--tab-accent); opacity: .35; }
+.navx-cards .da-subnav-btn:hover:not(.is-active) { transform: translateY(-1px); border-color: var(--tab-accent); background: var(--card-bg); }
+.navx-cards .da-subnav-btn.is-active, :root[data-theme="dark"] .navx-cards .da-subnav-btn.is-active {
+  border-color: var(--tab-accent); color: var(--text-primary); background: var(--card-bg);
+  box-shadow: 0 0 0 1px var(--tab-accent), 0 6px 16px -10px var(--tab-accent);
+}
+.navx-cards .da-subnav-btn.is-active::before { opacity: 1; }
+.navx-tab-label { font-size: 12.5px; font-weight: 600; color: inherit; }
+.navx-tab-meta { display: flex; flex-direction: column; gap: 1px; width: 100%; }
+.navx-tab-n { font-size: 22px; line-height: 1.15; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.navx-tab-n:empty { display: none; }
+.navx-tab-n.is-hot { color: var(--tab-accent); }
+.navx-tab-sub { font-size: 11.5px; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.navx-tab-sub:empty { display: none; }
+.navx-cards .wb-tab-count { font-size: 18px; font-weight: 700; color: var(--tab-accent); }
+
+/* =====================================================================================================
+   RJ 2026-11-18 (later): "i dont like the menu its too big the text looks like not done professionally,
+   make it look better. remove also the numbers ... and the yellow dot indicator ... industry standard".
+   Sidebar redesign in the style of Linear / Vercel / GitHub: compact 32px rows, 13px text, one line-icon
+   set (SVG, navx.js ICONS) instead of emoji, quiet sentence-case section labels, a thin accent bar for the
+   active item, no counts, no dots. This block wins over the earlier sidebar rules above.
+   ===================================================================================================== */
+.sidebar { -webkit-font-smoothing: antialiased; }
+.sidebar .nav .nav-item {
+  position: relative; display: flex; align-items: center; gap: 10px; height: 32px; min-height: 32px; flex-shrink: 0;
+  margin: 1px 8px; padding: 0 10px; border-radius: 6px; border: 0; box-shadow: none; background: transparent;
+  font-size: 13px; font-weight: 450; letter-spacing: -.005em; line-height: 1; color: rgba(203, 213, 225, .78);
+  transition: background .12s, color .12s;
+}
+.sidebar .nav .nav-item:hover:not(.is-active) { background: rgba(255, 255, 255, .045); color: #f1f5f9; }
+.sidebar .nav .nav-item.is-active { background: rgba(255, 255, 255, .085); color: #fff; font-weight: 500; box-shadow: none; }
+.sidebar .nav .nav-item.is-active::before { content: ""; display: block; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px;
+  border-radius: 2px; background: var(--accent, #6366f1); }
+.sidebar .nav .nav-item.is-active::after { display: none; }
+.sidebar .nav .nav-icon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 16px; height: 16px;
+  font-size: 14px; color: rgba(148, 163, 184, .85); transition: color .12s; }
+.sidebar .nav .nav-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.sidebar .nav .nav-item:hover .nav-icon { color: #e2e8f0; }
+.sidebar .nav .nav-item.is-active .nav-icon { color: #c7d2fe; }
+.sidebar .nav .nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* no counts, no dots */
+.sidebar .navx-badge, .sidebar .navx-grp-n, .sidebar .navx-pin-end { display: none !important; }
+.sidebar .nav .nav-item.is-fav .nav-icon::after { display: none !important; content: none; }
+/* favourite star: only on hover, quiet */
+.sidebar .nav .nav-item .nav-fav { margin-left: auto; padding: 0 2px; font-size: 12px !important; line-height: 1; opacity: 0 !important;
+  color: rgba(148, 163, 184, .7) !important; transition: opacity .12s, color .12s; }
+.sidebar .nav .nav-item:hover .nav-fav { opacity: 1 !important; }
+.sidebar .nav .nav-item .nav-fav:hover { color: #fcd34d !important; transform: none; }
+.sidebar .nav .nav-item .nav-fav:active { transform: none; }
+/* section labels (groups + Pinned) */
+.sidebar .navx-grp, .sidebar .navx-pin-head {
+  display: flex; align-items: center; gap: 6px; width: calc(100% - 16px); margin: 16px 8px 4px; padding: 0 10px; height: 22px;
+  border: 0; border-radius: 6px; background: transparent; font: inherit; font-size: 11.5px; font-weight: 500; letter-spacing: 0;
+  text-transform: none; color: rgba(148, 163, 184, .72); text-shadow: none; cursor: pointer; text-align: left;
+}
+.sidebar .navx-pin-head { cursor: default; }
+.sidebar .navx-grp:hover { background: transparent; color: #e2e8f0; }
+.sidebar .navx-grp[hidden] { display: none; }
+.sidebar .navx-grp-chev { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round;
+  stroke-linejoin: round; opacity: 0; transition: opacity .12s, transform .15s; }
+.sidebar .navx-grp:hover .navx-grp-chev, .sidebar .navx-grp.is-closed .navx-grp-chev { opacity: .8; }
+.sidebar .navx-grp.is-closed .navx-grp-chev { transform: rotate(-90deg); }
+/* search */
+.sidebar .navx-search { height: 32px; border-radius: 8px; background: rgba(255, 255, 255, .04); border-color: rgba(255, 255, 255, .07); }
+.sidebar #navx-search { font-size: 13px; }
+.sidebar .navx-search kbd { font-size: 10px; border-color: rgba(255, 255, 255, .1); color: rgba(148, 163, 184, .7); }
+.sidebar .navx-search .nav-fav-only { width: 22px; height: 20px; font-size: 12px; border-color: transparent; color: rgba(148, 163, 184, .8); }
+.sidebar .navx-search .nav-fav-only.is-active { background: rgba(255, 255, 255, .1); color: #fcd34d; border-color: transparent; }
+.navx-results .navx-r-ico svg, .navx-tip-ico svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75;
+  stroke-linecap: round; stroke-linejoin: round; display: block; }
+.navx-r-ico { color: rgba(148, 163, 184, .9); display: inline-flex; }
+/* hover card: calmer */
+.navx-tip { width: 250px; padding: 10px 12px; border-radius: 10px; background: #111320; border-color: rgba(255, 255, 255, .08); }
+.navx-tip-head b { font-size: 13px; font-weight: 600; }
+.navx-tip-ico { color: #c7d2fe; display: inline-flex; }
+.navx-tip-pin { font-size: 10.5px; font-weight: 500; color: rgba(148, 163, 184, .8); }
+.navx-tip p { font-size: 12px; color: rgba(203, 213, 225, .78); }
+/* collapsed = icon rail */
+.sidebar.is-collapsed .nav .nav-item { height: 40px; min-height: 40px; margin: 2px 8px; padding: 0; justify-content: center; border-radius: 8px; }
+.sidebar.is-collapsed .nav .nav-icon, .sidebar.is-collapsed .nav .nav-icon svg { width: 20px; height: 20px; }
+.sidebar.is-collapsed .nav .nav-item:hover .nav-icon { transform: none; }
+.sidebar.is-collapsed .nav .nav-item.is-active::before { left: -8px; top: 10px; bottom: 10px; }
+.sidebar.is-collapsed .navx-grp, .sidebar.is-collapsed .navx-pin-head { height: 1px; margin: 10px 14px; padding: 0; width: auto;
+  background: rgba(255, 255, 255, .08); pointer-events: none; }
+.sidebar.is-collapsed .navx-grp > *, .sidebar.is-collapsed .navx-pin-head > * { display: none; }
+.sidebar-collapse-btn { background: transparent !important; color: rgba(148, 163, 184, .8) !important; border: 1px solid rgba(255, 255, 255, .08) !important; }
+
+/* ---------- RJ 2026-11-19: "colors to main menu and some icon" ----------
+   Each section (Monitor / Billing fixes / Reading fixes / Quick fixes / Lookup & SQL / Admin & help) has a colour
+   (--grp, set by navx.js): a tinted icon chip on the section label, the menu icons in that colour, and the
+   active item's bar + soft wash in it. Muted enough to stay professional on the dark sidebar. */
+.sidebar .navx-grp-ico { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 20px; height: 20px;
+  border-radius: 6px; background: color-mix(in srgb, var(--grp) 16%, transparent); color: var(--grp); }
+.sidebar .navx-grp-ico svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.sidebar .navx-grp { gap: 8px; color: rgba(203, 213, 225, .78); font-weight: 600; font-size: 11.5px; }
+.sidebar .navx-grp:hover { color: #fff; }
+.sidebar .nav .nav-item .nav-icon { color: color-mix(in srgb, var(--grp, #94a3b8) 78%, #cbd5e1); }
+.sidebar .nav .nav-item:hover .nav-icon { color: var(--grp, #e2e8f0); }
+.sidebar .nav .nav-item.is-active { background: color-mix(in srgb, var(--grp, #6366f1) 14%, transparent); }
+.sidebar .nav .nav-item.is-active::before { background: var(--grp, var(--accent, #6366f1)); }
+.sidebar .nav .nav-item.is-active .nav-icon { color: var(--grp, #c7d2fe); }
+.sidebar.is-collapsed .nav .nav-item.is-active::before { background: var(--grp, var(--accent)); }
+/* RJ 2026-11-19: "make the menus bold, and the sub menu smaller than the main menu" - main menu (section
+   headers) bold + larger; sub menu (pages) smaller, semi-bold and indented under its section. */
+.sidebar .nav .navx-grp, .sidebar .nav .navx-pin-head, .sidebar .navx-grp, .sidebar .navx-pin-head { height: 26px; font-size: 13.5px; font-weight: 700; letter-spacing: -.005em;
+  color: #e2e8f0; margin-top: 14px; }
+.sidebar .navx-grp-ico { width: 22px; height: 22px; }
+.sidebar .navx-grp-ico svg { width: 13px; height: 13px; }
+.sidebar .nav .nav-item { height: 29px; min-height: 29px; font-size: 12px; font-weight: 500; padding-left: 20px; }
+.sidebar .nav .nav-item .nav-icon, .sidebar .nav .nav-item .nav-icon svg { width: 14px; height: 14px; }
+.sidebar .nav .nav-item.is-active { font-weight: 600; }
+.sidebar.is-collapsed .nav .nav-item { height: 40px; min-height: 40px; padding: 0; }
+.sidebar.is-collapsed .nav .nav-item .nav-icon, .sidebar.is-collapsed .nav .nav-item .nav-icon svg { width: 20px; height: 20px; }
+/* ---------- page standard kit (sg-std.js) - docs/UI_STANDARD.md ---------- */
+.sg-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 12px 0; }
+.sg-kpi { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; text-align: left; cursor: pointer;
+  border-radius: 10px; border: 1px solid var(--card-border); background: var(--card-bg); color: var(--text-secondary); font: inherit;
+  box-shadow: inset 3px 0 0 var(--sg-tone); transition: border-color .12s, box-shadow .12s; --sg-tone: #94a3b8; }
+.sg-kpi[disabled] { cursor: default; }
+.sg-kpi[data-tone="ok"] { --sg-tone: #10b981; } .sg-kpi[data-tone="warn"] { --sg-tone: #f59e0b; }
+.sg-kpi[data-tone="bad"] { --sg-tone: #ef4444; } .sg-kpi[data-tone="info"] { --sg-tone: #0ea5e9; }
+.sg-kpi:hover:not([disabled]) { border-color: var(--sg-tone); }
+.sg-kpi.is-active { border-color: var(--sg-tone); box-shadow: inset 3px 0 0 var(--sg-tone), 0 0 0 1px var(--sg-tone); }
+.sg-kpi-label { font-size: 12px; font-weight: 500; }
+.sg-kpi-value { font-size: 22px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; line-height: 1.2; }
+.sg-kpi-sub { font-size: 11px; color: var(--text-secondary); }
+.sg-pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600; white-space: nowrap;
+  background: color-mix(in srgb, var(--sg-tone) 14%, transparent); color: var(--sg-tone); --sg-tone: #64748b; }
+.sg-pill[data-tone="ok"] { --sg-tone: #059669; } .sg-pill[data-tone="warn"] { --sg-tone: #d97706; }
+.sg-pill[data-tone="bad"] { --sg-tone: #dc2626; } .sg-pill[data-tone="info"] { --sg-tone: #0284c7; }
+
+/* ---------- Bulk Checker - Analyze pop-up summary strip (RJ 2026-11-19) ---------- */
+.bc-sum { margin: 4px 0 12px; }
+.bc-sum:empty { display: none; }
+.bc-sum-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.bc-sum-head b { font-size: 15px; }
+.bc-sum-head span { font-size: 12px; color: var(--text-secondary); }
+.bc-sum-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.bc-sum-card { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px;
+  border: 1px solid var(--card-border); background: var(--card-bg); box-shadow: inset 3px 0 0 var(--bc-tone); --bc-tone: #94a3b8; }
+.bc-sum-card[data-tone="ok"] { --bc-tone: #10b981; } .bc-sum-card[data-tone="warn"] { --bc-tone: #f59e0b; }
+.bc-sum-card[data-tone="bad"] { --bc-tone: #ef4444; } .bc-sum-card[data-tone="info"] { --bc-tone: #6366f1; }
+.bc-sum-ico { font-size: 20px; line-height: 1; }
+.bc-sum-txt { display: flex; flex-direction: column; min-width: 0; }
+.bc-sum-label { font-size: 11.5px; font-weight: 600; color: var(--text-secondary); }
+.bc-sum-value { font-size: 19px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; line-height: 1.2; }
+.bc-sum-sub { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- Bulk Checker - Analyze pop-up grouped table (RJ 2026-11-19, "all agree") ---------- */
+#bc-detail-modal { position: relative; }
+.bc-tb { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 20px 0; }
+.bc-tb-sp { flex: 1; }
+.bc-seg { display: inline-flex; border: 1px solid var(--card-border); border-radius: 8px; overflow: hidden; }
+.bc-seg button { border: 0; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; padding: 5px 10px; cursor: pointer; }
+.bc-seg button + button { border-left: 1px solid var(--card-border); }
+.bc-seg button.is-active { background: var(--accent); color: #fff; }
+.bc-cols-wrap { position: relative; }
+.bc-cols-pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; width: 240px; max-height: 340px; overflow: auto;
+  padding: 8px; border-radius: 10px; border: 1px solid var(--card-border); background: var(--card-bg); box-shadow: 0 12px 30px rgba(10, 12, 24, .25); }
+.bc-cols-actions { display: flex; gap: 6px; margin-bottom: 6px; }
+.bc-cols-item { display: flex; align-items: center; gap: 8px; padding: 3px 4px; font-size: 12.5px; border-radius: 6px; cursor: pointer; }
+.bc-cols-item:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+#bc-detail-table thead { position: sticky; top: 0; z-index: 3; }
+#bc-detail-table thead th { position: static; }
+#bc-detail-table thead th.bc-key, #bc-detail-table td.bc-key { position: sticky; left: 0; z-index: 1; }
+#bc-detail-table.bc-grouped thead th.bc-key, #bc-detail-table.bc-grouped td.bc-key { left: 28px; }
+#bc-detail-table thead th.bc-lead, #bc-detail-table td.bc-lead { position: sticky; left: 0; z-index: 1; width: 28px; min-width: 28px; max-width: 28px; padding: 0; }
+#bc-detail-table thead th { background: var(--card-bg); }
+#bc-detail-table td.bc-key { font-weight: 600; box-shadow: 1px 0 0 var(--card-border); }
+.bc-filter-row th { padding: 3px 6px !important; }
+.bc-col-filter { width: 100%; min-width: 70px; box-sizing: border-box; font: inherit; font-size: 11.5px; padding: 3px 6px;
+  border: 1px solid var(--card-border); border-radius: 6px; background: var(--card-bg); color: var(--text-primary); }
+#bc-detail-table.bc-dense td, #bc-detail-table.bc-dense th { padding-top: 3px; padding-bottom: 3px; font-size: 12px; }
+#bc-detail-table .bc-bill-row { cursor: pointer; }
+
+.bc-grp-row { cursor: pointer; }
+.bc-grp-row > td { position: sticky; left: 0; background: color-mix(in srgb, var(--kpi-c) 7%, var(--card-bg)) !important;
+  border-top: 1px solid var(--card-border); box-shadow: inset 4px 0 0 var(--kpi-c); padding: 8px 10px !important; white-space: nowrap; }
+.bc-grp-row:hover > td { background: color-mix(in srgb, var(--kpi-c) 14%, var(--card-bg)) !important; }
+.bc-grp-chev { display: inline-block; width: 16px; color: var(--text-secondary); }
+.bc-grp-acc { font-size: 13.5px; margin-right: 10px; font-variant-numeric: tabular-nums; }
+.bc-grp-meta { font-size: 12px; color: var(--text-secondary); margin-right: 10px; }
+.bc-gpill { display: inline-block; margin-right: 6px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  color: var(--kpi-c); background: color-mix(in srgb, var(--kpi-c) 15%, transparent); }
+
+/* RJ 2026-11-19: bill-status colours - one colour per GCCOM_BILL_STATUS (--bs set inline by app.js) */
+.bc-bs { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px 2px 7px; border-radius: 999px; white-space: nowrap;
+  font-size: 11.5px; font-weight: 600; color: var(--bs); background: color-mix(in srgb, var(--bs) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bs) 35%, transparent); }
+.bc-bs i { width: 7px; height: 7px; border-radius: 50%; background: var(--bs); flex: none; }
+.bc-bs b { font-weight: 700; color: var(--text-primary); margin-left: 2px; }
+:root[data-theme="dark"] .bc-bs { color: color-mix(in srgb, var(--bs) 65%, #fff); }
+.bc-bs-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 20px 0; }
+.bc-bs-legend:empty { display: none; }
+.bc-bs-legend-l { font-size: 11.5px; font-weight: 600; color: var(--text-secondary); margin-right: 2px; }
+.bc-bs-btn { border: 0; background: none; padding: 0; cursor: pointer; border-radius: 999px; }
+.bc-bs-btn.is-active .bc-bs { background: var(--bs); color: #fff; }
+.bc-bs-btn.is-active .bc-bs i { background: #fff; }
+.bc-bs-btn.is-active .bc-bs b { color: #fff; }
+#bc-detail-table tr.bc-bs-row > td:first-child { box-shadow: inset 4px 0 0 var(--bs); }
+
+/* account header + bill cards (grouped view) */
+#bc-detail-table.bc-grouped { border-collapse: separate; border-spacing: 0; }
+.bc-grp-row > td { white-space: normal !important; }
+.bc-grp-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; }
+.bc-grp-id { display: flex; flex-direction: column; min-width: 190px; }
+.bc-grp-id .bc-grp-meta { margin: 0; }
+.bc-grp-bar { display: flex; width: 160px; height: 8px; border-radius: 99px; overflow: hidden; background: var(--card-border); flex: none; }
+.bc-grp-bar i { display: block; height: 100%; }
+.bc-grp-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.bc-grp-body > td { padding: 6px 10px 12px 34px !important; background: var(--card-bg) !important; }
+.bc-bills { display: flex; flex-direction: column; gap: 6px; }
+.bc-bill { display: grid; grid-template-columns: 160px minmax(170px, 1.4fr) minmax(100px, .8fr) minmax(140px, 1fr) minmax(150px, 1fr) 90px auto;
+  align-items: center; gap: 12px; padding: 8px 12px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--card-border); border-left: 5px solid var(--bs);
+  background: color-mix(in srgb, var(--bs) 5%, var(--card-bg)); transition: background .12s, transform .12s; }
+.bc-bill:hover { background: color-mix(in srgb, var(--bs) 11%, var(--card-bg)); }
+.bc-bill.is-selected { outline: 2px solid var(--bs); outline-offset: -1px; }
+.bc-bill-st { justify-self: start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 4px 10px; border-radius: 8px; font-size: 12px; font-weight: 700; color: #fff; background: var(--bs); }
+.bc-bill-main { display: flex; flex-direction: column; min-width: 0; }
+.bc-bill-main b { font-size: 13px; font-variant-numeric: tabular-nums; }
+.bc-bill-main span, .bc-bill-sub { font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bc-bill-f { display: flex; flex-direction: column; min-width: 0; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.bc-bill-f small { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary); }
+.bc-bill-amt { text-align: right; font-weight: 700; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.bc-nofile { color: #d97706; font-weight: 600; }
+.bc-cs { font-weight: 700; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* account verdict (RJ 2026-11-19): Complete = every service has a bill, Missing = n services without one */
+.bc-verdict-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 120px; }
+.bc-verdict { padding: 3px 10px; border-radius: 8px; font-size: 12px; font-weight: 700; color: #fff; white-space: nowrap; }
+.bc-verdict.is-complete { background: #059669; }
+.bc-verdict.is-missing { background: #dc2626; }
+.bc-verdict-sub { font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
+#bc-detail-table.bc-dense .bc-bill { padding: 4px 10px; }
+@media (max-width: 900px) { .bc-bill { grid-template-columns: 1fr 1fr; } .bc-bill-amt { text-align: left; } }
+
+.bc-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(380px, 92%); z-index: 6; display: flex; flex-direction: column;
+  background: var(--card-bg); border-left: 1px solid var(--card-border); box-shadow: -12px 0 30px rgba(10, 12, 24, .22); }
+.bc-drawer[hidden] { display: none; }
+.bc-drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--card-border); }
+.bc-drawer-body { flex: 1; overflow: auto; padding: 10px 16px 16px; }
+.bc-dl { display: grid; grid-template-columns: 42% 1fr; gap: 4px 10px; margin: 0; font-size: 12.5px; }
+.bc-dl dt { color: var(--text-secondary); }
+.bc-dl dd { margin: 0; word-break: break-word; font-variant-numeric: tabular-nums; }
+
+/* ---------- Settings page (settings.js) - RJ 2026-11-19 ---------- */
+.set-status { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin: 0 0 16px; }
+.set-stat { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 12px; text-align: left; cursor: pointer;
+  border: 1px solid var(--card-border); background: var(--card-bg); color: var(--text-primary); font: inherit; transition: border-color .12s, transform .12s; }
+.set-stat:hover { border-color: var(--accent); transform: translateY(-1px); }
+.set-stat b { display: block; font-size: 13px; font-weight: 600; }
+.set-stat small { display: block; font-size: 11.5px; color: var(--text-secondary); margin-top: 1px; }
+.set-stat-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #94a3b8; }
+.set-stat-dot[data-tone="ok"] { background: #10b981; box-shadow: 0 0 0 4px rgba(16, 185, 129, .15); }
+.set-stat-dot[data-tone="warn"] { background: #f59e0b; box-shadow: 0 0 0 4px rgba(245, 158, 11, .15); }
+.set-stat-dot[data-tone="bad"] { background: #ef4444; box-shadow: 0 0 0 4px rgba(239, 68, 68, .15); }
+.set-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 900px) { .set-layout { grid-template-columns: 1fr; } }
+.set-nav { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 2px; padding: 10px; border-radius: 14px;
+  border: 1px solid var(--card-border); background: var(--card-bg); }
+.set-nav-group { margin: 10px 8px 4px; font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .06em; }
+.set-nav-group:first-child { margin-top: 2px; }
+.set-nav-btn { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 9px; background: transparent;
+  color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; transition: background .12s; }
+.set-nav-btn:hover { background: var(--accent-bg-soft, rgba(99, 102, 241, .08)); }
+.set-nav-btn.is-active { background: var(--accent-bg-soft, rgba(99, 102, 241, .12)); box-shadow: inset 3px 0 0 var(--accent); }
+.set-nav-btn b { display: block; font-size: 13px; font-weight: 600; }
+.set-nav-btn small { display: block; font-size: 11px; color: var(--text-secondary); }
+.set-ico { width: 30px; height: 30px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px;
+  background: var(--accent-bg-soft, rgba(99, 102, 241, .1)); font-size: 15px; }
+.set-panel { display: none; }
+.set-panel.is-active { display: block; animation: setIn .15s ease-out; }
+@keyframes setIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.set-fieldset { margin: 14px 0 6px; padding: 12px 14px 4px; border-radius: 12px; border: 1px solid var(--card-border); }
+.set-legend { margin: -2px 0 8px; font-size: 12px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .05em; }
+.set-check { display: flex; align-items: center; gap: 8px; margin-top: 8px; cursor: pointer; }
+.set-diagram { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0 4px; }
+.set-node { padding: 8px 12px; border-radius: 10px; border: 1px solid var(--card-border); background: var(--accent-bg-soft, rgba(99, 102, 241, .06));
+  font-size: 12.5px; font-weight: 600; text-align: center; line-height: 1.35; }
+.set-node small { font-weight: 500; color: var(--text-secondary); font-family: ui-monospace, Consolas, monospace; }
+.set-arrow { color: var(--text-secondary); font-size: 18px; }
+.set-tunnel-pill { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: rgba(148, 163, 184, .18); color: #64748b; }
+.set-tunnel-pill[data-state="connected"] { background: rgba(16, 185, 129, .15); color: #059669; }
+.set-tunnel-pill[data-state="connecting"], .set-tunnel-pill[data-state="reconnecting"] { background: rgba(245, 158, 11, .15); color: #b45309; }
+.set-tunnel-pill[data-state="error"] { background: rgba(239, 68, 68, .14); color: #dc2626; }
+
+/* collapsed rail: a short coloured tick per section instead of a grey line */
+.sidebar.is-collapsed .navx-grp { background: color-mix(in srgb, var(--grp) 55%, transparent); height: 2px; margin: 10px 20px; border-radius: 2px; }
+.sidebar-collapse-btn:hover { background: rgba(255, 255, 255, .06) !important; color: #fff !important; }

@@ -71,6 +71,7 @@ there. That file is deleted the first time anyone logs in successfully
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import string
 from dataclasses import dataclass, field
@@ -79,6 +80,7 @@ from datetime import datetime, timezone
 import bcrypt
 
 from app.utils.paths import get_web_users_path, get_data_dir
+from app.utils import crypto   # RJ 2026-11-17: web_users.json + session key encrypted at rest
 
 DEFAULT_ADMIN_USERNAME = "admin"
 
@@ -129,7 +131,8 @@ class WebUserStore:
         path = get_web_users_path()
         if not path.exists():
             return cls._bootstrap()
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        # RJ 2026-11-17: the whole file is encrypted (usernames, roles, bcrypt hashes)
+        raw, was_encrypted = crypto.loads_secure(path.read_text(encoding="utf-8"))
         users = {}
         for u in raw.get("users", []):
             # Back-compat: a record written before roles existed only has
@@ -150,7 +153,10 @@ class WebUserStore:
                 created_at_utc=u.get("created_at_utc", ""),
                 created_by=u.get("created_by", ""),
             )
-        return cls(users=users)
+        store = cls(users=users)
+        if not was_encrypted:   # plain file from before -> rewrite it encrypted
+            store.save()
+        return store
 
     @classmethod
     def _bootstrap(cls) -> "WebUserStore":
@@ -204,7 +210,11 @@ class WebUserStore:
                 for u in self.users.values()
             ]
         }
-        get_web_users_path().write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        # RJ 2026-11-17: encrypted + atomic (temp file swapped in) so a crash can't leave half a file
+        path = get_web_users_path()
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(crypto.dumps_secure(raw), encoding="utf-8")
+        os.replace(tmp, path)
 
     # ------------------------------------------------------------------
     # Lockout guards - shared by deactivate/remove/demote below
@@ -360,8 +370,22 @@ def get_session_secret() -> bytes:
     from app.utils.paths import get_web_session_secret_path
 
     path = get_web_session_secret_path()
+    # RJ 2026-11-17: DPAPI-wrapped like the master key (crypto.protect_bytes); a plain key from
+    # before is wrapped in place. If it can't be unwrapped (other Windows user) a new one is made -
+    # that only logs everyone out.
     if path.exists():
-        return path.read_bytes()
+        stored = path.read_bytes()
+        try:
+            key = crypto.unprotect_bytes(stored) if crypto.is_protected(stored) else stored
+        except OSError:
+            key = None
+        if key:
+            if not crypto.is_protected(stored) and crypto.dpapi_available():
+                crypto.write_protected_file(path, key)
+            return key
     key = secrets.token_bytes(32)
-    path.write_bytes(key)
+    if crypto.dpapi_available():
+        crypto.write_protected_file(path, key)
+    else:
+        path.write_bytes(key)
     return key

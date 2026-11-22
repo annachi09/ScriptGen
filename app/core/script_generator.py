@@ -241,15 +241,11 @@ def generate_rollback_script(
         header_lines.append("-- Original source query:")
         header_lines.append(commented_source)
     header_lines.append("")
-    header_lines.append("BEGIN TRANSACTION;")
+    # RJ 2026-11-18: "in all the script being generated, remove begin transaction it creates problem when
+    # commiting" - no BEGIN TRANSACTION / COMMIT wrapper; statements run and commit on their own.
     header_lines.append("")
 
-    footer_lines = [
-        "",
-        "-- Review the statements above, then COMMIT or ROLLBACK explicitly:",
-        "-- COMMIT TRANSACTION;",
-        "-- ROLLBACK TRANSACTION;",
-    ]
+    footer_lines = [""]
 
     body = "\n\n".join(statements) if statements else "-- No changes to roll back."
     sql_text = "\n".join(header_lines) + body + "\n".join(footer_lines)
@@ -281,15 +277,10 @@ def generate_update_script(
         header_lines.append("-- Source query:")
         header_lines.append(commented_source)
     header_lines.append("")
-    header_lines.append("BEGIN TRANSACTION;")
+    # RJ 2026-11-18: no BEGIN TRANSACTION / COMMIT wrapper (it caused problems when committing).
     header_lines.append("")
 
-    footer_lines = [
-        "",
-        "-- Review the statements above, then COMMIT or ROLLBACK explicitly:",
-        "-- COMMIT TRANSACTION;",
-        "-- ROLLBACK TRANSACTION;",
-    ]
+    footer_lines = [""]
 
     body = "\n\n".join(statements) if statements else "-- No changes detected - nothing to update."
     sql_text = "\n".join(header_lines) + body + "\n".join(footer_lines)

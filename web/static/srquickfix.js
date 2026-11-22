@@ -174,6 +174,7 @@
     el("srq-detect-btn").addEventListener("click", () => scan(false));
     el("srq-all-btn").addEventListener("click", () => scan(true));
     el("srq-accounts").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || !e.shiftKey)) { e.preventDefault(); scan(false); } });
+    el("srq-floor").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); scan(!(el("srq-accounts").value || "").trim()); } });
     el("srq-search").addEventListener("input", applyFilters);
     el("srq-table").addEventListener("click", (e) => {
       const t = e.target.closest("[data-srq-toggle]"); if (!t) return;

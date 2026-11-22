@@ -112,9 +112,25 @@ def _open(conn_cfg: ConnectionConfig):
 
 def _friendly_error(exc: Exception, conn_cfg: ConnectionConfig) -> str:
     if isinstance(exc, (TimeoutError, ConnectionRefusedError)) or "timed out" in str(exc).lower():
+        # RJ 2026-11-19: say what the tunnel is doing instead of a generic question
+        hint = "Is your local tunnel open?"
+        try:
+            from app.core import ssh_tunnel
+            st = ssh_tunnel.status()
+            hint = {
+                "connected": "The built-in SSH tunnel is up - the SQL Server did not answer through it.",
+                "external": "An external tunnel holds the port - it did not answer this time.",
+                "external_down": "Another program (MobaXterm / PuTTY?) holds the port but its tunnel is not working - close it so ScriptGen can open its own.",
+                "reconnecting": "The built-in SSH tunnel dropped and is reconnecting - try again in a moment.",
+                "retrying": "The built-in SSH tunnel is not up yet (retrying) - see Settings > SSH tunnel.",
+                "connecting": "The built-in SSH tunnel is still connecting - try again in a moment.",
+                "error": "The built-in SSH tunnel failed - see Settings > SSH tunnel.",
+            }.get(st.get("state"), hint)
+        except Exception:  # noqa: BLE001
+            pass
         return (
             f"Could not reach {conn_cfg.server}:{conn_cfg.port} within "
-            f"{conn_cfg.timeout_seconds}s. Is your local tunnel open?"
+            f"{conn_cfg.timeout_seconds}s. {hint}"
         )
     if isinstance(exc, pytds.LoginError) or "login" in str(exc).lower():
         return f"Login failed for user '{conn_cfg.username}'. Check the username/password in Config."

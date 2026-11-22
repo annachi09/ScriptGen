@@ -1390,6 +1390,29 @@ button { font-family: inherit; }
   padding: 2px 4px; border-radius: 4px; cursor: text;
 }
 #rv-table tbody .rv-edit-select { cursor: pointer; }
+/* RJ 2026-11-17: "the prev date and reading date displayed is cut" - the edit boxes keep their full
+   text width (yyyy-mm-dd hh:mm:ss) instead of shrinking to the column */
+#rv-table tbody .rv-edit-input[data-col="reading_prev_date"],
+#rv-table tbody .rv-edit-input[data-col="reading_date"] { min-width: 10.5ch; }
+/* RJ 2026-11-18: "the space between prev date and reading date is too huge" - the dates are shown without
+   the midnight time (yyyy-mm-dd), so the date boxes now size to their own text (field-sizing) instead of a
+   fixed 21ch; a date that does carry a time still grows to fit it. Same for the new status / flag cells. */
+#rv-table tbody .rv-edit-input[data-col="reading_prev_date"],
+#rv-table tbody .rv-edit-input[data-col="reading_date"] { width: auto; field-sizing: content; padding: 2px 3px; }
+#rv-table tbody td[data-col="reading_prev_date"], #rv-table tbody td[data-col="reading_date"] { padding-left: 4px; padding-right: 4px; white-space: nowrap; }
+#rv-table tbody .rv-edit-select[data-col="read_status"] { width: auto; min-width: 16ch; }
+#rv-table tbody .rv-edit-flag { width: auto; min-width: 5ch; text-align: center; }
+#rv-table tbody .rv-edit-input[data-col="prev_value"], #rv-table tbody .rv-edit-input[data-col="reading"],
+#rv-table tbody .rv-edit-input[data-col="metered_usage"], #rv-table tbody .rv-edit-input[data-col="corrected_usage"],
+#rv-table tbody .rv-edit-input[data-col="bill_ready_usage"] { min-width: 11ch; }
+/* "freeze the horizontal scroll and the headers of the list": the table scrolls inside its own box
+   (max 72% of the screen high), so the horizontal scrollbar is always on screen; the header row and
+   the first column stay in place while scrolling */
+.rv-grid-wrap { max-height: 72vh; overflow: auto; position: relative; }
+#rv-table { border-collapse: separate; border-spacing: 0; }
+#rv-table thead th { position: sticky; top: 0; z-index: 3; background: var(--card-bg, #fff); box-shadow: 0 1px 0 var(--card-border); white-space: nowrap; }
+#rv-table tbody td:first-child { position: sticky; left: 0; z-index: 2; background: var(--card-bg, #fff); box-shadow: 1px 0 0 var(--card-border); }
+#rv-table thead th:first-child { left: 0; z-index: 4; }
 #rv-table tbody .rv-edit-input:hover,
 #rv-table tbody .rv-edit-select:hover { border-color: var(--card-border); }
 #rv-table tbody .rv-edit-input:focus,

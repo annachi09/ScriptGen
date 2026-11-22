@@ -116,6 +116,45 @@ class EmailConfig:
 
 
 @dataclass
+class SshConfig:
+    """RJ 2026-11-19: "can you do the ssh tunnel inside of you, add also the settings of ssh in the settings".
+    Built-in local port forward (app/core/ssh_tunnel.py): 127.0.0.1:local_port -> ssh_host -> remote_host:
+    remote_port. Point the DB connection at localhost:<local_port>. Secrets are Fernet-encrypted."""
+    enabled: bool = False
+    auto_start: bool = True          # open the tunnel when ScriptGen starts
+    ssh_host: str = ""
+    ssh_port: int = 22
+    ssh_user: str = ""
+    auth: str = "password"           # "password" | "key"
+    password_enc: str = ""
+    key_path: str = ""               # OpenSSH / PEM private key file
+    key_passphrase_enc: str = ""
+    remote_host: str = ""            # the SQL Server as seen FROM the SSH server
+    remote_port: int = 1433
+    local_port: int = 1433
+    keepalive_seconds: int = 30
+
+    def get_password(self) -> str:
+        return crypto.decrypt_text(self.password_enc)
+
+    def set_password(self, plain: str) -> None:
+        self.password_enc = crypto.encrypt_text(plain)
+
+    def get_key_passphrase(self) -> str:
+        return crypto.decrypt_text(self.key_passphrase_enc)
+
+    def set_key_passphrase(self, plain: str) -> None:
+        self.key_passphrase_enc = crypto.encrypt_text(plain)
+
+
+def _load_ssh(raw) -> SshConfig:
+    if not isinstance(raw, dict):
+        return SshConfig()
+    known = {f for f in SshConfig.__dataclass_fields__}
+    return SshConfig(**{k: v for k, v in raw.items() if k in known})
+
+
+@dataclass
 class SavedQuery:
     """A deliberately-named, kept-until-deleted query - distinct from
     recent_queries (a rolling, unnamed history). You save one on purpose;
@@ -136,6 +175,7 @@ class AppConfig:
     recent_queries: list[str] = field(default_factory=list)  # most-recent-first, capped at RECENT_QUERIES_MAX
     saved_queries: list[SavedQuery] = field(default_factory=list)
     email: EmailConfig = field(default_factory=EmailConfig)
+    ssh: SshConfig = field(default_factory=SshConfig)   # RJ 2026-11-19
 
     def get_active_connection(self) -> Optional[ConnectionConfig]:
         return self.connections.get(self.active_connection)
@@ -209,13 +249,15 @@ def _load_email(raw) -> EmailConfig:
     return EmailConfig(**{k: v for k, v in raw.items() if k in known})
 
 
-def _read_config_json(path) -> dict:
-    """RJ 2026-11-04: a read racing the atomic replace on Windows can briefly fail - retry."""
+def _read_config_json(path) -> tuple[dict, bool]:
+    """RJ 2026-11-04: a read racing the atomic replace on Windows can briefly fail - retry.
+    RJ 2026-11-17: the whole file is encrypted (crypto.dumps_secure); returns (raw, was_encrypted)
+    so a plain file from before is rewritten encrypted on first load."""
     import time
     last = None
     for _ in range(5):
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return crypto.loads_secure(path.read_text(encoding="utf-8"))
         except (PermissionError, json.JSONDecodeError) as exc:
             last = exc
             time.sleep(0.05)
@@ -229,7 +271,7 @@ def load_config() -> AppConfig:
         save_config(cfg)
         return cfg
 
-    raw = _read_config_json(path)
+    raw, was_encrypted = _read_config_json(path)
     connections = {
         key: ConnectionConfig(**val) for key, val in raw.get("connections", {}).items()
     }
@@ -259,8 +301,9 @@ def load_config() -> AppConfig:
         recent_queries=raw.get("recent_queries", []),
         saved_queries=[SavedQuery(**q) for q in raw.get("saved_queries", [])],
         email=_load_email(raw.get("email")),
+        ssh=_load_ssh(raw.get("ssh")),
     )
-    if ai_upgraded:
+    if ai_upgraded or not was_encrypted:   # RJ 2026-11-17: plain config.json -> rewritten encrypted
         save_config(cfg)
     return cfg
 
@@ -276,13 +319,14 @@ def save_config(cfg: AppConfig) -> None:
         "recent_queries": cfg.recent_queries,
         "saved_queries": [asdict(q) for q in cfg.saved_queries],
         "email": asdict(cfg.email),
+        "ssh": asdict(cfg.ssh),
     }
     # RJ 2026-11-04: data/config.json got corrupted ("Extra data" -> every DB call failed with 500)
     # when several queries finished at the same time and each rewrote the file in place. Now the
     # write goes to a temp file under a lock and is swapped in atomically, so a reader never sees a
     # half-written file and two writers can't interleave.
     path = get_config_path()
-    text = json.dumps(raw, indent=2)
+    text = crypto.dumps_secure(raw)   # RJ 2026-11-17: whole file encrypted (usernames, recipients, ...)
     with _SAVE_LOCK:
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         tmp.write_text(text, encoding="utf-8")

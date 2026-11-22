@@ -280,7 +280,10 @@ SELECT DISTINCT
        AND cs.status IN ('ESTSC00002', 'ESTSC00003', 'ESTSC00007')) AS num_services,
     PF2.REFERENCE AS BULK_ACCOUNT,
     b.TOTAL_AMOUNT,
-    b.BILL_TYPE,
+    -- RJ 2026-11-19: "also display the description not the code, like the bill type" (codes kept on hover/export
+    -- via the *_CODE columns hidden in the pop-up)
+    COALESCE(dgbt.TEXT, gbt.NAME_TYPE, b.BILL_TYPE) AS BILL_TYPE,
+    COALESCE(dbty.TEXT, bty.NAME_TYPE, b.billing_type) AS BILLING_TYPE,
     b.id_bill,
     CAST(pf2.next_group_date AS date) AS next_group_date,
     PF1.REFERENCE AS SUB_ACCOUNT,
@@ -293,6 +296,7 @@ SELECT DISTINCT
     CAST(b.creation_date AS date) AS creation_date,
     CAST(b.dispatch_coll_date AS date) AS invoice_date,
     b.ID_BILLING_PERIOD,
+    COALESCE(dbp.TEXT, bp.DESCRIPTION) AS BILLING_PERIOD,
     n.NOTICE_NUMBER,
     n.id_notice,
     N.IND_PENDING_GROUP,
@@ -301,11 +305,12 @@ SELECT DISTINCT
     CAST(bl.SEND_DATE AS date) AS send_date_RV,
     CAST(BL.PROCESS_DATE AS date) AS process_date_RV,
     cs.ID_CONTRACTED_SERVICE,
-    cs.status,
+    COALESCE(dcss.TEXT, css.NAME_TYPE, cs.status) AS contract_status,
     pf2.update_date,
     pf2.update_program,
-    b.billing_status,
-    b.dispatch_coll_date
+    b.billing_status AS BILLING_STATUS_CODE,
+    b.BILL_TYPE AS BILL_TYPE_CODE,
+    cs.status AS CONTRACT_STATUS_CODE
 FROM ouc_admin.GCCOM_ACCOUNT_BUNCHER ab
 JOIN ouc_common_admin.GCCOM_PAYMENT_FORM pf1 ON pf1.ID_PAYMENT_FORM = ab.ID_PAYMENT_FORM
 JOIN ouc_common_admin.GCCOM_PAYMENT_FORM PF2 ON PF2.ID_PAYMENT_FORM = AB.ID_PAYMENT_FORM_BUNCHER
@@ -325,7 +330,14 @@ LEFT JOIN ouc_admin.GCCOM_BUNCHER_LOT_DETAIL BLD ON BLD.ID_NOTICE = N.ID_NOTICE
 LEFT JOIN ouc_admin.GCCOM_BUNCHER_LOT bl ON bl.ID_BUNCHER_LOT = BLD.ID_BUNCHER_LOT
 LEFT JOIN GCCOM_BILL_STATUS bst ON bst.cod_develop = b.BILLING_STATUS
 LEFT JOIN GCCOM_BILLING_PERIOD bp ON bp.id_billing_period = b.ID_BILLING_PERIOD
-LEFT JOIN GCTS_DICTIONARY d ON d.id = bst.NAME_TYPE_XI18N AND LOCALE = 'EN'
+LEFT JOIN GCTS_DICTIONARY d ON d.id = bst.NAME_TYPE_XI18N AND d.LOCALE = 'EN'
+LEFT JOIN OUC_ADMIN.GCCOM_GENERABLE_BILL_TYPE gbt ON gbt.COD_DEVELOP = b.BILL_TYPE
+LEFT JOIN GCTS_DICTIONARY dgbt ON dgbt.ID = gbt.NAME_TYPE_XI18N AND dgbt.LOCALE = 'EN'
+LEFT JOIN OUC_ADMIN.GCCOM_BILLING_TYPE bty ON bty.COD_DEVELOP = b.billing_type
+LEFT JOIN GCTS_DICTIONARY dbty ON dbty.ID = bty.NAME_TYPE_XI18N AND dbty.LOCALE = 'EN'
+LEFT JOIN OUC_COMMON_ADMIN.GCCOM_CONTRACT_SERV_STATUS css ON css.COD_DEVELOP = cs.status
+LEFT JOIN GCTS_DICTIONARY dcss ON dcss.ID = css.NAME_TYPE_XI18N AND dcss.LOCALE = 'EN'
+LEFT JOIN GCTS_DICTIONARY dbp ON dbp.ID = bp.PERIOD_NAME_XI18N AND dbp.LOCALE = 'EN'
 WHERE NOT EXISTS (
         SELECT cs2.nisc
         FROM gccom_contracted_service cs2

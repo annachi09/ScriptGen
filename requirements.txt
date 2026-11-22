@@ -14,6 +14,7 @@ cryptography==43.0.3     # Fernet encryption for the stored connection password/
 requests==2.32.3         # HTTP calls to the Gemini API
 openpyxl==3.1.5          # .xlsx export for the results grid / Dashboard stats table - pure Python, no compiled extensions
 sqlparse==0.6.0          # Query editor's "Format" button (prettify SQL) - pure Python, no compiled extensions
+paramiko>=3.4,<5         # RJ 2026-11-19: built-in SSH tunnel (app/core/ssh_tunnel.py) - replaces opening it in MobaXterm
 
 # --- Legacy desktop UI (app/ui/*) - being retired in favor of web/, see
 # README's "Web + desktop, one codebase" section. Kept only until the web

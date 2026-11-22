@@ -3332,6 +3332,459 @@ join gccom_payment_form pf ... where COD_STATUS = '5002NOTEMP'".
     accounts still ready) and `build_release_by_account_script` (5000NOTEMP / 5002NOTEMP ->
     1000NOTEMP on Invoicing bills, chunks of 1000 accounts). Shown with Copy / Download, never run.
 
+### New navigation: sidebar search + favorite tiles + spaces, tabs as cards (2026-11-18)
+
+RJ: "make the menu better ... modern with the latest trend" -> picked sidebar "A + C" and, for the tabs
+inside pages, "option 3: each tab is a small card showing its count and a short label".
+
+- `navx.js` + `navx.css` (static, loaded after app.js):
+  - **Search** at the top of the sidebar (Ctrl+K from anywhere): finds menus and the tabs inside them
+    ("h2o" -> SR Quick FIX › Sanitary Anomaly - H2O Pending); arrows + Enter or click opens it (same
+    navigation as the Overview cards).
+  - **Favorite tiles**: the ★ favorites (per user, server-side) as tiles with their live count; the
+    "★ only" toggle sits next to the Favorites title.
+  - **Spaces**: All / Billing / Readings & MP / Stats / Tools (`SPACE_OF` map; Overview always shown;
+    choice remembered per browser). Applied on top of role menu access and favorites-only.
+  - **Live badge** on each menu = sum of its Overview counters (`overviewLive`), refreshed as the counters load.
+  - **Tabs as cards**: every `.da-subnav` becomes a grid of cards - tab name, live count (the Overview
+    counter whose subAttr/subValue is that tab) and the counter's description, accent color per card.
+    Wrong Bill keeps its own count badges.
+- Checked live: Bill Issuance tabs show 315 / 220 / 3 / 745 / 8; search "h2o" + Enter opened SR Quick FIX
+  on the H2O tab. Static change - Ctrl+F5.
+- RJ 2026-11-18 (later): "remove the favorites with big icons, and make the main menus bigger and looking
+  better" - favorite tiles removed (the ☆ stars on each menu and the "★ only" toggle, now at the end of the
+  spaces row, stay). Menu items: 44px rows, 14.5px text, each icon in a 32px rounded chip, hover lift,
+  active item = indigo gradient + left accent bar + highlighted icon chip.
+- RJ 2026-11-18 (later): "the menu text before is better, what i want you to design better is this.. make it
+  appealing its so badly grouped" (the spaces chips) - menu-item restyle reverted; the spaces are now one
+  segmented switcher (5 equal cells: icon + short label - All / Billing / Reads / Stats / Tools - in a rounded
+  track, active cell lit) with a caption line "Billing · 9 menus"; the favorites-only toggle is a ☆ / ★ icon
+  inside the search bar.
+- RJ 2026-11-18 (later): "rename the menus with same format of upper and lower case, best practice and
+  industry level quality also try to be creative with the favorite and the numbers in the menu, make it
+  smaller maybe":
+  - **Names** - one Title Case style, acronyms kept (AI, ITB, MP, SR, TNB), plural nouns for list pages, no
+    slashes / caps-lock: Diff Dates Anomalies, Reading Validation, TNB Cycle & Disconnection, Stuck Hierarchy
+    ITBs, TNB Disconnections, Double ITBs, Wrong Bills, Anomaly Statistics, Pending Service Requests,
+    Fix Billing Campaign 2026, SR Quick Fix. Source: `MENU_NAMES` in navx.js (applied to the sidebar, search
+    and favorites) and `MENU_LABELS` in web/menu_access.py (Settings → Menu Access) - keep both in sync.
+  - **Pinned favorites** - starred menus move into a gold "★ Pinned" group right under Overview, stay
+    visible in every space, carry a small glowing gold dot on their icon, and return to their original place
+    when un-starred. The ☆ only shows on hover.
+  - **Badges** - mini pills (9.5px, 15px high), compact numbers (1.2k / 12k / 1.2M, full number on hover),
+    with a severity dot: red ≥ 100, amber > 0.
+- RJ 2026-11-18 (later): "when i hover on the menu, add a small description of what it is doing, make it
+  user friendly" - hovering a menu (after ~0.4 s, then instantly while moving between menus) shows a dark
+  hover card beside the sidebar: icon + name, one plain-language line (`MENU_DESC` in navx.js - add one for
+  every new menu), the live "N open right now" count with its severity dot, "★ Pinned" and a pin/unpin hint.
+  The browser's own title tooltip is removed (the line is kept as `aria-description`). Static only - Ctrl+F5.
+- RJ 2026-11-18 (later): "implement c and big ICONS for D when collapsed" (picked from 4 mockups):
+  - **C - grouped, collapsible sections**: the spaces switcher is gone; menus sit under 5 group headers
+    (Workspace / Billing / Readings & MP / Statistics / Help & Admin - `GROUPS` + `GROUP_OF` in navx.js).
+    Click a header to open / close it (▾ rotates); closed groups are remembered per browser
+    (`scriptgen_nav_closed`). A header shows its menu count, or - when closed - the group's total open
+    count in red. The group holding the open page re-opens itself. Pinned favorites stay in their own group
+    under Overview; headers of groups with no visible menu (role access) are hidden.
+  - **D - collapsed sidebar = icon rail**: 24px icons in 46px rows (hover grows them a little), all
+    menus visible even from closed groups, group headers become thin divider lines, the hover card shows
+    the name + description. The « / » button is bigger and easier to see in both states.
+  - Fix: in the collapsed rail the menu rows were squeezed (flex-shrink) - now fixed height.
+  - RJ 2026-11-18 (later) "we lost the grouping?": with "favorites only" (★ in the search bar) ON, every
+    visible menu was a favorite, so all sat in Pinned and the groups looked gone. In that mode favorites are
+    now shown inside their groups (no Pinned block); empty groups stay hidden. Also: any show / hide of a menu
+    (role access after login) re-runs the layout (MutationObserver).
+  - Static only - Ctrl+F5.
+
+### MP Tools - TMP Activate MP: Available readings get IND_USAGE_TO_CAL = 1 (2026-11-18)
+
+RJ: "for the mp tools first tab, also allow to update the reading when status is available to make sure that
+ind usage to cal = 1". The scan now also lists, per MP, its **latest** Available (1000STSRED) reading when
+its IND_USAGE_TO_CAL is not 1 (NULL counts as not 1). Only the latest: live, MP 393444 (NISS 10156214-101)
+has 11 Available readings back to 2016, all with 0 - flagging all of them would recalculate old history.
+The script gets step `1b) UPDATE GCGT_RE_READING SET IND_USAGE_TO_CAL = 1 WHERE READ_STATUS = '1000STSRED'
+AND ISNULL(IND_USAGE_TO_CAL,0) <> 1 AND ID_READING IN (...)` (readings are still not in the revert, as
+before). New KPI card "Available, usage-to-calc ≠ 1"; each reading in the table shows its status.
+Live check: 10156214-101 -> reading 1048938623 (2026-10-28, IND 0); 10084569-301 -> calculated reading
+1049772747 as before. Python + static change - restart needed.
+
+### Bulk Checker - Analyze pop-up summary (2026-11-19)
+
+RJ: "when i press analyze and the pop up open, i want to see the main information on the top, like next group
+date, no. of accounts, no. of service, no. pending (like statistics/kpi)". `bcRenderDetailSummary()` adds a
+strip above the status cards (same detail rows, no extra query): Bulk + billing period, Next group date (red
+when in the past, "n different dates" if several), Accounts (distinct sub-accounts), Services (distinct
+contracted services), Bills (distinct bills + total amount), Pending (billed, not in a file), No bill, Done %
+(+ files). Live: bulk 1075821494 -> 2026-12-01, 133 accounts, 519 services, 513 bills / 84,928.8, 513
+pending, 6 no bill, 0% done. Static only - Ctrl+F5.
+- RJ (later): "also display the description not the code, like the bill type". `build_bill_detail_sql` now
+  returns BILL_TYPE as its description (GCCOM_GENERABLE_BILL_TYPE, e.g. TFGEN00001 = "Service"), a new
+  BILLING_TYPE (GCCOM_BILLING_TYPE: In cycle / Out of cycle), BILLING_PERIOD (period name), contract_status
+  (GCCOM_CONTRACT_SERV_STATUS: Active / Pending termination / Suspended ...), all via GCTS_DICTIONARY EN. The
+  codes stay as BILL_TYPE_CODE / BILLING_STATUS_CODE / CONTRACT_STATUS_CODE (+ ID_BILLING_PERIOD) for the
+  CSV / Excel export, hidden in the pop-up. Dropped the duplicate dispatch_coll_date (= invoice_date).
+  Python change - restart needed.
+- RJ (later): "its invoiced and shows under not invoiced in the card kpi". The old "Pending (billed, not
+  invoiced)" card meant "has a bill but no FILE_NUMBER", so Invoiced bills waiting for their file landed there.
+  `bcClassifyDetailRow` now has 4 states: Done (has FILE_NUMBER) / Invoiced, waiting for file
+  (BILLING_STATUS_CODE = ESTFAC0005, falls back to bill_status text "Invoiced" before the restart) / Billed,
+  not invoiced / Still no bill. Cards, summary strip (new "Invoiced" + "Not invoiced" tiles) and row colours
+  follow the same split (Invoiced = blue `invoicing` colour).
+- RJ ("all agree") - table redesign in the pop-up:
+  - **By account (default)**: one header row per sub-account with services / bills / NISS / amount and status
+    pills; accounts with problems first (No bill > Not invoiced > Invoiced > Done). Click to open/close;
+    problem accounts open by default when there are 15 accounts or fewer. Expand all / Collapse all.
+  - **Flat** toggle (the old one-row-per-bill table).
+  - **Columns ▾** chooser: 9 default columns (Sub account, NISS, Bill type, Bill number, Bill status, Billing
+    period, Total amount, File number, Contract status), Default / All buttons; codes stay hidden.
+  - **Comfortable / Compact** density; per-column filter row (+ Clear filters); sticky header and key column.
+  - Click a bill row -> side drawer with every column of that row (codes included).
+  - View / density / columns remembered per browser (`localStorage scriptgen_bc_detail_view`). Exports
+    unchanged (all columns, current filters).
+  Static only - Ctrl+F5 (Billing period / Contract status columns appear after the earlier Python restart).
+
+### Bulk Checker pop-up - bill-status colours + bill cards per account (2026-11-19)
+
+RJ: "i dont like the format of the details of per account make something better. what is important for me is to
+know the bill status, make the color different for each status".
+- One colour per bill status (list read live from GCCOM_BILL_STATUS + GCTS_DICTIONARY EN, 37 statuses):
+  Invoiced blue, Invoicing cyan, Generated violet, Additional generated purple, Pending approval yellow,
+  Waiting for other services amber, Waiting for final bill orange, Sent teal, Paid green, Compensated lime,
+  Cancelled grey, Disputed* rose, Rebilled* indigo, debt-management statuses dark red, No bill red; any other
+  status gets a stable colour. `bcBillStatusColor()` / `BC_BILL_STATUS_COLORS` in app.js.
+- **Bill status legend** above the table with counts per status - click one to show only those bills.
+- **By account**: header shows the account, services / bills / amount, a colour bar of its bill-status mix and
+  a chip per status with its count. Opening it shows each bill as a card led by a solid bill-status badge, then
+  bill number + bill type / billing type / period, NISS + contract status, invoice date, file ("not in a file"
+  in amber), amount, Readings. Click a card for the full-detail drawer.
+- **Flat** view: the Bill status cell is the coloured chip and the row's left edge takes the status colour.
+  Columns / column filters now only show in Flat view.
+Static only - Ctrl+F5. Live: bulk 1075821494 -> Generated 513, No bill 6.
+- RJ (later): "if all bills for the account are created, status should be complete, if its complete tell which
+  is the status of the bill, or its missing, then for this cases, show the contract status and to and from
+  date". Each account header now starts with a verdict: green **Complete** (every service has a bill) + "all
+  bills <status>" (or "bills in n statuses"), or red **Missing · n of m** (services without a bill). Missing
+  accounts sort first. A "No bill" card shows NISS, **Contract status** and **Contract from → to**
+  (Contract_start / Contract_end, "open" when no end date) instead of invoice date / file.
+
+### Sidebar - bold main menu, smaller sub menu (2026-11-19)
+
+RJ: "make the menus bold, and the sub menu smaller than the main menu". navx.css: section headers (Monitor,
+Billing fixes, ... and Pinned) are now 13.5px / 700 in near-white with a slightly bigger icon chip; the pages under
+them are 12px / 500 (active 600), 14px icons, indented under their section. Collapsed rail unchanged. Static only -
+Ctrl+F5.
+
+### Built-in SSH tunnel + Settings regrouped (2026-11-19)
+
+RJ: "can you do the ssh tunnel inside of you, add also the settings of ssh in the settings, group all settings
+in one menu in nice way and modern".
+- `app/core/ssh_tunnel.py` (paramiko, added to requirements.txt - run_dev.bat installs it): local port forward
+  `127.0.0.1:<local_port> -> SSH server -> <SQL Server host>:<port>`, password or private-key (OpenSSH / PEM)
+  login, keep-alive, auto-reconnect with back-off, refuses to start when the local port is already taken
+  (e.g. MobaXterm still running). Auto-starts with ScriptGen when "Use the built-in tunnel" + "Open
+  automatically" are ticked; stopped on shutdown. RJ "is it auto start and auto retry?": the startup connect
+  is retried too (10 s, 20 s, 40 s, then every 60 s - status "Retrying…" with the reason) until it connects,
+  the setting is switched off or Stop is pressed; once up, a dropped connection reconnects by itself (5 s
+  back-off doubling to 60 s, status "Reconnecting…").
+- RJ (later): "Could not reach localhost:1433 within 120s ... maybe because the tunnel is open externally, so
+  ... check first if tunnel is running already then if not do its own tunnel, same thing if it lost tunnel
+  connection, it will trigger a retry on its own". `ssh_tunnel.supervise()` (started at ScriptGen startup)
+  replaces the one-off auto start - every 15 s: our tunnel up -> fine (watcher reconnects drops); local port
+  already open by another program -> probe the DB through it (10 s login, re-checked once a minute when
+  healthy): answers = "Using external tunnel", no answer = "External tunnel not answering" (close it so
+  ScriptGen can take the port); port free -> open our own (retry 15 s .. 60 s). So when MobaXterm is closed or
+  its tunnel dies and frees the port, ScriptGen takes over by itself. The "Could not reach ..." DB error now
+  says what the tunnel is doing (built-in up / reconnecting / external not answering / ...).
+- `SshConfig` in app/config.py (`config.ssh`, password / key passphrase encrypted like the other secrets).
+- Routes: `GET/POST /api/settings/ssh`, `POST /api/settings/ssh/test` (login + opens a channel to the DB
+  host through SSH, then disconnects), `GET /api/ssh/status`, `POST /api/ssh/start|stop` (admin).
+- Settings page rebuilt (web/static/settings.js): status strip (Database / SSH tunnel / AI Assist / E-mail
+  alerts, click = jump), left section nav (Personal: My account · Connectivity: Database, SSH tunnel ·
+  Services: AI Assist, E-mail alerts · Access: Users, Menu access), one panel at a time (remembered), admin
+  sections hidden for non-admins. SSH panel: route diagram (This PC -> SSH server -> SQL Server), SSH server
+  and forwarding field groups, Test / Save / Start / Stop, live status pill.
+- The DB connection keeps pointing at localhost:1433 (or the chosen local port). Python + static change +
+  new package - restart with run_dev.bat.
+
+### App standard: menu sections with colours + page template kit (2026-11-19)
+
+RJ: "suggest for me to better organize our script gen, the menus and the contents, maybe we can make something
+standard across the application" -> "ok proceed and maybe colors to main menu and some icon". See
+`docs/UI_STANDARD.md`.
+- Sidebar regrouped by job: Monitor (sky) / Billing fixes (amber) / Reading fixes (emerald) / Quick fixes
+  (violet) / Lookup & SQL (indigo) / Admin & help (slate) - each section label has a coloured icon chip, its
+  menu icons and the active bar use the section colour (`--grp`); the collapsed rail shows a coloured tick
+  per section.
+- New `web/static/sg-std.js` (`window.sgStd`: scanMeta, kpis, pill, scriptPanel, selection) + `.sg-kpi` /
+  `.sg-pill` styles in navx.css - the shared pieces of the 5-block page template. Pages move to it one by
+  one (pilot next: Double ITBs). Static only - Ctrl+F5.
+
+### Double ITB - Sanitary only: fix script (2026-11-19)
+
+RJ: "for double itb why we dont have update script for sanitary tab? we need do the same as what we have in
+water". The Sanitary-only tab now has row checkboxes (+ select all shown) and a "Generate Fix Script" card
+(user / program `DOUBLE_ITB_SAN` / creation user / batch / clean, copy / download, rollback). It calls the same
+`/api/double-itb/generate` (re-reads live; rows no longer Anomalous with a Billed twin are left out).
+`build_fix_script` for a Sanitary (190) duplicate = the Sanitary side of a Water duplicate:
+1. duplicate Sanitary ITB STTOBILL00 -> STTOBILL04;
+2. NEW: its own open GCCOM_ANOMALOUS (ESTAN00009 / 00001) -> ESTAN00005 (before-state read live as
+   `SELF_ANOM_STATES`, put back by the rollback);
+3. its readings -> 7000STSRED;
+4. ready usage > 0 -> rebilling activity for the Billed Sanitary twin's bill, bill -> ESTFAC0010.
+Python + static change - restart needed.
+
+### MP Tools - TMP Activate MP: "Detect all" (2026-11-18)
+
+RJ: "for MP tools, create a detect all button, here we will find all Inactive mp where there is a reading in
+status available or calculated usage". New "🔎 Detect all" button + window dropdown (readings of the last 3 / 6
+(default) / 12 months, or any date) next to Scan. `build_detect_all_query(since_months)`: reading-first CTE of
+Inactive (3000STAMPO) MPs with a 1000STSRED / 4000STSRED reading in the window (TOP 3,000 MPs), then the same
+columns / reading rows as the normal scan, so the script (steps 1, 1b, 2, 3, 4 + revert) is unchanged.
+Generate re-scans just the selected MPs (MAX_INPUTS raised 300 -> 3,000). Why the window: live, 26,075
+Inactive MPs have an Available reading (85,425 readings, most years old) and 617 a Calculated-usage one; last
+6 months = 1,262 MPs (48 calculated readings, 988 latest Available readings with IND_USAGE_TO_CAL <> 1, 291
+secondary MPs) in ~6 s. Python + static change - restart needed.
+
+### SR Quick Fix - Sanitary Anomaly H2O Pending: "Detect all cases" (2026-11-18)
+
+RJ: "for SR QUICK FIX the detect all cases will find GCCOM_ANOMALOUS which is not solved having WATERNOTBI and
+has ID_SERVREQ". The placeholder sub-tab now scans system-wide: unresolved GCCOM_ANOMALOUS (not ESTAN00003 /
+00004 / 00005 / 00008) whose principal anomaly is `WATERNOTBI` (GCCOM_BILL_ANOMALY_COMPANY 10000000036, "Water
+Service Anomaly") and ID_SERVREQ is filled (`build_sanh2o_anomalies_query(..., detect_all=True)`, routes take
+`mode: "all"`). The query is now anomaly-driven with a LEFT JOIN to the SR, so an anomaly whose ID_SERVREQ has
+no SR row still shows ("no SR row"). Results, selection and the script (resolve -> ESTAN00005 + readings' ITBs
+STTOBILL00 -> 01, water + sanitary, rollback) are shared with "By SR code" - the table / script cards now sit
+under both sub-tabs. Live 2026-11-18: 2 cases - SR0020758165 anomaly 1432265 (ESTAN00001) and SR0020756555
+anomaly 1427547 (ESTAN00009). Python + static change - restart needed.
+
+### Sidebar - professional redesign (2026-11-18)
+
+RJ: "i dont like the menu its too big the text looks like not done professionally ... remove also the numbers
+... and the yellow dot indicator, please redesign it in a very good one industry standard". Sidebar now in
+the Linear / Vercel / GitHub style (last block of navx.css + `ICONS` in navx.js):
+- Emoji icons replaced by one consistent line-icon set (inline SVG, Lucide-style, 16px, stroke currentColor);
+  search results and hover card use the same icons. New menus: add an entry to `ICONS` (falls back to emoji).
+- Rows 32px, 13px / weight 450 text, muted slate colour; hover = faint wash; active = light wash + 2px accent
+  bar on the left, white text. Collapsed rail = 40px rows, 20px icons.
+- Section labels in sentence case (11.5px, muted), chevron only on hover / when closed; "Pinned" uses the
+  same style.
+- Removed: all counts in the menu (item badges and group counts), the gold dot on favourites, the count and
+  pin hint in the hover card. The ☆ shows only on hover. Static only - Ctrl+F5.
+
+### MP Tools - TMP Activate MP: secondary MP temporarily Normal (2026-11-18)
+
+RJ: "add an additional update in case the reading is in status available, or id_device is null and the mp type
+is secondary, we need to temporarily make it as a normal measuring point ... set it id_main_mp to null, change
+mp_type to 00001 normal, do not forget the revert". GCGT_RE_MP_TYPE (live): TIPEQM0001 Normal, TIPEQM0002
+Secondary, TIPEQM0003 Main. For a selected MP with MP_TYPE TIPEQM0002 and a scanned reading that is Available
+or Calculated usage (it becomes Available in step 1) or has GCGT_RE_READING.ID_DEVICE NULL:
+- Step 4: `UPDATE GCGT_RE_MEASUREMENT_POINT SET ID_MAIN_MP = NULL, MP_TYPE = 'TIPEQM0001' WHERE
+  ID_MEASURING_POINT = x AND MP_TYPE = 'TIPEQM0002' AND ID_MAIN_MP = <scanned main>`.
+- Revert: `SET MP_TYPE = 'TIPEQM0002', ID_MAIN_MP = <original main> WHERE ID_MEASURING_POINT = x AND
+  MP_TYPE = 'TIPEQM0001' AND ID_MAIN_MP IS NULL` (placed after the status revert, which is guarded on
+  UPDATE_PROGRAM). The table shows "Secondary -> temporarily Normal (main MP n)". Live example:
+  NISS 10577056-301, MP 771257 (main 97774), reading 1049663817 Calculated usage, no device.
+  Python + static change - restart needed.
+
+### New menu: MP Tools - tab 1 "TMP Activate MP" + favorite menus per user (2026-11-18)
+
+RJ: "create a new menu MP Tools, on the first tab.. add TMP ACTIVATE MP, here we will find if there is a
+reading in calculated usage status (GCGT_RE_READING) using ID_MEASURING point or NISS of
+GCCOM_SECTOR_SUPPLY. we will update 3 tables ... then you have to give the revert updates for only the
+Measuring point table and mp_STATUS_HIST to its original status" + "i also want an option to add favorite
+menus and saved by user and option to show only favorites".
+
+- Live codes (2026-11-18): GCGT_RE_READ_STATUS 4000STSRED Calculated usage, 1000STSRED Available. MP table
+  `OUC_COMMON_ADMIN.GCGT_RE_MEASUREMENT_POINT.STATUS` with GCGT_RE_MEASURE_POINT_STATUS 0000STAMPO
+  Non-existent / **1000STAMPO Connected (active)** / 2000STAMPO Disconnected / **3000STAMPO Inactive**
+  (RJ's "3000 -> 10000" = 3000STAMPO -> 1000STAMPO). History `OUC_COMMON_ADMIN.GCGT_RE_MP_STATUS_HIST`
+  (ID_STATUS, END_DATE null = open row). Example: NISS 10084569-301, MP 735693 Inactive, open hist
+  21044794 Inactive, reading 1049772747 4000STSRED IND_USAGE_TO_CAL 0.
+- `app/core/mp_tools.py`: `parse_inputs` (digits = MP id, `xxxxx-nnn` = NISS), `build_detect_query`
+  (MP + open hist row + readings in 4000STSRED), `build_activate_script`:
+  1. readings 4000STSRED -> 1000STSRED, IND_USAGE_TO_CAL = 1;
+  2. MP 3000STAMPO -> 1000STAMPO; 3. open hist row (END_DATE NULL) 3000STAMPO -> 1000STAMPO;
+  each guarded on the old status, stamped UPDATE_DATE / USER / PROGRAM (default `TMP_ACTIVATE_MP`).
+  **Revert = MP + MP_STATUS_HIST only** back to 3000STAMPO, only rows this program set. Clean-script option.
+- Routes `POST /api/mp-tools/tmp-activate/detect`, `/generate` (editor, re-scans live); history kind
+  `mp_tmp_activate` + revert. Menu id `mptools`, page `mptools.js`, Overview card (no count - input driven).
+- **Favorite menus**: ☆ next to every sidebar item (shown on hover; ★ = favorite) toggles it; "☆ Show
+  favorites only" at the top of the menu hides every non-favorite (Overview always stays). Saved per user
+  on the server: `GET/PUT /api/account/favorites` -> `data/web_favorites.json`, encrypted like
+  web_users.json (`web/favorites.py`). Works on top of the role menu access.
+- Python change - restart needed, then Ctrl+F5.
+
+### Enter = Scan / Search on every page (2026-11-17)
+
+RJ: "for all search in this project, i want enter to trigger scan or search right now i need to press scan".
+
+- One document-level `keydown` handler in `app.js`: Enter in an input / select (or Enter without Shift
+  in a list textarea - Shift+Enter = new line) clicks the nearest visible Scan / Search / Load button,
+  looked up from the field outwards to its `.card` (so a field beside its own button gets that one:
+  Reading Validation NISS -> Search, account -> Search by account).
+- Not triggered: SQL editor, live client-side filters (`*filter*`, `*-search`, FIX BILLING date / credit
+  ranges - they filter as you type, no re-scan), script fields (program / user), forms (login, settings,
+  users), grid edit cells, the DIFF DATES batch NISS list, and fields whose own handler already handles
+  Enter (`defaultPrevented`: SR Quick FIX boxes, Bulk Checker single account).
+- Checked live: Reading Validation NISS + Enter -> "105 reading(s) found". Static change - Ctrl+F5.
+
+### SR Quick FIX tab 2: "Sanitary Anomaly - H2O Pending" (2026-11-17)
+
+RJ: "add a new tab SANITARY ANOMALY - H20 Pending, here the first tab, i will provide with SR CODE, you
+will list the anomalies (GCCOM_ANOMALOUS) that is linked to the SR which is not resolved. The update script
+is to resolve the anomaly and get the reading of the anomaly, then using the reading get the ITB that is in
+status 00 anomalous, update it to status 01, here we will expect both for water and sanitary. next tab is
+to detect all cases, i will give you the anomaly type later".
+
+- Live statuses (GCCOM_ANOMALOUS_STATUS / GCCOM_ITEMS_TO_BILL_STATUS, EN): resolved = ESTAN00003 Solved
+  without billing, 00004 Solved billed, 00005 Solved after review, 00008 Resolved billed by batch; not
+  resolved = 00001 / 00002 / 00006 / 00007 / 00009. STTOBILL00 Anomalous, STTOBILL01 Pending.
+- Sub-tab **By SR code**: SR codes (both formats seen live: `R2026083158022`, `SR0020755977`) ->
+  `build_sanh2o_anomalies_query` (unresolved anomalies with SR type / status, anomaly type / status,
+  account, service) -> `build_sanh2o_links_query` (anomaly ITB -> its readings -> every ITB of those
+  readings, water + sanitary, with status). Live example SR0020755977: anomaly 1430849 ESTAN00001 (Charge
+  exceed limit, water) -> reading 1049702478 -> ITB 1042693258 water STTOBILL00 (-> 01) + 1042693259
+  sanitary already STTOBILL01.
+- Script (`build_sanh2o_script`): anomalies -> ESTAN00005 (guard: still not resolved); the ITBs still
+  STTOBILL00 -> STTOBILL01 (explicit ids, guard STATUS = STTOBILL00); stamps with UPDATE_PROGRAM
+  (default `SAN_H2O_PEND`, editable) / UPDATE_USER. Rollback: each anomaly back to its scanned status and
+  the ITBs back to 00, only where this program set them. Clean-script option. History kind
+  `sr_sanitary_anomaly_h2o_pending` + generated rollback.
+- Routes `POST /api/sr-quick-fix/san-h2o/detect`, `/generate` (editor; re-scans live). UI `srq_sanh2o.js`.
+- Sub-tab **Detect all cases**: placeholder until RJ gives the anomaly type.
+- Python change - restart needed, then Ctrl+F5.
+
+### Reading Validation/Modif: Sent-to-bill readings also update reading-items-to-bill + ITB XML (2026-11-17)
+
+RJ: "if the reading modified is sent to bill, we need to also update the value in reading items to bill
+using the id reading, also the consumption in the item to bill xml should be update, and ... for water
+we also need to update the sanitary reading item to bill and xml".
+
+- `POST /api/reading-validation/generate-script` now checks the edited readings live
+  (`reading_validation.build_sent_to_bill_links_query`). For a reading in **6000STSRED (Sent to bill)**
+  the script also gets (`build_sent_to_bill_sync`):
+  - `UPDATE OUC_ADMIN.GCCOM_READINGS_ITEMSTOBILL SET <edited VALUE / PREV_VALUE / READY_USAGE /
+    READING_DATE> ... WHERE ID_READING = x` - a water reading has a row for its water ITB AND its
+    sanitary ITB, so sanitary is covered.
+  - `UPDATE OUC_ADMIN.GCCOM_ITEMS_TO_BILL_XML SET XML_TO_BILL = ...` for every linked ITB (water +
+    sanitary): the `<consumption>` of the `<consumptionType>` whose `<codConsumptionType>` = the reading's
+    `USAGE_TYPE` gets `+ (new READY_USAGE - old READY_USAGE)`. Live check: `<consumption>` = SUM(READY_USAGE)
+    of the ITB's readings of that usage type (30-reading electricity ITB 1042501273: TPCONS0001 -257420,
+    TPCONS0002 189410), so a delta keeps the other readings' share. Text-level patch - the rest of the XML
+    is unchanged. Guarded `AND XML_TO_BILL = <XML as it was>` so running the script twice can't add the
+    difference twice.
+  - All stamped UPDATE_DATE / UPDATE_USER / UPDATE_PROGRAM.
+- RJ 2026-11-17 (later): "no for xml and the reading item to bill lets just update the consumption" -
+  only the consumption is synced: `GCCOM_READINGS_ITEMSTOBILL.READY_USAGE` and the XML `<consumption>`.
+  VALUE / PREV_VALUE / READING_DATE and the XML dates are never touched (`RIT_SYNC_COLUMNS = ("READY_USAGE",)`);
+  editing only dates or values without a READY_USAGE change adds nothing beyond GCGT_RE_READING.
+- Rollback (kind = rollback) puts back the reading-item-to-bill values and the XML exactly as they are
+  live when generated - generate the rollback together with the update, before running it.
+- RJ 2026-11-17 (later): "the prev date and reading date displayed is cut, also freeze the horizontal
+  scroll and the headers of the list" + "also add option for clean script":
+  - Date edit boxes keep `min-width: 21ch` (values / usages 11ch) so they are never cut.
+  - The readings table scrolls inside its own box (`.rv-grid-wrap`, max 72vh): horizontal scrollbar
+    always on screen, header row sticky, first column frozen while scrolling sideways.
+  - "Clean script (no comments)" tick box next to Generate: `clean: true` -> `_strip_sql_comments`
+    drops every whole-line `--` comment (notes still shown in the toast). Static + Python change.
+- RJ 2026-11-17 (later): "for sent to bill we need update the readings and reading dates same for the
+  billed one, the consumption is just for reading item to bill and xml":
+  - GCGT_RE_READING: every edited column (reading values, dates, usages, type) for Sent to bill and
+    Billed alike (unchanged - the main UPDATE never depended on the status).
+  - Consumption sync (RIT `READY_USAGE` + XML `<consumption>`) now runs for **6000STSRED Sent to bill and
+    7000STSRED Billed** (`SYNC_READ_STATUSES`); other statuses: reading only.
+- RJ 2026-11-17 (later): "dont update if uau is affected give a warning" - before generating, the edited
+  readings' READ_STATUS is checked live (`build_read_status_query`); any **7001STSRED (UAU - Billed)**
+  reading is left out of the whole script (no GCGT_RE_READING / RIT / XML statement). The script starts
+  with `-- WARNING: reading(s) ... are UAU - Billed ...`, the response carries `warning` / `uau_readings`,
+  and the page shows a red warning toast. If every edited reading is UAU, nothing is generated (400 with
+  the warning).
+- Readings in any other status (e.g. 7000STSRED Billed) keep the old behaviour (GCGT_RE_READING only).
+  Notes (no XML, consumption type not found, ...) are added as `-- NOTE:` lines at the end.
+- Python change - restart needed.
+- RJ 2026-11-18: "i want to also be able to update the status, show me dropdown also to choose and the
+  ind_usage_to_cal, show it i want to update it also, the space between prev date and reading date is too
+  huge":
+  - **Read Status** is now an editable dropdown (every GCGT_RE_READ_STATUS, English description + code
+    prefix, e.g. "Calculated usage (4000)"); the script sets `READ_STATUS = '<code>'` with the original
+    code in the WHERE guard. New route `GET /api/reading-validation/read-statuses`
+    (`build_read_statuses_query`); the readings query now also returns `read_status_code`.
+  - **Usage To Calc** (`IND_USAGE_TO_CAL`, live-checked on GCGT_RE_READING) is a new important column,
+    editable as a 0 / 1 dropdown.
+  - Both are in `EDITABLE_COLUMNS` (server) / `RV_EDITABLE_COLUMNS` (app.js); dropdown columns share one
+    `RV_CODE_DROPDOWNS` map (reading type + read status). Rollback, reset, dirty highlight and the UAU check
+    work the same. Neither cascades along the reading chain or triggers the RIT/XML consumption sync.
+  - Dates: the date boxes no longer reserve 21ch (dates show without the midnight time) - they size to their
+    own text (`field-sizing: content`, min 10.5ch) with tighter cell padding.
+  - Python + static change - restart needed.
+
+### Reading Validation: Sent-to-bill sync now covers dates and values, water + sanitary (2026-11-18)
+
+RJ: "why the reading modify is not updating the Reading item to bill and xml when it is sent to bill check
+10156214-301" + "also the sanitary". Cause (script history #373): only READING_DATE of Sent-to-bill reading
+1049305774 was changed (2026-10-24 -> 2026-10-28) and the sync ran only for READY_USAGE changes, so nothing
+was added. Now, for a reading in 6000 Sent to bill / 7000 Billed (UAU still excluded):
+- `GCCOM_READINGS_ITEMSTOBILL`: READING_DATE, VALUE, PREV_VALUE, READY_USAGE (`RIT_SYNC_COLUMNS`, all
+  live-checked columns) on every RIT row of the reading - the water ITB and the sanitary ITB.
+- `GCCOM_ITEMS_TO_BILL`: INI_DATE (= prev date), END_DATE and BILLING_DATE (= reading date), only where they
+  still hold the reading's old date (live: ITB 1042261498 = 2026-10-25 / 2026-10-24 / 2026-10-24).
+- `GCCOM_ITEMS_TO_BILL_XML`: consumption as before, plus `<readingFromDate>` / `<readingToDate>` in the
+  reading's `<consumptionType>` block and the header `<initDate>` / `<endDate>` / `<billingDate>` when they
+  still hold the old date (`patch_xml_dates`; mapping checked on several Sent-to-bill readings).
+- A change to READING_PREV_DATE now also triggers the sync (`SYNC_TRIGGER_COLUMNS`). Rollback puts every
+  part back, guarded on the new values. Python change - restart needed.
+
+### No BEGIN TRANSACTION in any generated script (2026-11-18)
+
+RJ: "in all the script being generated, remove begin transaction it creates problem when commiting".
+The last place still emitting it was the shared `app/core/script_generator.py` (`generate_update_script` /
+`generate_rollback_script` - Workspace, Reading Validation and every page built on them): the
+`BEGIN TRANSACTION;` header and the `-- COMMIT / ROLLBACK TRANSACTION` footer are gone, statements run and
+commit on their own. Every other generator (DIFF DATES, Bill Issuance, SR Quick Fix, MP Tools, Double ITB,
+...) already had no wrapper - checked by searching the whole project. Python change - restart needed.
+
+### FIX BILLING CAMPAIGN: wallet payment day (FIXED_DAY) panel (2026-11-17)
+
+RJ: "get me all no bank and there is no fixed day in the table ewa subsidy wallet" + "add it in the
+dashboard to show the fix day in the details from the ewa subsidy wallet".
+
+- Live answer (`EWA_GCCOM_SUBSIDY_WALLET.FIXED_DAY`): **0 No Bank customers have a NULL payment day** -
+  all 32,684 No Bank customers have it set (same with the RCCS-only check: every active wallet whose
+  4103 RCCS has a filled RCCSNOBAMT has FIXED_DAY). The 17,492 NULL days are Direct Debit Request
+  (9,338), Benefit (8,127) and Other (27). Existing KPI / filter "No Bank, wallet payment day NULL" = 0.
+- New dashboard panel "📅 Wallet payment day" (under the KPI cards): table per RCCS group - payment day
+  set / NULL / no wallet - plus a list of days (Day 1 ... Day 27, NULL) with counts; click a day to filter
+  the customers table (click again to clear; follows all other filters). `fbcF.fday`, `fbcFdayKey`.
+  The table column "Payment day (wallet FIXED_DAY)" was already there.
+- Static change - Ctrl+F5.
+
+### Security: all secrets and users encrypted at rest (2026-11-17)
+
+RJ: "for now encrypt all api keys, ai keys and all password and users".
+
+- Before: the DB password, Gemini key and SMTP password were already Fernet-encrypted fields and web
+  login passwords bcrypt-hashed, BUT the Fernet key sat in plain text in `data/scriptgen.key` next to
+  them (copying the folder copied the secrets), and `config.json` / `web_users.json` showed every
+  username, role, e-mail recipient and password hash in clear.
+- Now (`app/utils/crypto.py`):
+  - `data/scriptgen.key` (master key) and `data/web_session.key` (login-cookie key) are wrapped with
+    **Windows DPAPI** (`DPAPI1:` prefix, ctypes, no new package) - only the same Windows user on the same
+    PC can unwrap them.
+  - `data/config.json` and `data/web_users.json` are encrypted **as whole files** (`SGENC1:` prefix):
+    DB / SMTP usernames, recipients, saved / recent queries, every login's username, role and bcrypt
+    hash. Secret fields inside stay individually encrypted as before; login passwords stay bcrypt.
+  - Automatic migration: the first start after the update wraps the existing key and rewrites the two
+    files encrypted - no re-entry of passwords, no lost users.
+  - If an encrypted file or key can't be opened (other Windows user / PC), the app stops with a clear
+    `SecretStoreError` instead of silently creating new empty settings (which would wipe the users).
+  - `python -m app.utils.crypto status` shows what is protected; `python -m app.utils.crypto export-key`
+    prints the master key for moving to another PC / Docker (`SCRIPTGEN_MASTER_KEY`, see `.env.example`).
+- Hardcoded secrets removed from source elsewhere in the workspace: `EWA_BulkChecker/app/config.py` (DB
+  password -> `BULKCHECKER_DB_PASSWORD` / `SCRIPTGEN_DB_PASSWORD`) and the old copy
+  `Claude outputs/ScriptGen-1/scriptgen/app/config.py` (DB password + Gemini key -> env).
+- Not encrypted: `scriptgen_internal.db` (script / analysis history, no secrets), `web_menu_access.json`
+  (role -> menu list only).
+- Python change - restart needed.
+
 ### New menu: SR Quick FIX - tab 1 "SR Incorrect Billing Period" (2026-11-09)
 
 RJ: "create new menu, SR Quick FIX. on the first tab, lets add SR INCORRECT BILLING PERIOD, here, I

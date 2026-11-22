@@ -210,6 +210,8 @@ SELECT
     r.usage_type AS usage_code,
     COALESCE(dict_consum.text, consum.name_type) AS usage_name,
     COALESCE(dict_st.text, st.description) AS read_status,
+    r.read_status AS read_status_code,          -- RJ 2026-11-18: status dropdown edits the code
+    r.ind_usage_to_cal AS ind_usage_to_cal,     -- RJ 2026-11-18: editable 0/1
     r.prev_value AS prev_value,
     r.VALUE AS reading,
     COALESCE(dict_u.text, u.name_type) AS reading_unit,
@@ -349,7 +351,25 @@ EDITABLE_COLUMNS: dict[str, tuple[str, str]] = {
     "metered_usage": ("READING_USAGE", "decimal"),
     "corrected_usage": ("CORRECTED_USAGE", "decimal"),
     "bill_ready_usage": ("READY_USAGE", "decimal"),
+    # RJ 2026-11-18: "i want to also be able to update the status, show me dropdown also to choose and the
+    # ind_usage_to_cal, show it i want to update it also" - status edited by its code (GCGT_RE_READ_STATUS.
+    # COD_DEVELOP, e.g. 4000STSRED), IND_USAGE_TO_CAL as 0/1 (live-checked on GCGT_RE_READING 2026-11-18).
+    "read_status": ("READ_STATUS", "code"),
+    "ind_usage_to_cal": ("IND_USAGE_TO_CAL", "decimal"),
 }
+
+
+def build_read_statuses_query() -> str:
+    """Every GCGT_RE_READ_STATUS (code, English description) for the Read Status edit dropdown
+    (RJ 2026-11-18). Same GCTS_DICTIONARY EN pattern as build_reading_types_query."""
+    return """
+SELECT
+    st.cod_develop AS code,
+    COALESCE(dict_st.text, st.description) AS description
+FROM gcgt_re_read_status st
+LEFT JOIN GCTS_DICTIONARY dict_st ON dict_st.id = st.description_xi18n AND dict_st.locale = 'EN'
+ORDER BY st.cod_develop
+"""
 
 # The four columns RJ called out as participating in the row-to-row
 # reading chain ("Any update in the dates and reading values (the one we
@@ -389,6 +409,257 @@ _DATETIME_FORMATS = (
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%d",
 )
+
+
+# ---------------------------------------------------------------------------------------------
+# RJ 2026-11-17: "if the reading modified is sent to bill, we need to also update the value in
+# reading items to bill using the id reading, also the consumption in the item to bill xml should
+# be update, and ... for water we also need to update the sanitary reading item to bill and xml".
+# Live facts (2026-11-17):
+#   - GCCOM_READINGS_ITEMSTOBILL has VALUE, PREV_VALUE, READY_USAGE, READING_DATE per (reading, ITB).
+#     A water reading has 2 rows: its water ITB and its sanitary ITB (reading 1049334074 -> ITB
+#     1042568021 water + 1042568025 sanitary), so "WHERE ID_READING = x" covers sanitary too.
+#   - GCCOM_ITEMS_TO_BILL.ID_XML -> GCCOM_ITEMS_TO_BILL_XML.XML_TO_BILL holds
+#     <consumptionType><codConsumptionType>TPCONS..</codConsumptionType><consumption>-274.0</consumption>
+#     and <consumption> = SUM(READY_USAGE) of the ITB's readings with GCGT_RE_READING.USAGE_TYPE =
+#     that code (checked on a 30-reading electricity ITB: TPCONS0001 -257420 / TPCONS0002 189410).
+#     So the new consumption = old consumption + (new READY_USAGE - old READY_USAGE) of the edited
+#     readings of that usage type. The sanitary XML carries the same water consumption (TPCONS0006).
+# ---------------------------------------------------------------------------------------------
+READ_STATUS_SENT_TO_BILL = "6000STSRED"
+# RJ 2026-11-17 (later): "for sent to bill we need update the readings and reading dates same for the
+# billed one, the consumption is just for reading item to bill and xml" - GCGT_RE_READING gets every
+# edited column (readings + dates) for both; the consumption sync (RIT + XML) runs for Sent to bill
+# AND Billed (7000STSRED).
+SYNC_READ_STATUSES = ("6000STSRED", "7000STSRED")
+# RJ 2026-11-17 (later): "dont update if uau is affected give a warning" - a reading in 7001STSRED
+# (UAU - Billed) is left out of the whole script (no GCGT_RE_READING / RIT / XML update) with a warning.
+READ_STATUS_UAU_BILLED = "7001STSRED"
+
+
+def build_read_status_query(reading_ids: list) -> str:
+    ids = ", ".join(str(int(decimal.Decimal(str(i)))) for i in reading_ids)
+    return ("SELECT RR.ID_READING, RR.READ_STATUS FROM OUC_COMMON_ADMIN.GCGT_RE_READING RR\n"
+            f"WHERE RR.ID_READING IN ({ids});")
+RIT_TABLE = "OUC_ADMIN.GCCOM_READINGS_ITEMSTOBILL"
+ITB_TABLE = "OUC_ADMIN.GCCOM_ITEMS_TO_BILL"
+ITB_XML_TABLE = "OUC_ADMIN.GCCOM_ITEMS_TO_BILL_XML"
+# GCGT_RE_READING column -> GCCOM_READINGS_ITEMSTOBILL column (same names).
+# RJ 2026-11-17 (later): "no for xml and the reading item to bill lets just update the consumption" -
+# only the consumption (READY_USAGE) is synced; values / dates stay as they are in RIT and the XML.
+RIT_SYNC_COLUMNS = ("READY_USAGE",)
+# RJ 2026-11-18: "why the reading modify is not updating the Reading item to bill and xml when it is sent
+# to bill check 10156214-301" + "also the sanitary" - his script (history #373) only changed READING_DATE
+# of Sent-to-bill reading 1049305774, so nothing was synced. Now every RIT column that mirrors the reading
+# is synced (live-checked GCCOM_READINGS_ITEMSTOBILL: READING_DATE, VALUE, PREV_VALUE, READY_USAGE), on
+# every RIT row of the reading = water AND sanitary ITB. The XML gets the dates too: in the reading's
+# <consumptionType> block <readingFromDate> = READING_PREV_DATE, <readingToDate> = READING_DATE (checked on
+# 1049305774: 2026-10-25 / 2026-10-24), plus the header <initDate> / <endDate> / <billingDate> when they
+# still hold the old dates.
+RIT_SYNC_COLUMNS = ("READING_DATE", "VALUE", "PREV_VALUE", "READY_USAGE")
+XML_DATE_COLUMNS = ("READING_PREV_DATE", "READING_DATE")
+SYNC_TRIGGER_COLUMNS = RIT_SYNC_COLUMNS + ("READING_PREV_DATE",)
+
+
+def _ymd(v) -> str | None:
+    if v is None or v == "":
+        return None
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    return str(v)[:10]
+
+
+def patch_xml_dates(xml_text: str, usage_type: str, from_old, from_new, to_old, to_new) -> tuple[str, list[str]]:
+    """Reading date change -> XML: <readingFromDate>/<readingToDate> of the usage type's <consumptionType>,
+    and the header <initDate>/<endDate>/<billingDate> only where they still equal the old date."""
+    import re
+    out, log = xml_text or "", []
+    blk = re.compile(r"<consumptionType>(?:(?!</consumptionType>).)*?<codConsumptionType>\s*" + re.escape(usage_type) +
+                     r"\s*</codConsumptionType>(?:(?!</consumptionType>).)*?</consumptionType>", re.S)
+    m = blk.search(out)
+    if m:
+        b = m.group(0)
+        for tag, new in (("readingFromDate", from_new), ("readingToDate", to_new)):
+            if new:
+                b2 = re.sub(rf"(<{tag}>)[^<]*(</{tag}>)", rf"\g<1>{new}\g<2>", b, count=1)
+                if b2 != b:
+                    log.append(f"{tag} -> {new}")
+                b = b2
+        out = out[:m.start()] + b + out[m.end():]
+    for tag, old, new in (("initDate", from_old, from_new), ("endDate", to_old, to_new), ("billingDate", to_old, to_new)):
+        if old and new and old != new and f"<{tag}>{old}</{tag}>" in out:
+            out = out.replace(f"<{tag}>{old}</{tag}>", f"<{tag}>{new}</{tag}>", 1)
+            log.append(f"{tag} {old} -> {new}")
+    return out, log
+
+
+def build_sent_to_bill_links_query(reading_ids: list) -> str:
+    """For the edited readings: status / usage type / current READY_USAGE, and every
+    reading-item-to-bill row with its ITB, service and XML (one row per RIT row)."""
+    ids = ", ".join(str(int(decimal.Decimal(str(i)))) for i in reading_ids)
+    return (
+        "SELECT RR.ID_READING, RR.READ_STATUS, RR.USAGE_TYPE, RR.READY_USAGE AS RR_READY_USAGE,\n"
+        "  RIT.ID_READING_ITEM2BILL, RIT.ID_ITEM_TO_BILL, RIT.VALUE AS RIT_VALUE, RIT.PREV_VALUE AS RIT_PREV_VALUE,\n"
+        "  RIT.READY_USAGE AS RIT_READY_USAGE, RIT.READING_DATE AS RIT_READING_DATE,\n"
+        "  ITB.STATUS AS ITB_STATUS, ITB.ID_XML, CS.ID_OFFERED_SERVICE, X.XML_TO_BILL,\n"
+        "  ITB.INI_DATE AS ITB_INI_DATE, ITB.END_DATE AS ITB_END_DATE, ITB.BILLING_DATE AS ITB_BILLING_DATE\n"
+        "FROM OUC_COMMON_ADMIN.GCGT_RE_READING RR\n"
+        f"JOIN {RIT_TABLE} RIT ON RIT.ID_READING = RR.ID_READING\n"
+        f"JOIN {ITB_TABLE} ITB ON ITB.ID_ITEM_TO_BILL = RIT.ID_ITEM_TO_BILL\n"
+        "LEFT JOIN GCCOM_BILLING_SERVICE BS ON BS.ID_BILLING_SERVICE = ITB.ID_BILLING_SERVICE\n"
+        "LEFT JOIN GCCOM_CONTRACTED_SERVICE CS ON CS.ID_CONTRACTED_SERVICE = BS.ID_CONTRACTED_SERVICE\n"
+        f"LEFT JOIN {ITB_XML_TABLE} X ON X.ID_XML = ITB.ID_XML\n"
+        f"WHERE RR.ID_READING IN ({ids})\n"
+        "ORDER BY RR.ID_READING, RIT.ID_ITEM_TO_BILL;"
+    )
+
+
+def _fmt_consumption(d: decimal.Decimal) -> str:
+    s = format(d.normalize() if d == d.to_integral() else d, "f")
+    if "." not in s:
+        s += ".0"
+    return s
+
+
+def patch_xml_consumption(xml_text: str, usage_type: str, delta: decimal.Decimal) -> tuple[str, str | None, str | None]:
+    """Adds `delta` to <consumption> of the <consumptionType> whose <codConsumptionType> = usage_type.
+    Text-level patch (keeps the XML byte-for-byte except that one number). Returns
+    (new_xml, old_value, new_value); old/new are None when the block wasn't found."""
+    import re
+    pat = re.compile(
+        r"(<consumptionType>(?:(?!</consumptionType>).)*?<codConsumptionType>\s*" + re.escape(usage_type) +
+        r"\s*</codConsumptionType>(?:(?!</consumptionType>).)*?<consumption>)([^<]*)(</consumption>)", re.S)
+    m = pat.search(xml_text or "")
+    if not m:
+        return xml_text, None, None
+    try:
+        old = decimal.Decimal(m.group(2).strip())
+    except decimal.InvalidOperation:
+        return xml_text, None, None
+    new = _fmt_consumption(old + delta)
+    return xml_text[:m.start(2)] + new + xml_text[m.end(2):], m.group(2), new
+
+
+def _sql_val(v) -> str:
+    return "NULL" if v is None or v == "" else format_sql_literal(v)
+
+
+def build_sent_to_bill_sync(edited_rows: list[dict], links: list[dict], *, program: str, user: str,
+                            rollback: bool = False) -> tuple[str, int, list[str]]:
+    """edited_rows: [{"id_reading": int, "changes": {DB_COL: (old, new)}}] (GCGT_RE_READING columns).
+    links: rows of build_sent_to_bill_links_query (lower-case keys).
+    Returns (sql, statement_count, notes). Only readings in 6000STSRED (Sent to bill) are synced.
+    Rollback: puts back the RIT values and XML exactly as they are now (live)."""
+    usr, prog = format_sql_literal(user), format_sql_literal(program + (" ROLLBACK" if rollback else ""))
+    stamp = f"UPDATE_DATE = GETDATE(), UPDATE_USER = {usr}, UPDATE_PROGRAM = {prog}"
+    by_reading: dict[str, list[dict]] = {}
+    for l in links:
+        by_reading.setdefault(str(l.get("id_reading")), []).append(l)
+    parts, notes, n = [], [], 0
+    xml_deltas: dict[str, dict] = {}   # id_xml -> {"xml": original, "itb": .., "svc": .., "deltas": {usage_type: Decimal}}
+    for row in edited_rows:
+        rid = str(row["id_reading"])
+        ls = by_reading.get(rid, [])
+        if not ls or str(ls[0].get("read_status")) not in SYNC_READ_STATUSES:
+            continue
+        status_txt = "Sent to bill" if str(ls[0].get("read_status")) == READ_STATUS_SENT_TO_BILL else "Billed"
+        changes = {c: v for c, v in row["changes"].items() if c in RIT_SYNC_COLUMNS}
+        if changes:
+            if rollback:
+                for l in ls:   # back to the live RIT values, row by row
+                    sets = ", ".join(f"{c} = {_sql_val(l.get('rit_' + c.lower()))}" for c in changes)
+                    parts.append(f"UPDATE {RIT_TABLE}\nSET {sets},\n    {stamp}\n"
+                                 f"WHERE ID_READING_ITEM2BILL = {l.get('id_reading_item2bill')};\n")
+                    n += 1
+            else:
+                sets = ", ".join(f"{c} = {_sql_val(new)}" for c, (_old, new) in changes.items())
+                itbs = ", ".join(f"{l.get('id_item_to_bill')} ({_svc_name(l.get('id_offered_service'))})" for l in ls)
+                parts.append(f"-- reading {rid} is {status_txt}: its reading-item-to-bill rows (ITB {itbs})\n"
+                             f"UPDATE {RIT_TABLE}\nSET {sets},\n    {stamp}\nWHERE ID_READING = {rid};\n")
+                n += 1
+        # RJ 2026-11-18: date changes go into every linked XML (water + sanitary ITB)
+        dchg = {c: row["changes"][c] for c in XML_DATE_COLUMNS if c in row["changes"]}
+        if dchg:
+            ut = str(ls[0].get("usage_type") or "")
+            # the ITB row itself carries the same dates (live: ITB 1042261498 INI_DATE 2026-10-25 /
+            # END_DATE 2026-10-24 / BILLING_DATE 2026-10-24 = the reading's prev date / date) - moved only
+            # where they still equal the reading's old date
+            fo, fn = (_ymd(x) for x in dchg.get("READING_PREV_DATE", (None, None)))
+            to, tn = (_ymd(x) for x in dchg.get("READING_DATE", (None, None)))
+            for l in ls:
+                sets, guards = [], []
+                for col, old, new in (("INI_DATE", fo, fn), ("END_DATE", to, tn), ("BILLING_DATE", to, tn)):
+                    cur = _ymd(l.get("itb_" + col.lower()))
+                    if old and new and old != new and cur == old:
+                        # rollback: put the old date back, guarded on the new one
+                        sets.append(f"{col} = '{(old if rollback else new)}'")
+                        guards.append(f"{col} = '{(new if rollback else old)}'")
+                if sets:
+                    parts.append(f"-- {'ROLLBACK ' if rollback else ''}dates of ITB {l.get('id_item_to_bill')} "
+                                 f"({_svc_name(l.get('id_offered_service'))})\n"
+                                 f"UPDATE {ITB_TABLE}\nSET {', '.join(sets)},\n    {stamp}\n"
+                                 f"WHERE ID_ITEM_TO_BILL = {l.get('id_item_to_bill')} AND {' AND '.join(guards)};\n")
+                    n += 1
+            for l in ls:
+                xid = str(l.get("id_xml") or "").strip()
+                if not xid:
+                    notes.append(f"reading {rid}: ITB {l.get('id_item_to_bill')} has no XML")
+                    continue
+                e = xml_deltas.setdefault(xid, {"xml": l.get("xml_to_bill") or "", "itb": l.get("id_item_to_bill"),
+                                                "svc": l.get("id_offered_service"), "deltas": {}})
+                e.setdefault("dates", []).append((ut, dchg))
+        if "READY_USAGE" in row["changes"]:
+            old, new = row["changes"]["READY_USAGE"]
+            try:
+                delta = decimal.Decimal(str(new if new is not None else 0)) - decimal.Decimal(str(old if old is not None else 0))
+            except decimal.InvalidOperation:
+                notes.append(f"reading {rid}: READY_USAGE not numeric - XML consumption left unchanged")
+                continue
+            ut = str(ls[0].get("usage_type") or "")
+            for l in ls:
+                xid = str(l.get("id_xml") or "").strip()
+                if not xid:
+                    notes.append(f"reading {rid}: ITB {l.get('id_item_to_bill')} has no XML")
+                    continue
+                e = xml_deltas.setdefault(xid, {"xml": l.get("xml_to_bill") or "", "itb": l.get("id_item_to_bill"),
+                                                "svc": l.get("id_offered_service"), "deltas": {}})
+                e["deltas"][ut] = e["deltas"].get(ut, decimal.Decimal(0)) + delta
+    for xid, e in xml_deltas.items():
+        if all(d == 0 for d in e["deltas"].values()) and not e.get("dates"):
+            continue
+        new_xml, changes_txt = e["xml"], []
+        for ut, d in e["deltas"].items():
+            if d == 0:
+                continue
+            new_xml, o, nv = patch_xml_consumption(new_xml, ut, d)
+            if o is None:
+                notes.append(f"ITB {e['itb']}: no <consumptionType> {ut} in its XML - not changed")
+            else:
+                changes_txt.append(f"consumption {ut} {o} -> {nv}")
+        for ut, dchg in e.get("dates", []):
+            fo, fn = (_ymd(x) for x in dchg.get("READING_PREV_DATE", (None, None)))
+            to, tn = (_ymd(x) for x in dchg.get("READING_DATE", (None, None)))
+            new_xml, dlog = patch_xml_dates(new_xml, ut, fo, fn, to, tn)
+            if dlog:
+                changes_txt.extend(dlog)
+            else:
+                notes.append(f"ITB {e['itb']}: reading dates not found in its XML - dates not changed")
+        if new_xml == e["xml"]:
+            continue
+        target = e["xml"] if rollback else new_xml   # rollback = the XML exactly as it is now
+        # guard: only touch the XML if it is still exactly what it was when the script was made
+        # (running the update twice can't add the difference twice; rollback only undoes this patch)
+        guard = new_xml if rollback else e["xml"]
+        label = "ROLLBACK " if rollback else ""
+        parts.append(f"-- {label}XML of ITB {e['itb']} ({_svc_name(e['svc'])}): {'; '.join(changes_txt)}\n"
+                     f"UPDATE {ITB_XML_TABLE}\nSET XML_TO_BILL = {format_sql_literal(target)},\n    {stamp}\n"
+                     f"WHERE ID_XML = {xid}\n  AND XML_TO_BILL = {format_sql_literal(guard)};\n")
+        n += 1
+    return "\n".join(parts), n, notes
+
+
+def _svc_name(svc) -> str:
+    return {"1": "Electricity", "19": "Water", "190": "Sanitary"}.get(str(svc), f"service {svc}")
 
 
 def coerce_edit_value(kind: str, raw: str):

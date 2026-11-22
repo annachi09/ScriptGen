@@ -767,6 +767,23 @@ table tbody tr.kpi-tint > td:first-child { box-shadow: inset 4px 0 0 var(--kpi-c
 .sg-query-item pre { margin: 0; padding: 12px 14px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--card-border);
   font-size: 12px; line-height: 1.45; white-space: pre; overflow: auto; max-height: 55vh; }
 .fbc-kpis { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+/* RJ 2026-11-18: favorite menus - star on each sidebar item (shown on hover, always when favorite)
+   + "favorites only" toggle at the top of the menu */
+.nav-item { position: relative; }
+.nav-item .nav-fav { margin-left: auto; padding: 0 4px; font-size: 14px; line-height: 1; opacity: 0; color: #f59e0b; cursor: pointer; transition: opacity .15s, transform .15s; }
+.nav-item:hover .nav-fav, .nav-item.is-fav .nav-fav { opacity: 1; }
+.nav-item .nav-fav:hover { transform: scale(1.25); }
+.nav-fav-only { display: block; width: calc(100% - 16px); margin: 4px 8px 8px; padding: 6px 10px; border-radius: 8px; border: 1px dashed rgba(245, 158, 11, .55);
+  background: transparent; color: #f59e0b; font: inherit; font-size: 12px; font-weight: 600; text-align: left; cursor: pointer; }
+.nav-fav-only.is-active { background: rgba(245, 158, 11, .16); border-style: solid; }
+.sidebar.is-collapsed .nav-fav, .sidebar.is-collapsed .nav-fav-only { display: none; }
+/* RJ 2026-11-17: wallet payment day (FIXED_DAY) panel - group table + clickable day list */
+.fbc-fday-grid { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(260px, 1fr); gap: 16px; align-items: start; }
+.fbc-fday-grid .fbc-matrix td, .fbc-fday-grid .fbc-matrix th { padding: 6px 10px; text-align: right; }
+.fbc-fday-grid .fbc-matrix td:first-child, .fbc-fday-grid .fbc-matrix th:first-child { text-align: left; }
+.fbc-fday-grid #fbc-fday-days, .fbc-fday-grid > div:last-child { max-height: 320px; overflow: auto; }
+.fbc-fday-null { color: #ef4444; font-weight: 700; }
+@media (max-width: 900px) { .fbc-fday-grid { grid-template-columns: 1fr; } }
 
 /* v3 type x status: stacked bars + fixed-layout table with equal status columns */
 .fbc-status-panel { display: grid; gap: 14px; }

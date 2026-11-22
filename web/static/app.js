@@ -158,6 +158,8 @@ const SG_ENDPOINT_OWNER = [
   ["/api/fix-billing-campaign/bfa-categories", "fixbillingcampaign", "bfacat"],   // RJ 2026-11-01
   ["/api/billing-stats/", "billingstats", null],   // RJ 2026-11-04 Billing Statistics
   ["/api/sr-quick-fix/incorrect-bp/", "srquickfix", "incbp"],   // RJ 2026-11-09 SR Quick FIX
+  ["/api/sr-quick-fix/san-h2o/", "srquickfix", "sanh2o"],   // RJ 2026-11-17 Sanitary Anomaly - H2O Pending
+  ["/api/mp-tools/tmp-activate/", "mptools", "tmpact"],   // RJ 2026-11-18 MP Tools
   ["/api/fix-billing-campaign/", "fixbillingcampaign", "campaign"],
   ["/api/pending-sr/", "pendingsr", ""],
   ["/api/rebilling-monitor/open", "rebillingmonitor", "open"],
@@ -388,6 +390,73 @@ function applyRolePermissionsToUI() {
     if (el) el.disabled = isViewer;
   });
   applyMenuVisibilityToUI();
+  favLoad();   // RJ 2026-11-18: this user's favorite menus
+}
+
+// ---- Favorite menus (RJ 2026-11-18): "i also want an option to add favorite menus and saved by user
+// and option to show only favorites". A ☆ on every sidebar item toggles it (saved per user on the
+// server: GET/PUT /api/account/favorites, encrypted file); "★ Favorites only" at the top of the menu
+// hides every non-favorite (Overview always stays). Works on top of the role menu access.
+const favState = { favorites: [], only: false, loadedFor: null };
+async function favLoad() {
+  if (favState.loadedFor === state.username) { favApply(); return; }
+  try {
+    const d = await api("/api/account/favorites");
+    favState.favorites = d.favorites || []; favState.only = !!d.only; favState.loadedFor = state.username;
+  } catch (_) { /* keep defaults */ }
+  favApply();
+}
+async function favSave() {
+  try {
+    const d = await api("/api/account/favorites", { method: "PUT", body: { favorites: favState.favorites, only: favState.only } });
+    favState.favorites = d.favorites || []; favState.only = !!d.only;
+  } catch (err) { showToast(`Favorites not saved: ${err.message}`, true); }
+  favApply();
+}
+function favEnsureUi() {
+  const nav = $(".sidebar .nav");
+  if (!nav) return;
+  if (!$("#fav-only-btn")) {
+    const b = document.createElement("button");
+    b.type = "button"; b.id = "fav-only-btn"; b.className = "nav-fav-only";
+    b.title = "Show only your favorite menus (click ☆ next to a menu to add it)";
+    nav.prepend(b);
+    b.addEventListener("click", () => {
+      if (!favState.favorites.length && !favState.only) { showToast("Add a favorite first: click the ☆ next to a menu.", true); return; }
+      favState.only = !favState.only; favSave();
+    });
+  }
+  $$(".nav-item[data-page]").forEach((btn) => {
+    if (btn.querySelector(".nav-fav")) return;
+    const s = document.createElement("span");
+    s.className = "nav-fav"; s.setAttribute("role", "button");
+    s.addEventListener("click", (e) => {
+      e.stopPropagation(); e.preventDefault();
+      const p = btn.dataset.page;
+      favState.favorites = favState.favorites.includes(p) ? favState.favorites.filter((x) => x !== p) : favState.favorites.concat([p]);
+      if (!favState.favorites.length) favState.only = false;
+      favSave();
+    });
+    btn.appendChild(s);
+  });
+}
+function favApply() {
+  favEnsureUi();
+  const favs = new Set(favState.favorites);
+  $$(".nav-item[data-page]").forEach((btn) => {
+    const on = favs.has(btn.dataset.page);
+    btn.classList.toggle("is-fav", on);
+    const s = btn.querySelector(".nav-fav");
+    if (s) { s.textContent = on ? "★" : "☆"; s.title = on ? "Remove from favorites" : "Add to favorites"; }
+  });
+  const b = $("#fav-only-btn");
+  if (b) {
+    b.textContent = favState.only ? "★" : "☆";   // RJ 2026-11-18: star icon inside the sidebar search bar (navx.js)
+    b.title = favState.only ? "Showing only your favorite menus - click to show all" : "Show only your favorite menus";
+    b.classList.toggle("is-active", favState.only);
+  }
+  applyMenuVisibilityToUI(true);
+  window.navxRefresh?.();   // favorites tiles (navx.js)
 }
 
 // Hides sidebar nav items this role's menu-access config doesn't include
@@ -399,8 +468,11 @@ function applyRolePermissionsToUI() {
 // flashes hidden before that first response lands.
 function applyMenuVisibilityToUI() {
   const allowed = state.allowedMenus;
+  // RJ 2026-11-18: "show only favorites" (Overview always kept)
+  const favOnly = typeof favState !== "undefined" && favState.only && favState.favorites.length;
   $$(".nav-item[data-page]").forEach((btn) => {
-    btn.hidden = !!allowed && !allowed.includes(btn.dataset.page);
+    const p = btn.dataset.page;
+    btn.hidden = (!!allowed && !allowed.includes(p)) || (favOnly && p !== "overview" && !favState.favorites.includes(p));
   });
   // If the page currently showing just got hidden out from under the
   // user (their role's config changed since this session started, or
@@ -601,6 +673,12 @@ const OVERVIEW_CARDS = [
     page: "srquickfix", subAttr: "data-srq-sub", subValue: "incbp", group: "SR Quick FIX",
   },
   {
+    // RJ 2026-11-18: MP Tools - input-driven (MP id / NISS), no count
+    key: "mptools", icon: "🔌", label: "MP Tools - TMP Activate MP", color: "#14b8a6",
+    desc: "Activate an inactive MP: readings in Calculated usage, MP + status history.",
+    page: "mptools", group: "MP Tools", nocount: true,
+  },
+  {
     key: "incorrectbillingperiod", icon: "📅", label: "Incorrect Billing Period", color: "#ec4899",
     desc: "Anomalies with a wrong billing period.",
     page: "incorrectbillingperiod", group: "Billing anomalies",
@@ -729,6 +807,7 @@ function overviewUpdateCard(c, stats) {
   const top = el.querySelector(".overview-card-top");
   top.innerHTML = `<span class="overview-card-icon">${c.icon}</span>${overviewValueHtml(c, stats)}`;
   el.classList.toggle("is-alarm", !!c.critical && Number(overviewLive[c.key]) > 0);
+  window.navxRefresh?.();   // RJ 2026-11-18: sidebar badges + tab cards use the same counts
 }
 
 function overviewRenderCards(stats) {
@@ -8411,7 +8490,14 @@ let rvReferenceMode = "id";      // "id" (default) | "order" - RJ, 2026-09-23 (4
 const RV_EDITABLE_COLUMNS = new Set([
   "reading_prev_date", "reading_date", "reading_type",
   "prev_value", "reading", "metered_usage", "corrected_usage", "bill_ready_usage",
+  "read_status", "ind_usage_to_cal",   // RJ 2026-11-18: status dropdown + IND_USAGE_TO_CAL 0/1
 ]);
+// RJ 2026-11-18: code-backed dropdown columns - the cell shows the description, the script uses the code.
+const RV_CODE_DROPDOWNS = {
+  reading_type: { codeKey: "reading_type_code", opts: () => rvReadingTypeOptions },
+  read_status: { codeKey: "read_status_code", opts: () => rvReadStatusOptions },
+};
+let rvReadStatusOptions = [];          // [{code, description}] from /api/reading-validation/read-statuses
 const RV_CASCADE_COLUMNS = new Set(["reading_prev_date", "reading_date", "prev_value", "reading"]);
 let rvOriginalByIdReading = new Map(); // id_reading -> {col: original display string}, snapshot at load
 let rvDirtyIds = new Set();            // id_reading of every row with at least one pending edit
@@ -8521,7 +8607,8 @@ const RV_COLUMN_DEFS = [
   { key: "reading_prev_date", label: "Prev. Date", tier: "important", editable: "text" },
   { key: "reading_date", label: "Reading Date", tier: "important", editable: "text" },
   { key: "usage_name", label: "Consumption Type", tier: "important" },
-  { key: "read_status", label: "Read Status", tier: "important" },
+  { key: "read_status", label: "Read Status", tier: "important", editable: "dropdown" },
+  { key: "ind_usage_to_cal", label: "Usage To Calc", tier: "important", editable: "flag" },
   { key: "prev_value", label: "Prev. Value", tier: "important", editable: "text" },
   { key: "reading", label: "Reading", tier: "important", editable: "text" },
   { key: "metered_usage", label: "Metered Usage", tier: "important", editable: "text" },
@@ -8679,10 +8766,19 @@ function rvApplyChainHighlight() {
 // for the actual bold+color treatment.
 function rvRenderCell(c, r, rowIdx, dirty) {
   const dirtyClass = dirty ? " rv-edit-dirty" : "";
+  if (c.editable === "flag") {   // RJ 2026-11-18: IND_USAGE_TO_CAL 0/1
+    const v = String(r[c.key] ?? "");
+    const opts = ["0", "1"].concat(v && v !== "0" && v !== "1" ? [v] : []);
+    return `<select class="rv-edit-select rv-edit-flag${dirtyClass}" data-col="${c.key}" data-row-idx="${rowIdx}">` +
+      (v === "" ? `<option value="" selected>—</option>` : "") +
+      opts.map((o) => `<option value="${escapeHtml(o)}"${o === v ? " selected" : ""}>${escapeHtml(o)}</option>`).join("") + `</select>`;
+  }
   if (c.editable === "dropdown") {
-    const currentCode = r.reading_type_code ?? "";
-    const options = rvReadingTypeOptions.length
-      ? rvReadingTypeOptions
+    const dd = RV_CODE_DROPDOWNS[c.key];
+    const currentCode = r[dd.codeKey] ?? "";
+    const loaded = dd.opts();
+    const options = loaded.length
+      ? loaded
       : (currentCode ? [{ code: currentCode, description: r[c.key] ?? currentCode }] : []);
     const optionsHtml = options.map((o) => {
       const sel = String(o.code) === String(currentCode) ? " selected" : "";
@@ -8761,7 +8857,8 @@ document.querySelector("#rv-table tbody").addEventListener("click", (ev) => {
 // --- Inline editing (RJ, 2026-09-25) ----------------------------------
 
 function rvEditableFieldValue(row, col) {
-  return col === "reading_type" ? (row.reading_type_code ?? "") : (row[col] ?? "");
+  const dd = RV_CODE_DROPDOWNS[col];
+  return dd ? (row[dd.codeKey] ?? "") : (row[col] ?? "");
 }
 
 function rvMarkDirty(row) {
@@ -8816,10 +8913,11 @@ document.querySelector("#rv-table tbody").addEventListener("change", (ev) => {
   const row = rvRows[rowIdx];
   if (!row) return;
 
-  if (col === "reading_type") {
-    const opt = rvReadingTypeOptions.find((o) => String(o.code) === String(el.value));
-    row.reading_type_code = el.value;
-    row.reading_type = opt ? opt.description : el.value;
+  const dd = RV_CODE_DROPDOWNS[col];
+  if (dd) {
+    const opt = dd.opts().find((o) => String(o.code) === String(el.value));
+    row[dd.codeKey] = el.value;
+    row[col] = opt ? opt.description : el.value;
   } else {
     row[col] = el.value;
   }
@@ -8837,6 +8935,12 @@ async function rvLoadReadingTypeOptionsOnce() {
     rvReadingTypeOptionsLoaded = true;
   } catch (err) {
     showToast("Couldn't load Reading Type options: " + err.message, true);
+  }
+  try {   // RJ 2026-11-18: Read Status dropdown
+    const st = await api("/api/reading-validation/read-statuses");
+    rvReadStatusOptions = (st.read_statuses || []).map((o) => ({ code: o.code, description: `${o.description} (${o.code.slice(0, 4)})` }));
+  } catch (err) {
+    showToast("Couldn't load Read Status options: " + err.message, true);
   }
 }
 
@@ -8863,10 +8967,11 @@ function rvResetEdits() {
     const original = rvOriginalByIdReading.get(idReading);
     if (!original) continue;
     for (const col of RV_EDITABLE_COLUMNS) {
-      if (col === "reading_type") {
-        row.reading_type_code = original.reading_type;
-        const opt = rvReadingTypeOptions.find((o) => String(o.code) === String(original.reading_type));
-        row.reading_type = opt ? opt.description : row.reading_type;
+      const dd = RV_CODE_DROPDOWNS[col];
+      if (dd) {
+        row[dd.codeKey] = original[col];
+        const opt = dd.opts().find((o) => String(o.code) === String(original[col]));
+        row[col] = opt ? opt.description : row[col];
       } else {
         row[col] = original[col];
       }
@@ -8902,12 +9007,17 @@ $("#rv-generate-btn").addEventListener("click", async () => {
   try {
     const result = await api("/api/reading-validation/generate-script", {
       method: "POST",
-      body: { rows: rowsPayload, program, audit_user: auditUser, kind: "update" },
+      // RJ 2026-11-17: "also add option for clean script" (no comment lines)
+      body: { rows: rowsPayload, program, audit_user: auditUser, kind: "update", clean: !!$("#rv-clean")?.checked },
     });
     $("#rv-script-output").textContent = result.sql_text;
     let msg = `Update script generated: ${result.statement_count} statement(s).`;
     if (result.warning_count) msg += `  ${result.warning_count} warning(s) - see comments at the top of the script.`;
-    showToast(msg);
+    if (result.sent_to_bill_statements) msg += `  Incl. ${result.sent_to_bill_statements} Sent-to-bill statement(s) (reading items to bill / XML consumption).`;
+    if (result.notes && result.notes.length) msg += `  Note: ${result.notes.join(" | ")}`;
+    // RJ 2026-11-17: UAU - Billed readings are left out - shown as a warning (red toast)
+    if (result.warning) msg = `⚠ ${result.warning}  ${msg}`;
+    showToast(msg, !!result.warning);
   } catch (err) {
     showToast(err.message, true);
   } finally {
@@ -9472,7 +9582,7 @@ function bcRunSingleAccountLookup() {
 }
 $("#bc-single-account-btn").addEventListener("click", bcRunSingleAccountLookup);
 $("#bc-single-account").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") bcRunSingleAccountLookup();
+  if (e.key === "Enter") { e.preventDefault(); bcRunSingleAccountLookup(); }   // preventDefault: the global Enter handler skips it
 });
 
 // ---------------- Saved Searches (backend already existed from round 1;
@@ -9766,7 +9876,8 @@ $("#bc-note-modal-clear-btn").addEventListener("click", async () => {
 // not a column an analyst needs to see or export, so it's hidden the same
 // way BC_RESULTS_HIDDEN_COLUMNS hides internal-only columns on the main
 // results grid.
-const BC_DETAIL_HIDDEN_COLUMNS = new Set(["ID_SECTOR_SUPPLY"]);
+// RJ 2026-11-19: descriptions shown, the raw codes stay in the data (CSV / Excel export) but not on screen
+const BC_DETAIL_HIDDEN_COLUMNS = new Set(["ID_SECTOR_SUPPLY", "BILLING_STATUS_CODE", "BILL_TYPE_CODE", "CONTRACT_STATUS_CODE", "ID_BILLING_PERIOD"]);
 
 async function bcOpenDetail(accountNumber) {
   const date_from = bcMonthToDate($("#bc-date-from").value);
@@ -9775,9 +9886,13 @@ async function bcOpenDetail(accountNumber) {
   bcState.detailAccount = accountNumber;
   bcState.detailFilter = "all";
   bcState.detailColumns = []; bcState.detailRows = [];
+  bcState.colFilters = {}; bcState.openGroups = null; bcState.bsFilter = "";   // RJ 2026-11-19 grouped view: fresh per bulk
+  if ($("#bc-bs-legend")) $("#bc-bs-legend").innerHTML = "";
+  if ($("#bc-drawer")) $("#bc-drawer").hidden = true;
   $("#bc-detail-account-name").textContent = accountNumber;
   $("#bc-detail-kpi-row").innerHTML = "";
-  $("#bc-detail-table thead tr").innerHTML = "";
+  if ($("#bc-detail-summary")) $("#bc-detail-summary").innerHTML = "";
+  $("#bc-detail-table thead").innerHTML = "<tr></tr>";
   $("#bc-detail-table tbody").innerHTML = "";
   $("#bc-detail-status").textContent = "Loading…";
   // RJ 2026-10-07: pop-out window, same as the reading detail.
@@ -9829,26 +9944,81 @@ function bcClassifyDetailRow(row) {
   const hasBill = idBillIdx !== -1 && row[idBillIdx] !== null && row[idBillIdx] !== undefined && row[idBillIdx] !== "";
   if (!hasBill) return "missing";
   const hasFileNumber = fileNumberIdx !== -1 && row[fileNumberIdx] !== null && row[fileNumberIdx] !== undefined && row[fileNumberIdx] !== "";
-  return hasFileNumber ? "done" : "pending";
+  if (hasFileNumber) return "done";
+  // RJ 2026-11-19: "its invoiced and shows under not invoiced in the card kpi" - a bill already in status
+  // Invoiced (ESTFAC0005) but not yet in a file is its own state, not "billed, not invoiced".
+  return bcIsInvoicedRow(row) ? "invoiced" : "pending";
+}
+
+function bcIsInvoicedRow(row) {
+  const codeIdx = bcColIdx(bcState.detailColumns, "BILLING_STATUS_CODE");
+  if (codeIdx !== -1 && row[codeIdx]) return String(row[codeIdx]).trim().toUpperCase() === "ESTFAC0005";
+  const txtIdx = bcColIdx(bcState.detailColumns, "bill_status");   // fallback before the server restart
+  return txtIdx !== -1 && /^\s*invoiced\s*$/i.test(String(row[txtIdx] ?? ""));
 }
 
 // detail status -> KPI colour key (shared with the row tint)
-const BC_DETAIL_KPI = { all: "total", done: "complete", pending: "pending", missing: "missing" };
+const BC_DETAIL_KPI = { all: "total", done: "complete", invoiced: "invoicing", pending: "pending", missing: "missing" };
+
+// RJ 2026-11-19: "for bulk check, when i press analyze and the pop up open, i want to see the main information on
+// the top, like next group date, no. of accounts, no. of service, no. pending (like statistics/kpi)" - a summary
+// strip above the status cards, computed from the same detail rows (no extra query).
+function bcRenderDetailSummary() {
+  let box = $("#bc-detail-summary");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "bc-detail-summary";
+    box.className = "bc-sum";
+    $("#bc-detail-kpi-row").before(box);
+  }
+  const cols = bcState.detailColumns, rows = bcState.detailRows;
+  if (!rows.length) { box.innerHTML = ""; return; }
+  const get = (row, name) => { const i = bcColIdx(cols, name); return i === -1 ? null : row[i]; };
+  const has = (v) => v !== null && v !== undefined && v !== "";
+  const distinct = (name) => new Set(rows.map((r) => get(r, name)).filter(has));
+  const ngd = [...distinct("next_group_date")].sort();
+  const subAccounts = distinct("SUB_ACCOUNT").size;
+  const services = distinct("ID_CONTRACTED_SERVICE").size;
+  const files = distinct("FILE_NUMBER").size;
+  const bills = new Map();
+  rows.forEach((r) => { const b = get(r, "id_bill"); if (has(b)) bills.set(String(b), Number(get(r, "TOTAL_AMOUNT")) || 0); });
+  const amount = [...bills.values()].reduce((s, v) => s + v, 0);
+  const st = { done: 0, invoiced: 0, pending: 0, missing: 0 };
+  rows.forEach((r) => { st[bcClassifyDetailRow(r)]++; });
+  const pct = rows.length ? Math.round((100 * st.done) / rows.length) : 0;
+  const n = (v) => Number(v).toLocaleString();
+  const today = new Date().toISOString().slice(0, 10);
+  const ngdTxt = ngd.length ? ngd[0] : "-";
+  const ngdTone = !ngd.length ? "neutral" : ngd[0] < today ? "bad" : "info";
+  const cards = [
+    ["📅", "Next group date", ngdTxt, ngd.length > 1 ? `${ngd.length} different dates` : (ngd.length && ngd[0] < today ? "in the past" : ""), ngdTone],
+    ["👥", "Accounts", n(subAccounts), "sub-accounts in the bulk", "info"],
+    ["🔌", "Services", n(services), "contracted services", "info"],
+    ["🧾", "Bills", n(bills.size), `${amount.toLocaleString(undefined, { maximumFractionDigits: 3 })} total amount`, "neutral"],
+    ["📨", "Invoiced", n(st.invoiced), "waiting for a file", st.invoiced ? "info" : "ok"],
+    ["🕓", "Not invoiced", n(st.pending), "billed, not invoiced yet", st.pending ? "warn" : "ok"],
+    ["⚠️", "No bill", n(st.missing), "services without a bill", st.missing ? "bad" : "ok"],
+    ["✅", "Done", `${pct}%`, `${n(st.done)} in ${n(files)} file(s)`, pct === 100 ? "ok" : "neutral"],
+  ];
+  box.innerHTML = `<div class="bc-sum-head"><b>Bulk ${escapeHtml(String(get(rows[0], "BULK_ACCOUNT") ?? bcState.detailAccount ?? ""))}</b>` +
+    `<span>billing period ${escapeHtml(String(bcState.billingPeriod || [...distinct("ID_BILLING_PERIOD")][0] || "-"))}</span></div>` +
+    `<div class="bc-sum-grid">` + cards.map(([ico, label, value, sub, tone]) =>
+      `<div class="bc-sum-card" data-tone="${tone}"><span class="bc-sum-ico">${ico}</span><span class="bc-sum-txt">` +
+      `<span class="bc-sum-label">${escapeHtml(label)}</span><span class="bc-sum-value">${escapeHtml(String(value))}</span>` +
+      (sub ? `<span class="bc-sum-sub">${escapeHtml(sub)}</span>` : "") + `</span></div>`).join("") + `</div>`;
+}
 
 function bcRenderDetailKpiRow() {
+  bcRenderDetailSummary();
   const rows = bcState.detailRows;
-  let done = 0, pending = 0, missing = 0;
-  rows.forEach((row) => {
-    const status = bcClassifyDetailRow(row);
-    if (status === "done") done++;
-    else if (status === "pending") pending++;
-    else missing++;
-  });
+  const c = { done: 0, invoiced: 0, pending: 0, missing: 0 };
+  rows.forEach((row) => { c[bcClassifyDetailRow(row)]++; });
   const cards = [
     ["all", "Total bills", rows.length],
-    ["done", "Done", done],
-    ["pending", "Pending (billed, not invoiced)", pending],
-    ["missing", "Still no bill", missing],
+    ["done", "Done (in a file)", c.done],
+    ["invoiced", "Invoiced, waiting for file", c.invoiced],
+    ["pending", "Billed, not invoiced", c.pending],
+    ["missing", "Still no bill", c.missing],
   ];
   $("#bc-detail-kpi-row").innerHTML = cards.map(([key, label, value]) => {
     const active = bcState.detailFilter === key;
@@ -9866,18 +10036,80 @@ $("#bc-detail-kpi-row").addEventListener("click", (ev) => {
   bcRenderDetailTable();
 });
 
+// ---------------------------------------------------------------------------------------------------------------
+// RJ 2026-11-19 ("all agree"): Analyze pop-up table redesign - grouped by sub-account (problem accounts first,
+// expandable), Flat view toggle, density toggle, column chooser (~9 default columns), per-column filters, sticky
+// key column and a row detail drawer. View prefs are per-browser (localStorage); data is unchanged.
+// ---------------------------------------------------------------------------------------------------------------
+const BC_DEFAULT_DETAIL_COLS = ["SUB_ACCOUNT", "niss", "BILL_TYPE", "bill_number", "bill_status", "BILLING_PERIOD",
+  "TOTAL_AMOUNT", "FILE_NUMBER", "contract_status"];
+const BC_STATUS_RANK = { missing: 0, pending: 1, invoiced: 2, done: 3 };
+const BC_STATUS_LABEL = { missing: "No bill", pending: "Not invoiced", invoiced: "Invoiced", done: "Done" };
+const bcPrefs = (() => {
+  let p = {};
+  try { p = JSON.parse(localStorage.getItem("scriptgen_bc_detail_view") || "{}") || {}; } catch (_) { p = {}; }
+  return { view: p.view === "flat" ? "flat" : "grouped", density: p.density === "compact" ? "compact" : "comfortable",
+    cols: Array.isArray(p.cols) && p.cols.length ? p.cols : null };
+})();
+function bcSavePrefs() { try { localStorage.setItem("scriptgen_bc_detail_view", JSON.stringify(bcPrefs)); } catch (_) { /* ignore */ } }
+bcState.colFilters = {};
+bcState.openGroups = null;   // null = use the default (problem accounts open when the list is short)
+
 function bcVisibleDetailColumnIdx() {
-  return bcState.detailColumns.map((c, i) => i).filter((i) => !BC_DETAIL_HIDDEN_COLUMNS.has(bcState.detailColumns[i]));
+  const cols = bcState.detailColumns;
+  const allowed = (name) => !BC_DETAIL_HIDDEN_COLUMNS.has(name);
+  const wanted = (bcPrefs.cols || BC_DEFAULT_DETAIL_COLS).map((n) => bcColIdx(cols, n)).filter((i) => i !== -1 && allowed(cols[i]));
+  return wanted.length ? wanted : cols.map((c, i) => i).filter((i) => allowed(cols[i]));
 }
 
-function bcVisibleDetailRows(ignoreFilters = false) {
+// RJ 2026-11-19: "what is important for me is to know the bill status, make the color different for each status".
+// One colour per GCCOM_BILL_STATUS (texts read live from GCCOM_BILL_STATUS + GCTS_DICTIONARY EN); keyed on the
+// EN text so it works with or without BILLING_STATUS_CODE. Unknown statuses get a stable colour from a palette.
+const BC_BILL_STATUS_COLORS = {
+  "invoiced": "#2563eb", "invoicing": "#0891b2", "generated": "#7c3aed", "additional generated": "#a855f7",
+  "pending approval": "#ca8a04", "waiting for other services": "#d97706", "waiting for final bill": "#ea580c",
+  "sent": "#0d9488", "paid": "#059669", "compensated": "#65a30d", "cancelled": "#64748b", "cancel and refund": "#475569",
+  "in budget plan": "#0284c7", "in budget": "#0284c7", "in installment contract": "#0369a1",
+  "debt transferred to subsequent bill": "#9333ea",
+};
+const BC_NO_BILL_COLOR = "#dc2626";
+function bcBillStatusColor(text) {
+  const t = String(text || "").trim().toLowerCase();
+  if (!t) return BC_NO_BILL_COLOR;
+  if (BC_BILL_STATUS_COLORS[t]) return BC_BILL_STATUS_COLORS[t];
+  if (t.startsWith("disputed")) return "#e11d48";
+  if (t.startsWith("rebilled")) return "#4f46e5";
+  if (/debt|disconnect|legal|terminat|overdue|write|collection|power reduction|non disconnectable/.test(t)) return "#b91c1c";
+  const pal = ["#db2777", "#0f766e", "#7e22ce", "#c2410c", "#1d4ed8", "#15803d"];
+  let h = 0; for (const ch of t) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return pal[h % pal.length];
+}
+function bcBillStatusText(row) {
+  const i = bcColIdx(bcState.detailColumns, "bill_status");
+  const v = i === -1 ? "" : String(row[i] ?? "").trim();
+  if (v) return v;
+  const b = bcColIdx(bcState.detailColumns, "id_bill");
+  return b !== -1 && row[b] !== null && row[b] !== undefined && row[b] !== "" ? "(unknown)" : "No bill";
+}
+function bcBillStatusChip(text, n) {
+  const c = text === "No bill" ? BC_NO_BILL_COLOR : bcBillStatusColor(text);
+  return `<span class="bc-bs" style="--bs:${c}"><i></i>${escapeHtml(text)}${n !== undefined ? ` <b>${n}</b>` : ""}</span>`;
+}
+
+function bcVisibleDetailRows(ignoreFilters = false, skipBillStatus = false) {
   let rows = bcState.detailRows;
   if (!ignoreFilters) {
+    if (bcState.bsFilter && !skipBillStatus) rows = rows.filter((row) => bcBillStatusText(row) === bcState.bsFilter);
     const search = bcState.detailSearch.trim().toLowerCase();
     if (bcState.detailFilter !== "all") {
       rows = rows.filter((row) => bcClassifyDetailRow(row) === bcState.detailFilter);
     }
     if (search) rows = rows.filter((row) => row.some((v) => String(v).toLowerCase().includes(search)));
+    Object.entries(bcState.colFilters || {}).forEach(([name, txt]) => {
+      const q = String(txt || "").trim().toLowerCase(); if (!q) return;
+      const i = bcColIdx(bcState.detailColumns, name); if (i === -1) return;
+      rows = rows.filter((row) => bcFormatCell(row[i]).toLowerCase().includes(q));
+    });
   }
   if (bcDetailSortKey) {
     const idx = bcColIdx(bcState.detailColumns, bcDetailSortKey);
@@ -9887,36 +10119,244 @@ function bcVisibleDetailRows(ignoreFilters = false) {
 }
 
 function bcRenderDetailTable() {
-  const visibleIdx = bcVisibleDetailColumnIdx();
-  const sectorSupplyIdx = bcColIdx(bcState.detailColumns, "ID_SECTOR_SUPPLY");
-  const thead = $("#bc-detail-table thead tr");
-  thead.innerHTML = visibleIdx.map((i) =>
-    `<th class="stats-table-th-sortable" data-sort="${escapeHtml(bcState.detailColumns[i])}">${escapeHtml(bcPrettifyLabel(bcState.detailColumns[i]))}</th>`
-  ).join("") + `<th>Readings</th>`;
-  bcWireSortableHeaders("#bc-detail-table", () => bcDetailSortKey, (k) => { bcDetailSortKey = k; }, () => bcDetailSortDir, (d) => { bcDetailSortDir = d; }, bcRenderDetailTable);
-  const idBillIdx = bcColIdx(bcState.detailColumns, "id_bill");
-
-  const tbody = $("#bc-detail-table tbody");
-  tbody.innerHTML = "";
-  bcVisibleDetailRows().forEach((row) => {
-    const tr = document.createElement("tr");
-    kpiRowTag(tr, BC_DETAIL_KPI[bcClassifyDetailRow(row)]);
-    tr.innerHTML = visibleIdx.map((i) => `<td>${escapeHtml(bcFormatCell(row[i]))}</td>`).join("");
-
-    // Same reading-history popup Hierarchy Analysis uses (RJ: "add a
-    // link again to open readings same as the hierarchy checker") -
-    // reused directly via the existing /api/hierarchy-analysis/reading-
-    // history route and hierRenderReadingModal, not duplicated here.
-    const sectorSupply = sectorSupplyIdx !== -1 ? row[sectorSupplyIdx] : null;
-    const readingsTd = document.createElement("td");
-    if (sectorSupply) {
-      readingsTd.innerHTML = `<button type="button" class="btn btn-pill-sm bc-detail-reading-btn" ` +
-        `data-sector-supply="${escapeHtml(sectorSupply)}" data-billing-period="${escapeHtml(bcState.billingPeriod ?? "")}">📖 Readings</button>`;
-    }
-    tr.appendChild(readingsTd);
-    tbody.appendChild(tr);
-  });
+  bcRenderDetailHead();
+  bcRenderDetailBody();
 }
+
+function bcRenderDetailHead() {
+  const cols = bcState.detailColumns;
+  const visibleIdx = bcVisibleDetailColumnIdx();
+  const grouped = bcPrefs.view === "grouped";
+  const table = $("#bc-detail-table");
+  table.classList.toggle("bc-dense", bcPrefs.density === "compact");
+  table.classList.toggle("bc-grouped", grouped);
+  document.querySelectorAll("#bc-view-seg [data-bc-view]").forEach((b) => b.classList.toggle("is-active", b.dataset.bcView === bcPrefs.view));
+  document.querySelectorAll("#bc-density-seg [data-bc-density]").forEach((b) => b.classList.toggle("is-active", b.dataset.bcDensity === bcPrefs.density));
+  ["#bc-expand-all", "#bc-collapse-all"].forEach((s) => { if ($(s)) $(s).hidden = !grouped; });
+  // RJ 2026-11-19: grouped view shows bill cards (no column grid) - Columns / column filters are Flat-view tools
+  ["#bc-clear-filters", ".bc-cols-wrap"].forEach((s) => { const n = document.querySelector(s); if (n) n.hidden = grouped; });
+  if (grouped) { $("#bc-detail-table thead").innerHTML = ""; return; }
+  const lead = "";
+  const head = lead + visibleIdx.map((i, k) =>
+    `<th class="stats-table-th-sortable${k === 0 ? " bc-key" : ""}" data-sort="${escapeHtml(cols[i])}">${escapeHtml(bcPrettifyLabel(cols[i]))}</th>`
+  ).join("") + `<th>Readings</th>`;
+  const filt = (grouped ? `<th class="bc-lead"></th>` : "") + visibleIdx.map((i, k) =>
+    `<th class="bc-filter-th${k === 0 ? " bc-key" : ""}"><input class="bc-col-filter" data-col="${escapeHtml(cols[i])}" ` +
+    `value="${escapeHtml(bcState.colFilters[cols[i]] || "")}" placeholder="Filter…" /></th>`).join("") + `<th class="bc-filter-th"></th>`;
+  $("#bc-detail-table thead").innerHTML = `<tr>${head}</tr><tr class="bc-filter-row">${filt}</tr>`;
+  bcWireSortableHeaders("#bc-detail-table", () => bcDetailSortKey, (k) => { bcDetailSortKey = k; }, () => bcDetailSortDir, (d) => { bcDetailSortDir = d; }, bcRenderDetailTable);
+}
+
+function bcReadingsCell(row) {
+  // Same reading-history popup Hierarchy Analysis uses (RJ: "add a link again to open readings same as the
+  // hierarchy checker") - reused via /api/hierarchy-analysis/reading-history + hierRenderReadingModal.
+  const i = bcColIdx(bcState.detailColumns, "ID_SECTOR_SUPPLY");
+  const ss = i !== -1 ? row[i] : null;
+  return `<td>${ss ? `<button type="button" class="btn btn-pill-sm bc-detail-reading-btn" data-sector-supply="${escapeHtml(ss)}" ` +
+    `data-billing-period="${escapeHtml(bcState.billingPeriod ?? "")}">📖 Readings</button>` : ""}</td>`;
+}
+
+function bcBillRowHtml(row, rowIdx, visibleIdx, grouped) {
+  const bs = bcBillStatusText(row);
+  const bsCol = bcColIdx(bcState.detailColumns, "bill_status");
+  return `<tr class="bc-bill-row bc-bs-row" style="--bs:${bs === "No bill" ? BC_NO_BILL_COLOR : bcBillStatusColor(bs)}" data-row="${rowIdx}">` +
+    visibleIdx.map((i, k) => `<td${k === 0 ? ' class="bc-key"' : ""}>${i === bsCol ? bcBillStatusChip(bs) : escapeHtml(bcFormatCell(row[i]))}</td>`).join("") +
+    bcReadingsCell(row) + `</tr>`;
+}
+
+// RJ 2026-11-19: "i dont like the format of the details of per account make something better. what is important
+// for me is to know the bill status, make the color different for each status" - each bill of an account is a
+// card led by its coloured bill-status badge; file / amount / period / service on the same line.
+function bcBillCardHtml(row, rowIdx) {
+  const cols = bcState.detailColumns;
+  const g = (n) => { const i = bcColIdx(cols, n); return i === -1 ? "" : bcFormatCell(row[i]); };
+  const bs = bcBillStatusText(row);
+  const color = bs === "No bill" ? BC_NO_BILL_COLOR : bcBillStatusColor(bs);
+  const amt = g("TOTAL_AMOUNT");
+  const file = g("FILE_NUMBER");
+  const ssI = bcColIdx(cols, "ID_SECTOR_SUPPLY");
+  const ss = ssI !== -1 ? row[ssI] : null;
+  const codeI = bcColIdx(cols, "BILLING_STATUS_CODE");
+  const code = codeI !== -1 && row[codeI] ? ` (${row[codeI]})` : "";
+  return `<div class="bc-bill" style="--bs:${color}" data-row="${rowIdx}">` +
+    `<div class="bc-bill-st" title="${escapeHtml(bs + code)}">${escapeHtml(bs)}</div>` +
+    `<div class="bc-bill-main"><b>${escapeHtml(g("bill_number") || (bs === "No bill" ? "No bill generated" : g("id_bill")))}</b>` +
+    `<span>${escapeHtml([g("BILL_TYPE"), g("BILLING_TYPE"), g("BILLING_PERIOD")].filter(Boolean).join(" · "))}</span></div>` +
+    (bs === "No bill"
+      // RJ 2026-11-19: "if its missing, then for this cases, show the contract status and to and from date"
+      ? `<div class="bc-bill-f"><small>NISS</small>${escapeHtml(g("niss") || "-")}</div>` +
+        `<div class="bc-bill-f"><small>Contract status</small><b class="bc-cs">${escapeHtml(g("contract_status") || "-")}</b></div>` +
+        `<div class="bc-bill-f"><small>Contract from → to</small>${escapeHtml(g("Contract_start") || "-")} → ${escapeHtml(g("Contract_end") || "open")}</div>`
+      : `<div class="bc-bill-f"><small>NISS</small>${escapeHtml(g("niss") || "-")}<span class="bc-bill-sub">${escapeHtml(g("contract_status"))}</span></div>` +
+        `<div class="bc-bill-f"><small>Invoice date</small>${escapeHtml(g("invoice_date") || g("creation_date") || "-")}</div>` +
+        `<div class="bc-bill-f"><small>File</small>${file ? escapeHtml(file) : '<span class="bc-nofile">not in a file</span>'}</div>`) +
+    `<div class="bc-bill-amt">${amt !== "" ? Number(amt).toLocaleString(undefined, { maximumFractionDigits: 3 }) : "-"}</div>` +
+    `<div>${ss ? `<button type="button" class="btn btn-pill-sm bc-detail-reading-btn" data-sector-supply="${escapeHtml(ss)}" ` +
+      `data-billing-period="${escapeHtml(bcState.billingPeriod ?? "")}">📖 Readings</button>` : ""}</div></div>`;
+}
+
+function bcRenderBsLegend() {
+  let box = $("#bc-bs-legend");
+  if (!box) {
+    box = document.createElement("div"); box.id = "bc-bs-legend"; box.className = "bc-bs-legend";
+    document.querySelector("#bc-detail-modal .hx-modal-body").before(box);
+  }
+  const counts = new Map();
+  bcVisibleDetailRows(false, true).forEach((r) => { const t = bcBillStatusText(r); counts.set(t, (counts.get(t) || 0) + 1); });
+  if (!counts.size) { box.innerHTML = ""; return; }
+  box.innerHTML = `<span class="bc-bs-legend-l">Bill status</span>` + [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([t, n]) =>
+    `<button type="button" class="bc-bs-btn${bcState.bsFilter === t ? " is-active" : ""}" data-bs="${escapeHtml(t)}" title="Click to show only ${escapeHtml(t)} - click again to clear">${bcBillStatusChip(t, n)}</button>`).join("") +
+    (bcState.bsFilter ? `<button type="button" class="btn btn-pill-sm" data-bs="">Show all</button>` : "");
+}
+
+function bcRenderDetailBody() {
+  const cols = bcState.detailColumns;
+  const visibleIdx = bcVisibleDetailColumnIdx();
+  const rows = bcVisibleDetailRows();
+  const tbody = $("#bc-detail-table tbody");
+  const rowIndex = new Map(bcState.detailRows.map((r, i) => [r, i]));
+  bcRenderBsLegend();
+  const span = bcPrefs.view === "grouped" ? 1 : visibleIdx.length + 1;
+  if (!rows.length) { tbody.innerHTML = `<tr><td colspan="${span}" class="hint-text" style="padding:14px;">No bills match the current filters.</td></tr>`; return; }
+  if (bcPrefs.view !== "grouped") {
+    tbody.innerHTML = rows.map((r) => bcBillRowHtml(r, rowIndex.get(r), visibleIdx, false)).join("");
+    return;
+  }
+  const get = (r, n) => { const i = bcColIdx(cols, n); return i === -1 ? null : r[i]; };
+  const groups = new Map();
+  rows.forEach((r) => {
+    const key = String(get(r, "SUB_ACCOUNT") ?? "-");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
+  const list = [...groups.entries()].map(([key, rs]) => {
+    const c = { missing: 0, pending: 0, invoiced: 0, done: 0 };
+    rs.forEach((r) => { c[bcClassifyDetailRow(r)]++; });
+    const worst = ["missing", "pending", "invoiced", "done"].find((s) => c[s]) || "done";
+    const bills = new Map();
+    rs.forEach((r) => { const b = get(r, "id_bill"); if (b !== null && b !== undefined && b !== "") bills.set(String(b), Number(get(r, "TOTAL_AMOUNT")) || 0); });
+    return { key, rs, c, worst, bills: bills.size, amount: [...bills.values()].reduce((s, v) => s + v, 0),
+      services: new Set(rs.map((r) => get(r, "ID_CONTRACTED_SERVICE"))).size,
+      niss: [...new Set(rs.map((r) => get(r, "niss")).filter(Boolean))] };
+  });
+  list.sort((a, b) => BC_STATUS_RANK[a.worst] - BC_STATUS_RANK[b.worst] || a.key.localeCompare(b.key, undefined, { numeric: true }));
+  if (!bcState.openGroups) {
+    bcState.openGroups = new Set(list.length <= 15 ? list.filter((g) => g.worst !== "done").map((g) => g.key) : []);
+  }
+  tbody.innerHTML = list.map((g) => {
+    const open = bcState.openGroups.has(g.key);
+    const bsCount = new Map();
+    g.rs.forEach((r) => { const t = bcBillStatusText(r); bsCount.set(t, (bsCount.get(t) || 0) + 1); });
+    const bsList = [...bsCount.entries()].sort((a, b) => b[1] - a[1]);
+    const bar = `<span class="bc-grp-bar">` + bsList.map(([t, n]) =>
+      `<i style="flex:${n};background:${t === "No bill" ? BC_NO_BILL_COLOR : bcBillStatusColor(t)}" title="${escapeHtml(t)}: ${n}"></i>`).join("") + `</span>`;
+    // RJ 2026-11-19: "if all bills for the account are created, status should be complete, if its complete tell
+    // which is the status of the bill, or its missing" - account verdict badge first.
+    const nMissing = g.c.missing;
+    const billed = bsList.filter(([t]) => t !== "No bill").map(([t]) => t);
+    const verdict = nMissing
+      ? `<span class="bc-verdict is-missing" title="Services of this account without a bill">Missing · ${nMissing} of ${g.rs.length}</span>`
+      : `<span class="bc-verdict is-complete" title="Every service of this account has a bill">Complete</span>` +
+        `<span class="bc-verdict-sub">${billed.length === 1 ? `all bills ${escapeHtml(billed[0])}` : "bills in " + billed.length + " statuses"}</span>`;
+    const head = `<tr class="bc-grp-row${open ? " is-open" : ""}" data-kpi="${nMissing ? "missing" : "complete"}" data-grp="${escapeHtml(g.key)}">` +
+      `<td colspan="${span}"><div class="bc-grp-line"><span class="bc-grp-chev">${open ? "▾" : "▸"}</span>` +
+      `<span class="bc-verdict-wrap">${verdict}</span>` +
+      `<span class="bc-grp-id"><b class="bc-grp-acc">${escapeHtml(g.key)}</b>` +
+      `<span class="bc-grp-meta">${g.services} service(s) · ${g.bills} bill(s) · ${g.amount.toLocaleString(undefined, { maximumFractionDigits: 3 })}</span></span>` +
+      `${bar}<span class="bc-grp-chips">${bsList.map(([t, n]) => bcBillStatusChip(t, n)).join("")}</span></div></td></tr>`;
+    const body = open ? `<tr class="bc-grp-body"><td colspan="${span}"><div class="bc-bills">` +
+      g.rs.map((r) => bcBillCardHtml(r, rowIndex.get(r))).join("") + `</div></td></tr>` : "";
+    return head + body;
+  }).join("");
+}
+
+function bcOpenDrawer(rowIdx) {
+  const row = bcState.detailRows[rowIdx]; if (!row) return;
+  const cols = bcState.detailColumns;
+  const get = (n) => { const i = bcColIdx(cols, n); return i === -1 ? "" : bcFormatCell(row[i]); };
+  $("#bc-drawer-title").innerHTML = `Bill ${escapeHtml(get("bill_number") || get("id_bill") || "(none)")} ` + bcBillStatusChip(bcBillStatusText(row));
+  $("#bc-drawer-body").innerHTML = `<dl class="bc-dl">` + cols.map((c, i) =>
+    `<dt>${escapeHtml(bcPrettifyLabel(c))}</dt><dd>${escapeHtml(bcFormatCell(row[i])) || '<span class="hint-text">-</span>'}</dd>`).join("") + `</dl>`;
+  $("#bc-drawer").hidden = false;
+  document.querySelectorAll("#bc-detail-table .is-selected").forEach((t) => t.classList.remove("is-selected"));
+  document.querySelector(`#bc-detail-table [data-row="${rowIdx}"]`)?.classList.add("is-selected");
+}
+
+function bcRenderColsPop() {
+  const cols = bcState.detailColumns.filter((c) => !BC_DETAIL_HIDDEN_COLUMNS.has(c));
+  const on = new Set(bcVisibleDetailColumnIdx().map((i) => bcState.detailColumns[i]));
+  $("#bc-cols-pop").innerHTML = `<div class="bc-cols-actions"><button type="button" class="btn btn-pill-sm" data-bc-cols="default">Default</button>` +
+    `<button type="button" class="btn btn-pill-sm" data-bc-cols="all">All</button></div>` +
+    cols.map((c) => `<label class="bc-cols-item"><input type="checkbox" data-bc-col="${escapeHtml(c)}"${on.has(c) ? " checked" : ""}/> ${escapeHtml(bcPrettifyLabel(c))}</label>`).join("");
+}
+
+$("#bc-detail-table thead").addEventListener("input", (e) => {
+  const inp = e.target.closest(".bc-col-filter"); if (!inp) return;
+  bcState.colFilters[inp.dataset.col] = inp.value;
+  bcRenderDetailBody();
+});
+$("#bc-detail-table tbody").addEventListener("click", (e) => {
+  if (e.target.closest(".bc-detail-reading-btn")) return;
+  const g = e.target.closest(".bc-grp-row");
+  if (g) {
+    const k = g.dataset.grp;
+    if (bcState.openGroups.has(k)) bcState.openGroups.delete(k); else bcState.openGroups.add(k);
+    bcRenderDetailBody();
+    return;
+  }
+  const tr = e.target.closest(".bc-bill-row, .bc-bill");
+  if (tr) bcOpenDrawer(Number(tr.dataset.row));
+});
+// bill-status legend: click a status to show only those bills (RJ 2026-11-19)
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("#bc-bs-legend [data-bs]"); if (!b) return;
+  const t = b.dataset.bs;
+  bcState.bsFilter = !t || bcState.bsFilter === t ? "" : t;
+  bcRenderDetailBody();
+});
+$("#bc-drawer-close").addEventListener("click", () => { $("#bc-drawer").hidden = true; });
+$("#bc-view-seg").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-bc-view]"); if (!b) return;
+  bcPrefs.view = b.dataset.bcView; bcSavePrefs(); bcRenderDetailTable();
+});
+$("#bc-density-seg").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-bc-density]"); if (!b) return;
+  bcPrefs.density = b.dataset.bcDensity; bcSavePrefs(); bcRenderDetailHead();
+});
+$("#bc-expand-all").addEventListener("click", () => {
+  const i = bcColIdx(bcState.detailColumns, "SUB_ACCOUNT");
+  bcState.openGroups = new Set(bcVisibleDetailRows().map((r) => String((i === -1 ? null : r[i]) ?? "-")));
+  bcRenderDetailBody();
+});
+$("#bc-collapse-all").addEventListener("click", () => { bcState.openGroups = new Set(); bcRenderDetailBody(); });
+$("#bc-clear-filters").addEventListener("click", () => { bcState.colFilters = {}; bcRenderDetailTable(); });
+$("#bc-cols-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const pop = $("#bc-cols-pop");
+  pop.hidden = !pop.hidden;
+  $("#bc-cols-btn").setAttribute("aria-expanded", String(!pop.hidden));
+  if (!pop.hidden) bcRenderColsPop();
+});
+$("#bc-cols-pop").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const act = e.target.closest("[data-bc-cols]");
+  if (act) {
+    bcPrefs.cols = act.dataset.bcCols === "all" ? bcState.detailColumns.filter((c) => !BC_DETAIL_HIDDEN_COLUMNS.has(c)) : null;
+    bcSavePrefs(); bcRenderColsPop(); bcRenderDetailTable();
+  }
+});
+$("#bc-cols-pop").addEventListener("change", (e) => {
+  const cb = e.target.closest("[data-bc-col]"); if (!cb) return;
+  const cur = bcVisibleDetailColumnIdx().map((i) => bcState.detailColumns[i]);
+  const next = cb.checked ? [...cur, cb.dataset.bcCol] : cur.filter((c) => c !== cb.dataset.bcCol);
+  if (!next.length) { cb.checked = true; return; }
+  // keep the query's column order so the table reads the same as the export
+  bcPrefs.cols = bcState.detailColumns.filter((c) => next.includes(c));
+  bcSavePrefs(); bcRenderDetailTable();
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".bc-cols-wrap") && $("#bc-cols-pop") && !$("#bc-cols-pop").hidden) $("#bc-cols-pop").hidden = true;
+});
 
 $("#bc-detail-table tbody").addEventListener("click", async (ev) => {
   const btn = ev.target.closest(".bc-detail-reading-btn");
@@ -10080,9 +10520,53 @@ const HX_REFRESH = {
   tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn", rccslist: "#trl-detect-btn", sanlbd: "#tslb-detect-btn", duprccs: "#tdr-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
   fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn", bfacat: "#fbk-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),
-  srquickfix: () => ({ btn: "#srq-detect-btn" }),   // RJ 2026-11-09 SR Quick FIX (re-runs the last scan)
+  srquickfix: () => ({ btn: hxActiveSub("data-srq-sub") === "sanh2o" ? "#sh2o-detect-btn" : "#srq-detect-btn" }),
+  mptools: () => ({ btn: "#mpt-detect-btn" }),   // RJ 2026-11-18 (re-runs the last scan)   // RJ 2026-11-09 / 11-17 SR Quick FIX
   billingstats: () => ({ btn: "#bst-refresh-btn" }),   // RJ 2026-11-04 (page loads itself on open, like Anomalies Statistics)   // multi (RJ 2026-10-28) re-runs the campaign Scan
 };
+
+// ---- Enter = Scan / Search everywhere (RJ 2026-11-17): "for all search in this project, i want enter
+// to trigger scan or search right now i need to press scan which not good".
+// One document-level handler: Enter in an input (or Enter without Shift in a short list textarea) clicks
+// the nearest Scan / Search / Load button - looked up from the field outwards, stopping at its .card,
+// so a field next to its own button (Reading Validation: NISS -> Search, account -> Search by account)
+// gets that button. Left alone: the SQL editor, live filter boxes (*filter*, they already filter as you
+// type), script fields (program / user), forms (login, settings - they have their own submit), grid
+// edit cells, checkboxes, and any field whose own handler already handled Enter (defaultPrevented).
+// *-search inputs and the FIX BILLING date / credit ranges are live client-side filters (no re-scan);
+// da-batch-niss is a one-NISS-per-line list (Enter = new line, the batch has its own Run button)
+const ENTER_SKIP_ID = /sql-editor|filter|search-box|-search$|fbc-(dt|cr)-|program|audit-user|-user$|password|note|bc-note|da-batch-niss/i;
+const ENTER_BTN_ID = /-(detect|search|scan|lookup|load|find)(-[a-z]+)?-btn$|-search-btn$|-detect-btn$/i;
+const ENTER_BTN_TEXT = /^\s*(🔍|🔎|▶)|\b(scan|search|look ?up|load)\b/i;
+const ENTER_BTN_NOT = /export|copy|clear|download|gen|reset|sel-|delete|remove|save/i;
+function enterFindButton(field) {
+  const isScan = (b) => !b.disabled && b.offsetParent !== null && !ENTER_BTN_NOT.test(b.id || "") &&
+    (ENTER_BTN_ID.test(b.id || "") || ENTER_BTN_TEXT.test(b.textContent || ""));
+  const stop = field.closest(".card, .da-subpage, section.page");
+  for (let n = field.parentElement; n; n = n.parentElement) {
+    const btn = [...n.querySelectorAll("button")].find(isScan);
+    if (btn) return btn;
+    if (n === stop) break;
+  }
+  return null;
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.defaultPrevented || e.isComposing || e.altKey) return;
+  const f = e.target;
+  if (!(f instanceof HTMLElement) || f.closest("form, table, .modal, [role='dialog']")) return;
+  const tag = f.tagName;
+  if (tag === "TEXTAREA") {
+    if (e.shiftKey || ENTER_SKIP_ID.test(f.id || "")) return;   // Shift+Enter = new line in a list box
+  } else if (tag === "INPUT") {
+    const t = (f.type || "text").toLowerCase();
+    if (["checkbox", "radio", "button", "submit", "file", "range", "color"].includes(t)) return;
+    if (ENTER_SKIP_ID.test(f.id || "")) return;
+  } else if (tag !== "SELECT") return;
+  const btn = enterFindButton(f);
+  if (!btn) return;
+  e.preventDefault();
+  btn.click();
+});
 
 // ---- Auto-load on open (RJ 2026-10-04): "from overview, when you click an
 // item, it should load the data as it opens, also same with menus". The
@@ -12223,7 +12707,15 @@ $("#tddi-export-btn").addEventListener("click", () => {
 // EWA_DDI_ELIGIBILITY + subsidy wallet (credit, behaviour) + /mobileapp/complaint
 // request + linked RCCS with its 4 attributes. See app/core/fix_billing_campaign.py.
 let fbcRows = [], fbcEwaCols = [], fbcSortKey = null, fbcSortDir = 1;
-let fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null };
+let fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null, fday: null };
+// RJ 2026-11-17: "add it in the dashboard to show the fix day in the details from the ewa subsidy
+// wallet" - EWA_GCCOM_SUBSIDY_WALLET.FIXED_DAY bucket per customer (clickable filter)
+const FBC_FDAY_NULL = "Wallet, no payment day (NULL)";
+function fbcFdayKey(r) {
+  if (!r.has_wallet) return "(no wallet)";
+  const n = fbcNum(r.wallet_fixed_day);
+  return n === null ? FBC_FDAY_NULL : `Day ${n}`;
+}
 const FBC_RANGES = [[0, "0"], [50, "0-50"], [100, "50-100"], [250, "100-250"], [500, "250-500"], [Infinity, "> 500"]];
 const FBC_RANGE_KPI = { "0": "case0", "0-50": "complete", "50-100": "services", "100-250": "pending", "250-500": "stuck", "> 500": "missing" };
 const fbcNum = (v) => { const n = Number(String(v ?? "").replace(/,/g, "")); return String(v ?? "").trim() === "" || !Number.isFinite(n) ? null : n; };
@@ -12361,6 +12853,7 @@ function fbcMatch(r, skip) {
   if (skip !== "rtype" && fbcF.rtype && fbcTypeKey(r) !== fbcF.rtype) return false;
   if (skip !== "range" && fbcF.range && fbcRange(r) !== fbcF.range) return false;
   if (skip !== "issue" && fbcF.issue && !(r.issues || []).includes(fbcF.issue)) return false;
+  if (skip !== "fday" && fbcF.fday && fbcFdayKey(r) !== fbcF.fday) return false;   // RJ 2026-11-17
   // RJ 2026-10-21 "the search is very slow": terms are parsed once per keystroke (not per
   // row), each row's search text is built once, and a pasted list (> 20 values) is an
   // exact Set lookup instead of substring scans.
@@ -12508,6 +13001,29 @@ function fbcRenderDash() {
     `<span class="rbo-kpi-label"><span>${icon}</span>${escapeHtml(label)}</span>` +
     `<span class="rbo-kpi-value">${value.toLocaleString()}</span>` +
     `<span class="rbo-sub">${escapeHtml(sub)}</span></div>`).join("");
+
+  // RJ 2026-11-17: wallet payment day (EWA_GCCOM_SUBSIDY_WALLET.FIXED_DAY) - set / NULL per RCCS group
+  // + days list; counted without the payment-day filter itself, click = filter (again = clear)
+  const fdEl = $("#fbc-fday");
+  if (fdEl) {
+    const dRows = fbcRows.filter((r) => fbcMatch(r, "fday"));
+    const grp = FBC_CATEGORIES.concat([...new Set(dRows.map(fbcTypeKey))].filter((k) => !FBC_CATEGORIES.includes(k)));
+    const cell = (rows, key, label, cls) => {
+      const n = rows.filter((r) => fbcFdayKey(r) === key || (key === "*set" && /^Day /.test(fbcFdayKey(r)))).length;
+      return `<td class="${cls || ""}">${n ? n.toLocaleString() : "<span class=\"hint-text\">0</span>"}</td>`;
+    };
+    const tbl = `<table class="fbc-matrix"><thead><tr><th>RCCS group</th><th>Payment day set</th><th>No payment day (NULL)</th><th>No wallet</th></tr></thead><tbody>` +
+      grp.map((g) => { const rs = dRows.filter((r) => fbcTypeKey(r) === g);
+        return rs.length ? `<tr><td><b>${escapeHtml(g)}</b></td>${cell(rs, "*set")}${cell(rs, FBC_FDAY_NULL, "", "fbc-fday-null")}${cell(rs, "(no wallet)")}</tr>` : ""; }).join("") +
+      `</tbody></table>`;
+    const days = [...rboCount(dRows, fbcFdayKey).entries()]
+      .sort((a, b) => { const na = /^Day /.test(a[0]) ? Number(a[0].slice(4)) : (a[0] === FBC_FDAY_NULL ? 100 : 200);
+                        const nb = /^Day /.test(b[0]) ? Number(b[0].slice(4)) : (b[0] === FBC_FDAY_NULL ? 100 : 200); return na - nb; });
+    fdEl.innerHTML = `<div class="fbc-fday-grid"><div>${tbl}</div><div>` +
+      fbcListHtml(days, "data-fbc-fday", fbcF.fday, (k) => (k === FBC_FDAY_NULL ? "missing" : k === "(no wallet)" ? "case0" : "complete")) +
+      `</div></div>`;
+    $("#fbc-fday-sub").textContent = fbcF.fday ? `filtered: ${fbcF.fday} (click again to clear)` : "click a day to filter the customers";
+  }
 
   // 3. type x RCCS status matrix (customers)
   const mRows = fbcRows.filter((r) => fbcMatch(r, "rtype") && fbcMatch(r, "rst"));
@@ -12670,7 +13186,7 @@ $("#fbc-dash").addEventListener("click", (e) => {
   }
   const k = e.target.closest("[data-fbc-kpi]");
   if (k) { const f = k.dataset.fbcKpi || null; fbcF.kpi = f && fbcF.kpi === f ? null : f; fbcRender(); return; }
-  for (const [attr, key] of [["data-fbc-beh", "beh"], ["data-fbc-rst", "rst"], ["data-fbc-rtype", "rtype"], ["data-fbc-range", "range"], ["data-fbc-issue", "issue"]]) {
+  for (const [attr, key] of [["data-fbc-beh", "beh"], ["data-fbc-rst", "rst"], ["data-fbc-rtype", "rtype"], ["data-fbc-range", "range"], ["data-fbc-issue", "issue"], ["data-fbc-fday", "fday"]]) {
     const t = e.target.closest(`[${attr}]`);
     if (t) { const v = t.getAttribute(attr); fbcF[key] = fbcF[key] === v ? null : v; fbcRender(); return; }
   }
@@ -12716,7 +13232,7 @@ $("#fbc-json-copy").addEventListener("click", async () => {
   try { await navigator.clipboard.writeText($("#fbc-json-body").textContent); showToast("JSON copied."); } catch { showToast("Copy failed.", true); }
 });
 $("#fbc-clear-btn").addEventListener("click", () => {
-  fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null };
+  fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null, fday: null };
   $("#fbc-filter-search").value = ""; $("#fbc-filter-search-count").textContent = "";
   fbcUpdateTerms();
   fbcRender();
@@ -13101,6 +13617,16 @@ $$(".da-subnav-btn[data-ditb-sub]").forEach((btn) => btn.addEventListener("click
   if (sub === "sanonly" && !dsanLoaded) $("#dsan-detect-btn").click();
 }));
 let dsanRows = [], dsanLoaded = false, dsanF = { kpi: null, bp: null, rt: null };
+const dsanSel = new Set();   // RJ 2026-11-19: selected Anomalous Sanitary ITB ids
+function dsanUpdateSel() {
+  const live = new Set(dsanRows.map((r) => String(r.anom_id_item_to_bill)));
+  [...dsanSel].forEach((id) => { if (!live.has(id)) dsanSel.delete(id); });
+  const btn = $("#dsan-generate-btn");
+  if (btn) {
+    btn.disabled = dsanSel.size === 0 || state.role === "viewer";
+    btn.textContent = `📝 Generate Fix Script (${dsanSel.size.toLocaleString()})`;
+  }
+}
 const dsanWater = (r) => (!r.water_niss ? "No water service" : Number(r.water_billed_count) > 0 ? "Water billed" : r.water_itbs ? "Water not billed yet" : "No water item for these dates");
 const DSAN_KPI = {
   rebill: (r) => r.needs_rebilling === "1",
@@ -13147,16 +13673,23 @@ function dsanRender() {
   };
   $("#dsan-bp").innerHTML = cardsOf(dsanRows.filter((r) => dsanMatch(r, "bp")), (r) => r.billing_period || r.id_billing_period, "data-dsan-bp", dsanF.bp);
   $("#dsan-rt").innerHTML = cardsOf(dsanRows.filter((r) => dsanMatch(r, "rt")), dsanRt, "data-dsan-rt", dsanF.rt);
-  $("#dsan-table thead tr").innerHTML = DSAN_COLS.map(([, l]) => `<th>${escapeHtml(l)}</th>`).join("");
+  // RJ 2026-11-19: select rows -> same fix script as the Water & Electricity tab (/api/double-itb/generate)
+  $("#dsan-table thead tr").innerHTML = `<th><input type="checkbox" id="dsan-select-all" title="Select / unselect every row shown" /></th>` +
+    DSAN_COLS.map(([, l]) => `<th>${escapeHtml(l)}</th>`).join("");
   const vis = dsanRows.filter((r) => dsanMatch(r));
   $("#dsan-table tbody").innerHTML = vis.slice(0, 3000).map((r) =>
-    `<tr${r.needs_rebilling === "1" ? ' class="kpi-tint" data-kpi="missing"' : ""}>` + DSAN_COLS.map(([k, , kind]) => {
+    `<tr${r.needs_rebilling === "1" ? ' class="kpi-tint" data-kpi="missing"' : ""}>` +
+    `<td><input type="checkbox" data-dsan-id="${escapeHtml(r.anom_id_item_to_bill)}"${dsanSel.has(String(r.anom_id_item_to_bill)) ? " checked" : ""} /></td>` +
+    DSAN_COLS.map(([k, , kind]) => {
       const raw = r[k];
       if (kind === "date") return `<td>${escapeHtml(String(raw ?? "").slice(0, 10))}</td>`;
       if (kind === "reb") return `<td>${raw === "1" ? '<span class="rbo-pill" data-kpi="missing">Rebill</span>' : '<span class="rbo-pill" data-kpi="complete">Zero</span>'}</td>`;
       if (kind === "water") { const w = dsanWater(r); return `<td><span class="rbo-pill" data-kpi="${w === "Water billed" ? "complete" : "case0"}">${escapeHtml(w)}</span></td>`; }
       return `<td${kind === "num" ? ' class="hx-num"' : kind === "mono" ? ' class="hx-mono"' : ""}>${escapeHtml(String(raw ?? ""))}</td>`;
-    }).join("") + "</tr>").join("") || `<tr><td colspan="${DSAN_COLS.length}" class="hint-text">${dsanRows.length ? "No rows match." : "No Sanitary-only double ITB found."}</td></tr>`;
+    }).join("") + "</tr>").join("") || `<tr><td colspan="${DSAN_COLS.length + 1}" class="hint-text">${dsanRows.length ? "No rows match." : "No Sanitary-only double ITB found."}</td></tr>`;
+  const sa = $("#dsan-select-all");
+  if (sa) sa.checked = vis.length > 0 && vis.slice(0, 3000).every((r) => dsanSel.has(String(r.anom_id_item_to_bill)));
+  dsanUpdateSel();
   $("#dsan-filtered-count").textContent = `${vis.length.toLocaleString()} of ${dsanRows.length.toLocaleString()} rows · ${acc(vis).toLocaleString()} account(s)`;
   $("#dsan-active-filters").textContent = [dsanF.kpi ? `KPI: ${dsanF.kpi}` : "", dsanF.bp ? `Period: ${dsanF.bp}` : "", dsanF.rt ? `Reading: ${dsanF.rt}` : ""].filter(Boolean).join(" · ");
   $("#dsan-copy-btn").disabled = $("#dsan-export-btn").disabled = vis.length === 0;
@@ -13188,6 +13721,55 @@ $("#dsan-detect-btn").addEventListener("click", async () => {
     btn.disabled = false;
   }
 });
+$("#dsan-table").addEventListener("change", (e) => {
+  if (e.target.id === "dsan-select-all") {
+    dsanRows.filter((r) => dsanMatch(r)).slice(0, 3000).forEach((r) => {
+      const id = String(r.anom_id_item_to_bill);
+      if (e.target.checked) dsanSel.add(id); else dsanSel.delete(id);
+    });
+    dsanRender(); return;
+  }
+  const cb = e.target.closest("[data-dsan-id]"); if (!cb) return;
+  if (cb.checked) dsanSel.add(cb.dataset.dsanId); else dsanSel.delete(cb.dataset.dsanId);
+  dsanUpdateSel();
+});
+$("#dsan-generate-btn").addEventListener("click", async () => {
+  const ids = [...dsanSel];
+  if (!ids.length) { showToast("Check one or more rows first.", true); return; }
+  const btn = $("#dsan-generate-btn");
+  btn.disabled = true;
+  try {
+    const res = await api("/api/double-itb/generate", {
+      method: "POST",
+      body: {
+        anom_ids: ids,
+        user: $("#dsan-user").value.trim(), program: $("#dsan-program").value.trim(),
+        creation_user: Number($("#dsan-creation-user").value) || 10000008456,
+        batch: $("#dsan-batch").checked, clean: $("#dsan-clean").checked,
+      },
+    });
+    $("#dsan-output").textContent = res.sql_text;
+    sgShowRollback("dsan", res.rollback_sql);
+    $("#dsan-gen-summary").textContent = `${res.itb_count} Sanitary item(s) to bill cancelled, ${res.reading_count} reading(s) set to Billed, ` +
+      `${res.rebilling_count} rebilling activit${res.rebilling_count === 1 ? "y" : "ies"}.` +
+      (res.warnings.length ? ` ${res.warnings.length} warning(s) - see the top of the script.` : "") + " Saved in History.";
+    showToast("Fix script generated.");
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    dsanUpdateSel();
+  }
+});
+$("#dsan-copy-script-btn").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#dsan-output").textContent); showToast("Script copied to clipboard."); }
+  catch (_) { showToast("Couldn't copy - select and copy manually.", true); }
+});
+$("#dsan-download-btn").addEventListener("click", () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([$("#dsan-output").textContent], { type: "text/plain" }));
+  a.download = `${$("#dsan-program").value.trim() || "DOUBLE_ITB_SAN"}_double_itb_sanitary_fix.sql`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
 $("#dsan-copy-btn").addEventListener("click", async () => {
   try { await navigator.clipboard.writeText([...new Set(dsanRows.filter((r) => dsanMatch(r)).map((r) => r.account))].join("\n")); showToast("Accounts copied."); } catch { showToast("Copy failed.", true); }
 });
@@ -13213,7 +13795,7 @@ $("#fbc-detect-btn").addEventListener("click", async () => {
     fbcMarkShared(fbcRows);
     fbcUpdateTerms();
     fbcEwaCols = data.ewa_columns || [];
-    fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null };
+    fbcF = { kpi: null, beh: null, rst: null, rtype: null, range: null, issue: null, fday: null };
     if (data.cancelled_status) FBC_CANCELLED = data.cancelled_status;
     // RJ 2026-11-01: the "Cancelled RCCS - with a wallet" scope needs cancelled rows shown
     if ($("#fbc-scope").value === "cancelled_with_wallet") $("#fbc-incl-cancel").checked = true;
@@ -13276,6 +13858,7 @@ const SG_GEN_OUTPUTS = {
   "rv-generate-btn": ["#rv-script-output"],
   "wsh-generate-btn": ["#wsh-output"],
   "ditb-generate-btn": ["#ditb-output", "#ditb-gen-summary"],
+  "dsan-generate-btn": ["#dsan-output", "#dsan-gen-summary"],
   "billiss-release-generate-btn": ["#billiss-release-output"],
   "biss2-generate-btn": ["#biss2-output"],
   "ibp-generate-btn": ["#ibp-output"],

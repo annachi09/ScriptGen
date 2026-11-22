@@ -60,6 +60,10 @@ KIND_GENERATED_ROLLBACK = "generated_rollback"
 KIND_READING_RELEASE = "reading_pending_validation_release"
 # RJ 2026-11-09: SR Quick FIX - SR Incorrect Billing Period (reading lower than previous, INC_BP)
 KIND_SR_INC_BP = "sr_incorrect_billing_period"
+# RJ 2026-11-17: SR Quick FIX tab 2 - Sanitary Anomaly - H2O Pending
+KIND_SR_SAN_H2O = "sr_sanitary_anomaly_h2o_pending"
+# RJ 2026-11-18: MP Tools tab 1 - TMP ACTIVATE MP
+KIND_MP_TMP_ACTIVATE = "mp_tmp_activate"
 
 
 @dataclass

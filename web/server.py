@@ -57,6 +57,8 @@ from app.core import wrong_bill_first_regularized
 from app.core import anomaly_stats
 from app.core import billing_stats   # RJ 2026-11-04 Billing Statistics dashboard
 from app.core import sr_quick_fix    # RJ 2026-11-09 SR Quick FIX menu
+from app.core import mp_tools        # RJ 2026-11-18 MP Tools menu
+from app.core import ssh_tunnel      # RJ 2026-11-19 built-in SSH tunnel
 from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -104,6 +106,37 @@ app = FastAPI(title="ScriptGen Web")
 def _start_alert_scheduler() -> None:
     # Daily 7 AM e-mail alerts (web/alerts.py) - Wrong Bill CASE 1.
     alerts.start_scheduler()
+
+
+@app.on_event("startup")
+def _start_ssh_tunnel() -> None:
+    # RJ 2026-11-19: open the built-in SSH tunnel when ScriptGen starts (Settings > SSH tunnel, auto start).
+    # RJ 2026-11-19 (later): "there is a check first if tunnel is running already then if not i will do its own
+    # tunnel, same thing if it lost tunnel connection, it will trigger a retry on its own" - one supervisor loop
+    # (app/core/ssh_tunnel.supervise): external tunnel on the port and the DB answers -> use it; port free ->
+    # open our own; ours drops -> reconnect; external drops -> ours takes over. Every 15 s.
+    def _probe_db():
+        cfg = load_config()
+        conn = cfg.get_active_connection()
+        if conn is None:
+            return False, "no active DB connection configured"
+        import copy
+        quick = copy.copy(conn)
+        quick.timeout_seconds = 10      # probe only - the real connection keeps its own (longer) timeout
+        ok, msg, _ms = mssql.test_connection(quick)
+        return ok, msg
+    try:
+        ssh_tunnel.supervise(lambda: load_config().ssh, _probe_db)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ssh-tunnel] supervisor not started: {exc}")
+
+
+@app.on_event("shutdown")
+def _stop_ssh_tunnel() -> None:
+    try:
+        ssh_tunnel.stop()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 app.add_middleware(
@@ -364,6 +397,24 @@ def change_own_password(body: ChangePasswordRequest, user: str = Depends(require
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
+
+
+# RJ 2026-11-18: favorite menus per user (+ "show only favorites"), web/favorites.py
+class FavoritesRequest(BaseModel):
+    favorites: list[str] = []
+    only: bool = False
+
+
+@app.get("/api/account/favorites")
+def get_favorites(user: str = Depends(require_login)):
+    from web import favorites
+    return favorites.get(user)
+
+
+@app.put("/api/account/favorites")
+def put_favorites(body: FavoritesRequest, user: str = Depends(require_login)):
+    from web import favorites
+    return favorites.put(user, body.favorites, body.only)
 
 
 # ---------------------------------------------------------------------
@@ -4189,6 +4240,25 @@ def reading_validation_reading_types(user: str = Depends(require_login)):
     }
 
 
+@app.get("/api/reading-validation/read-statuses")
+def reading_validation_read_statuses(user: str = Depends(require_login)):
+    """RJ 2026-11-18: every GCGT_RE_READ_STATUS code + English description for the Read Status dropdown."""
+    config = load_config()
+    conn = config.get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        result = mssql.run_query(conn, reading_validation.build_read_statuses_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "read_statuses": [
+            {"code": diff_engine.cell_display(_da_col(r, "CODE")), "description": diff_engine.cell_display(_da_col(r, "DESCRIPTION"))}
+            for r in _rv_row(result)
+        ]
+    }
+
+
 class ReadingValidationCellEdit(BaseModel):
     column: str
     old_value: str = ""
@@ -4205,6 +4275,24 @@ class ReadingValidationGenerateRequest(BaseModel):
     program: str = script_generator.DEFAULT_AUDIT_PROGRAM
     audit_user: str = script_generator.DEFAULT_AUDIT_USER
     kind: str = "update"  # "update" | "rollback"
+    clean: bool = False   # RJ 2026-11-17: "also add option for clean script" - no comment lines
+
+
+def _strip_sql_comments(sql_text: str) -> str:
+    """Clean script: drops every whole-line `-- ...` comment and collapses the blank lines left behind
+    (comments inside string literals, e.g. an XML value, are on the same line as code - never dropped)."""
+    out, blank = [], False
+    for line in sql_text.splitlines():
+        if line.lstrip().startswith("--"):
+            continue
+        if not line.strip():
+            if blank or not out:
+                continue
+            blank = True
+        else:
+            blank = False
+        out.append(line)
+    return "\n".join(out).rstrip() + "\n"
 
 
 @app.post("/api/reading-validation/generate-script")
@@ -4262,8 +4350,62 @@ def reading_validation_generate_script(
     if not row_changes:
         raise HTTPException(status_code=400, detail="No changes to generate a script for.")
 
+    # RJ 2026-11-17: "dont update if uau is affected give a warning" - readings in 7001STSRED
+    # (UAU - Billed) are dropped from the script entirely, checked live.
+    uau_ids: list[str] = []
+    rv_conn = load_config().get_active_connection()
+    if rv_conn:
+        try:
+            sres = mssql.run_query(rv_conn, reading_validation.build_read_status_query(
+                [rc.key_predicate["ID_READING"] for rc in row_changes]))
+            uau_ids = [str(r.get("id_reading")) for r in _row_dicts(sres)
+                       if str(r.get("read_status")) == reading_validation.READ_STATUS_UAU_BILLED]
+        except mssql.ConnectionError_ as exc:
+            raise HTTPException(status_code=502, detail=f"Could not check the reading statuses: {exc}") from exc
+    if uau_ids:
+        row_changes = [rc for rc in row_changes if str(rc.key_predicate["ID_READING"]) not in uau_ids]
+        if not row_changes:
+            raise HTTPException(status_code=400, detail=(
+                f"Not generated: reading(s) {', '.join(uau_ids)} are UAU - Billed (7001STSRED) and are not updated."))
+    uau_warning = (f"WARNING: reading(s) {', '.join(uau_ids)} are UAU - Billed (7001STSRED) - left out of this script, "
+                   "not updated." if uau_ids else "")
+
     builder = script_generator.generate_rollback_script if body.kind == "rollback" else script_generator.generate_update_script
     result = builder(None, "GCGT_RE_READING", row_changes, program=body.program, user=body.audit_user)
+    sql_text, statements = result.sql_text, result.statement_count
+
+    # RJ 2026-11-17: a Sent-to-bill (6000STSRED) reading also gets its GCCOM_READINGS_ITEMSTOBILL rows
+    # (water reading = water + sanitary ITB) and the ITB XML <consumption> updated - checked live here.
+    sync_notes: list[str] = []
+    sync_count = 0
+    edited_rows = [{"id_reading": rc.key_predicate["ID_READING"],
+                    "changes": {cc.column: (cc.old_value, cc.new_value) for cc in rc.cell_changes}}
+                   for rc in row_changes]
+    sync_rows = [r for r in edited_rows
+                 if any(c in reading_validation.SYNC_TRIGGER_COLUMNS for c in r["changes"])]   # RJ 2026-11-18: dates/values too
+    if sync_rows:
+        conn = load_config().get_active_connection()
+        if conn:
+            try:
+                lres = mssql.run_query(conn, reading_validation.build_sent_to_bill_links_query(
+                    [r["id_reading"] for r in sync_rows]))
+                links = _row_dicts(lres)
+                sync_sql, sync_count, sync_notes = reading_validation.build_sent_to_bill_sync(
+                    sync_rows, links, program=body.program, user=body.audit_user, rollback=body.kind == "rollback")
+                if sync_sql:
+                    sql_text = (sql_text.rstrip() + "\n\n-- ===== Sent to bill / Billed: consumption in reading items to bill "
+                                "+ item-to-bill XML (RJ 2026-11-17) =====\n" + sync_sql)
+                    statements += sync_count
+            except mssql.ConnectionError_ as exc:
+                sync_notes.append(f"Could not check Sent-to-bill links ({exc}) - only GCGT_RE_READING is in the script.")
+        else:
+            sync_notes.append("No connection - only GCGT_RE_READING is in the script.")
+    if sync_notes:
+        sql_text += "\n-- NOTE: " + "\n-- NOTE: ".join(sync_notes) + "\n"
+    if uau_warning:
+        sql_text = f"-- {uau_warning}\n\n" + sql_text
+    if body.clean:
+        sql_text = _strip_sql_comments(sql_text)
 
     try:
         config = load_config()
@@ -4272,11 +4414,11 @@ def reading_validation_generate_script(
             username=user,
             kind=script_history.KIND_ROLLBACK if body.kind == "rollback" else script_history.KIND_UPDATE,
             schema_name="",
-            table_name="GCGT_RE_READING",
+            table_name="GCGT_RE_READING" + (" + READINGS_ITEMSTOBILL + ITEMS_TO_BILL_XML" if sync_count else ""),
             program=body.program,
-            statement_count=result.statement_count,
+            statement_count=statements,
             warning_count=result.warning_count,
-            sql_text=result.sql_text,
+            sql_text=sql_text,
             source=script_history.SOURCE_WEB,
         )
     except Exception:
@@ -4285,9 +4427,13 @@ def reading_validation_generate_script(
         pass
 
     return {
-        "sql_text": result.sql_text,
-        "statement_count": result.statement_count,
+        "sql_text": sql_text,
+        "statement_count": statements,
         "warning_count": result.warning_count,
+        "sent_to_bill_statements": sync_count,
+        "notes": sync_notes,
+        "uau_readings": uau_ids,
+        "warning": uau_warning,
     }
 
 
@@ -5020,6 +5166,174 @@ def sr_inc_bp_generate(body: SrIncBpGenerateRequest, user: str = Depends(require
             "skipped": len(scope) - len(selected),
             "item_count": len({i.get("id_item_to_bill") for r in selected for i in r["items"]}),
             "sanitary_items": sum(1 for r in selected for i in r["items"] if str(i.get("id_offered_service")) == "190")}
+
+
+# MP Tools (RJ 2026-11-18) - tab 1 TMP ACTIVATE MP (app/core/mp_tools.py)
+class MpActivateDetectRequest(BaseModel):
+    inputs: str = ""   # MP ids and / or NISS
+    mode: str = "inputs"   # RJ 2026-11-18: "all" = every Inactive MP with an Available / Calculated-usage reading
+    since_months: int = mp_tools.DETECT_ALL_DEFAULT_MONTHS   # "all" mode window, 0 = no date limit
+
+
+@app.post("/api/mp-tools/tmp-activate/detect")
+def mp_tmp_activate_detect(body: MpActivateDetectRequest, user: str = Depends(require_login)):
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    detect_all = body.mode == "all"
+    mps, niss = ([], []) if detect_all else mp_tools.parse_inputs(body.inputs)
+    if not detect_all and not (mps or niss):
+        raise HTTPException(status_code=400, detail="Enter an ID_MEASURING_POINT or a NISS (e.g. 10084569-301).")
+    try:
+        sql = (mp_tools.build_detect_all_query(max(0, int(body.since_months or 0))) if detect_all
+               else mp_tools.build_detect_query(mps, niss))
+        res = mssql.run_query(conn, sql)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = _row_dicts(res)
+    found_mp = {str(r.get("id_measuring_point")) for r in rows}
+    found_niss = {str(r.get("niss")) for r in rows}
+    return {
+        "rows": rows, "count": len(rows), "elapsed_ms": res.elapsed_ms,
+        "mp_count": len(found_mp),
+        "calc_readings": len({r.get("id_reading") for r in rows if r.get("read_status") == mp_tools.READ_CALCULATED}),
+        # RJ 2026-11-18: Available readings whose IND_USAGE_TO_CAL is not 1 (the query only returns those)
+        "avail_readings": len({r.get("id_reading") for r in rows if r.get("read_status") == mp_tools.READ_AVAILABLE}),
+        "inactive_mps": len({r.get("id_measuring_point") for r in rows if r.get("mp_status") == mp_tools.MP_INACTIVE}),
+        "inactive_hists": len({r.get("id_mp_status_hist") for r in rows if r.get("hist_status") == mp_tools.MP_INACTIVE}),
+        "missing": [str(m) for m in mps if str(m) not in found_mp] + [n for n in niss if n not in found_niss],
+        "mode": "all" if detect_all else "inputs",
+        "capped": detect_all and len(found_mp) >= mp_tools.DETECT_ALL_MAX_MPS,
+    }
+
+
+class MpActivateGenerateRequest(BaseModel):
+    inputs: str = ""
+    mp_ids: list[str] = []
+    program: str = mp_tools.DEFAULT_PROGRAM
+    audit_user: str = mp_tools.DEFAULT_USER
+    clean: bool = False
+
+
+@app.post("/api/mp-tools/tmp-activate/generate")
+def mp_tmp_activate_generate(body: MpActivateGenerateRequest, user: str = Depends(require_editor)):
+    """Re-scans live, then builds the update + the revert (MP + MP_STATUS_HIST only)."""
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    mps, niss = mp_tools.parse_inputs(body.inputs)
+    sel = [int(x) for x in body.mp_ids if str(x).strip().isdigit()]
+    if not (mps or niss):   # RJ 2026-11-18: "detect all" - re-scan just the selected MPs
+        mps = sel[:mp_tools.MAX_INPUTS]
+    if not sel or not (mps or niss):
+        raise HTTPException(status_code=400, detail="Select at least one measuring point.")
+    try:
+        rows = _row_dicts(mssql.run_query(conn, mp_tools.build_detect_query(mps, niss)))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    program = body.program.strip() or mp_tools.DEFAULT_PROGRAM
+    audit_user = body.audit_user.strip() or mp_tools.DEFAULT_USER
+    try:
+        sql_text, revert, counts = mp_tools.build_activate_script(rows, sel, program=program, user=audit_user, clean=body.clean)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _record_script(user, script_history.KIND_MP_TMP_ACTIVATE,
+                   f"TMP ACTIVATE MP - {counts['mps']} MP(s), {counts['readings'] + counts.get('available_readings', 0)} reading(s), MP {', '.join(map(str, sel[:10]))}",
+                   program, sql_text, statements=sql_text.count("UPDATE "))
+    _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "REVERT of TMP ACTIVATE MP (MP + MP_STATUS_HIST)",
+                   program, revert, statements=revert.count("UPDATE "))
+    return {"sql": sql_text, "rollback_sql": revert, **counts}
+
+
+# SR Quick FIX tab 2 (RJ 2026-11-17): SANITARY ANOMALY - H2O Pending - by SR code
+class SanH2oDetectRequest(BaseModel):
+    sr_codes: str = ""
+    mode: str = "bysr"   # RJ 2026-11-18: "all" = every unresolved WATERNOTBI anomaly with an ID_SERVREQ
+
+
+def _sanh2o_scan(conn, codes: list[str], detect_all: bool = False) -> tuple[list[dict], list[dict], float]:
+    ares = mssql.run_query(conn, sr_quick_fix.build_sanh2o_anomalies_query(codes, detect_all=detect_all))
+    anoms = _row_dicts(ares)
+    ms = ares.elapsed_ms
+    links: list[dict] = []
+    aids = sr_quick_fix.clean_ids(a.get("id_anomalous") for a in anoms)
+    for s in range(0, len(aids), 1000):
+        lres = mssql.run_query(conn, sr_quick_fix.build_sanh2o_links_query(aids[s:s + 1000]))
+        links += _row_dicts(lres)
+        ms += lres.elapsed_ms
+    by_a: dict[str, list[dict]] = {}
+    for l in links:
+        by_a.setdefault(str(l.get("id_anomalous")), []).append(l)
+    for a in anoms:
+        ls = by_a.get(str(a.get("id_anomalous")), [])
+        a["links"] = ls
+        a["itb_to_move"] = sorted({str(l.get("id_item_to_bill")) for l in ls
+                                   if str(l.get("itb_status")) == sr_quick_fix.ITB_ANOMALOUS})
+    return anoms, links, ms
+
+
+@app.post("/api/sr-quick-fix/san-h2o/detect")
+def sr_san_h2o_detect(body: SanH2oDetectRequest, user: str = Depends(require_login)):
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    detect_all = body.mode == "all"
+    codes = [] if detect_all else sr_quick_fix.clean_sr_codes(body.sr_codes)
+    if not codes and not detect_all:
+        raise HTTPException(status_code=400, detail="Enter at least one SR code.")
+    try:
+        anoms, links, ms = _sanh2o_scan(conn, codes, detect_all)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    found = {str(a.get("sr_code")).upper() for a in anoms}
+    return {
+        "rows": anoms, "count": len(anoms), "sr_codes": codes, "mode": "all" if detect_all else "bysr",
+        "missing_sr": [c for c in codes if c not in found],
+        "sr_count": len(found), "account_count": len({a.get("account") for a in anoms}),
+        "itb_to_move": len({i for a in anoms for i in a["itb_to_move"]}),
+        "elapsed_ms": ms,
+    }
+
+
+class SanH2oGenerateRequest(BaseModel):
+    sr_codes: str = ""
+    mode: str = "bysr"
+    anomaly_ids: list[str] = []
+    program: str = sr_quick_fix.SANH2O_DEFAULT_PROGRAM
+    audit_user: str = sr_quick_fix.DEFAULT_USER
+    clean: bool = False
+
+
+@app.post("/api/sr-quick-fix/san-h2o/generate")
+def sr_san_h2o_generate(body: SanH2oGenerateRequest, user: str = Depends(require_editor)):
+    """Re-scans live; only anomalies both selected AND still unresolved go in."""
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    detect_all = body.mode == "all"
+    codes = [] if detect_all else sr_quick_fix.clean_sr_codes(body.sr_codes)
+    scope = {str(x).strip() for x in body.anomaly_ids if str(x).strip()}
+    if (not codes and not detect_all) or not scope:
+        raise HTTPException(status_code=400, detail="Select at least one anomaly.")
+    try:
+        anoms, links, _ms = _sanh2o_scan(conn, codes, detect_all)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    selected = [a for a in anoms if str(a.get("id_anomalous")) in scope]
+    if not selected:
+        raise HTTPException(status_code=400, detail="None of the selected anomalies are still unresolved - re-scan.")
+    program = body.program.strip() or sr_quick_fix.SANH2O_DEFAULT_PROGRAM
+    audit_user = body.audit_user.strip() or sr_quick_fix.DEFAULT_USER
+    sql_text, rollback, counts = sr_quick_fix.build_sanh2o_script(
+        selected, links, program=program, user=audit_user, clean=body.clean)
+    srs = sorted({str(a.get("sr_code")) for a in selected})
+    _record_script(user, script_history.KIND_SR_SAN_H2O,
+                   f"Sanitary Anomaly - H2O Pending - {counts['anomalies']} anomaly(ies), SR {', '.join(srs[:10])}",
+                   program, sql_text, statements=sql_text.count("UPDATE "))
+    _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "ROLLBACK of Sanitary Anomaly - H2O Pending",
+                   program, rollback, statements=rollback.count("UPDATE "))
+    return {"sql": sql_text, "rollback_sql": rollback, "anomaly_count": counts["anomalies"],
+            "itb_count": counts["itbs"], "skipped": len(scope) - len(selected)}
 
 
 # ---------------------------------------------------------------------
@@ -5887,6 +6201,97 @@ def email_settings_test(user: str = Depends(require_admin)):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"Test e-mail failed: {exc}") from exc
     return {"ok": True, "sent_to": config.email.recipients}
+
+
+# ---------------------------------------------------------------------
+# Built-in SSH tunnel (RJ 2026-11-19) - app/core/ssh_tunnel.py, settings in config.ssh
+# ---------------------------------------------------------------------
+class SshSettingsRequest(BaseModel):
+    enabled: bool = False
+    auto_start: bool = True
+    ssh_host: str = ""
+    ssh_port: int = 22
+    ssh_user: str = ""
+    auth: str = "password"
+    password: str | None = None          # None/blank = keep the saved one
+    key_path: str = ""
+    key_passphrase: str | None = None
+    remote_host: str = ""
+    remote_port: int = 1433
+    local_port: int = 1433
+    keepalive_seconds: int = 30
+
+
+def _ssh_public(s) -> dict:
+    return {
+        "enabled": s.enabled, "auto_start": s.auto_start, "ssh_host": s.ssh_host, "ssh_port": s.ssh_port,
+        "ssh_user": s.ssh_user, "auth": s.auth, "has_password": bool(s.get_password()), "key_path": s.key_path,
+        "has_key_passphrase": bool(s.get_key_passphrase()), "remote_host": s.remote_host,
+        "remote_port": s.remote_port, "local_port": s.local_port, "keepalive_seconds": s.keepalive_seconds,
+    }
+
+
+def _ssh_apply(s, body: SshSettingsRequest) -> None:
+    s.enabled = bool(body.enabled)
+    s.auto_start = bool(body.auto_start)
+    s.ssh_host = body.ssh_host.strip()
+    s.ssh_port = int(body.ssh_port or 22)
+    s.ssh_user = body.ssh_user.strip()
+    s.auth = "key" if body.auth == "key" else "password"
+    if body.password:
+        s.set_password(body.password)
+    s.key_path = body.key_path.strip().strip('"')
+    if body.key_passphrase:
+        s.set_key_passphrase(body.key_passphrase)
+    s.remote_host = body.remote_host.strip()
+    s.remote_port = int(body.remote_port or 1433)
+    s.local_port = int(body.local_port or 1433)
+    s.keepalive_seconds = max(5, int(body.keepalive_seconds or 30))
+
+
+@app.get("/api/settings/ssh")
+def ssh_settings_get(user: str = Depends(require_admin)):
+    return {**_ssh_public(load_config().ssh), "status": ssh_tunnel.status()}
+
+
+@app.post("/api/settings/ssh")
+def ssh_settings_save(body: SshSettingsRequest, user: str = Depends(require_admin)):
+    config = load_config()
+    _ssh_apply(config.ssh, body)
+    save_config(config)
+    return {"ok": True, **_ssh_public(config.ssh)}
+
+
+@app.post("/api/settings/ssh/test")
+def ssh_settings_test(body: SshSettingsRequest, user: str = Depends(require_admin)):
+    """Tests the values in the form (saved secrets are used when the password fields are left blank)."""
+    import copy
+    s = copy.deepcopy(load_config().ssh)
+    _ssh_apply(s, body)
+    try:
+        return ssh_tunnel.test(s)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"SSH test failed: {exc}") from exc
+
+
+@app.get("/api/ssh/status")
+def ssh_status(user: str = Depends(require_login)):
+    s = load_config().ssh
+    return {**ssh_tunnel.status(), "enabled": s.enabled}
+
+
+@app.post("/api/ssh/start")
+def ssh_start(user: str = Depends(require_admin)):
+    s = load_config().ssh
+    try:
+        return ssh_tunnel.start(s)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/ssh/stop")
+def ssh_stop(user: str = Depends(require_admin)):
+    return ssh_tunnel.stop(manual=True)   # also cancels the startup auto-retry
 
 
 # ---------------------------------------------------------------------

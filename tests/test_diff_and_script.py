@@ -219,8 +219,8 @@ def test_generate_update_script_basic():
     assert "UPDATE dbo.Users" in result.sql_text
     assert "SET name = 'Alicia'" in result.sql_text
     assert "WHERE id = 1" in result.sql_text
-    assert "BEGIN TRANSACTION" in result.sql_text
-    assert "ROLLBACK TRANSACTION" in result.sql_text
+    assert "BEGIN TRANSACTION" not in result.sql_text  # RJ 2026-11-18: removed from every script
+    assert "COMMIT TRANSACTION" not in result.sql_text
 
 
 def test_generate_update_script_warns_on_full_row_match():

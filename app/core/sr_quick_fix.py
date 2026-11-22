@@ -199,6 +199,145 @@ def is_qualifying(anom: dict) -> bool:
             and str(anom.get("servreq_status") or "") not in SR_RESOLVED_STATUSES)
 
 
+# =============================================================================================
+# Tab 2 - SANITARY ANOMALY - H2O Pending (RJ 2026-11-17): "i will provide with SR CODE, you will list
+# the anomalies (GCCOM_ANOMALOUS) that is linked to the SR which is not resolved. The update script is
+# to resolve the anomaly and get the reading of the anomaly, then using the reading get the ITB that is
+# in status 00 anomalous, update it to status 01, here we will expect both for water and sanitary.
+# next tab is to detect all cases, i will give you the anomaly type later".
+# Live (GCCOM_ANOMALOUS_STATUS, EN): resolved = ESTAN00003 Solved without billing, ESTAN00004 Solved
+# billed, ESTAN00005 Solved after review, ESTAN00008 Resolved billed by batch; everything else is
+# "not resolved" (00001 Pending without billing, 00002 Billed and review pending, 00006 Send to batch
+# resolution, 00007 Recalculating batch, 00009 Pending after batch). Resolve -> ESTAN00005.
+# ITB statuses: STTOBILL00 Anomalous -> STTOBILL01 Pending. Anomaly -> its ITB -> GCCOM_READINGS_ITEMSTOBILL
+# -> readings -> every ITB of those readings (water reading = water + sanitary ITB).
+# Example live: anomaly 1430849 (ESTAN00001) -> reading 1049702478 -> ITB 1042693258 water STTOBILL00
+# + ITB 1042693259 sanitary STTOBILL01.
+# =============================================================================================
+ANOM_RESOLVED_STATUSES = ("ESTAN00003", "ESTAN00004", "ESTAN00005", "ESTAN00008")
+ITB_PENDING = "STTOBILL01"
+SANH2O_DEFAULT_PROGRAM = "SAN_H2O_PEND"
+
+
+def clean_sr_codes(raw) -> list[str]:
+    if isinstance(raw, str):
+        raw = re.split(r"[\s,;]+", raw)
+    out = []
+    for c in raw or []:
+        c = re.sub(r"[^A-Za-z0-9]", "", str(c or "")).upper()
+        if c and c not in out:
+            out.append(c)
+    return out[:MAX_ACCOUNTS]
+
+
+# RJ 2026-11-18: "for SR QUICK FIX the detect all cases will find GCCOM_ANOMALOUS which is not solved
+# having WATERNOTBI and has ID_SERVREQ". Live: GCCOM_BILL_ANOMALY_COMPANY ID_BILL_ANOM_COMP 10000000036,
+# ANOMALY_COD 'WATERNOTBI' = "Water Service Anomaly" (3 unresolved with an SR on 2026-11-18).
+SANH2O_ALL_ANOM_CODE = "WATERNOTBI"
+
+
+def build_sanh2o_anomalies_query(sr_codes: list[str], detect_all: bool = False) -> str:
+    """Unresolved GCCOM_ANOMALOUS linked (ID_SERVREQ) to the SR codes, with SR / type / account.
+    detect_all=True: every unresolved WATERNOTBI anomaly with an ID_SERVREQ, system-wide."""
+    if detect_all:
+        where = f"WHERE G.ANOMALY_COD = '{SANH2O_ALL_ANOM_CODE}'\n  AND AN.ID_SERVREQ IS NOT NULL\n"
+    else:
+        where = "WHERE SR.SR_CODE IN (" + ", ".join(format_sql_literal(c) for c in sr_codes) + ")\n"
+    resolved = ", ".join(f"'{s}'" for s in ANOM_RESOLVED_STATUSES)
+    return (
+        "SELECT SR.SR_CODE, AN.ID_SERVREQ, SR.SERVREQ_TYPE, TD.TEXT AS SERVREQ_TYPE_DESC,\n"
+        "  SR.SERVREQ_STATUS, SD.TEXT AS SERVREQ_STATUS_DESC,\n"
+        "  AN.ID_ANOMALOUS, AN.ANOMALOUS_STATUS, ASD.TEXT AS ANOM_STATUS_DESC, G.ANOMALY_COD AS ANOM_CODE,\n"
+        "  G.DESCRIPTION AS ANOM_DESC, AN.ID_ITEM_TO_BILL AS ANOM_ITB, AN.BILLING_DATE,\n"
+        "  PF.REFERENCE AS ACCOUNT, CS.ID_OFFERED_SERVICE, OS.NAME_TYPE AS SERVICE_DESC\n"
+        # anomaly-driven + LEFT JOIN to the SR, so "detect all" also keeps an anomaly whose ID_SERVREQ has no
+        # SR row (live: 3 WATERNOTBI with ID_SERVREQ, 2 with a GCCOM_SERVICE_REQUEST row); by-SR filters on SR_CODE
+        f"FROM {ANOMALOUS_TBL} AN\n"
+        "LEFT JOIN OUC_COMMON_ADMIN.GCCOM_SERVICE_REQUEST SR ON SR.ID_SERVREQ = AN.ID_SERVREQ\n"
+        f"LEFT JOIN {BILL_ANOM_TYPE_TBL} G ON G.ID_BILL_ANOM_COMP = AN.ID_PRINCIPAL_ANOMALY\n"
+        "LEFT JOIN OUC_ADMIN.GCCOM_ANOMALOUS_STATUS AST ON AST.COD_DEVELOP = AN.ANOMALOUS_STATUS\n"
+        "LEFT JOIN GCTS_DICTIONARY ASD ON ASD.ID = AST.NAME_TYPE_XI18N AND ASD.LOCALE = 'EN'\n"
+        "LEFT JOIN OUC_COMMON_ADMIN.GCCOM_SERVREQUEST_TYPE T ON T.COD_DEVELOP = SR.SERVREQ_TYPE\n"
+        "LEFT JOIN GCTS_DICTIONARY TD ON TD.ID = T.NAME_TYPE_XI18N AND TD.LOCALE = 'EN'\n"
+        "LEFT JOIN OUC_ADMIN.GCCOM_SERVREQUEST_STATUS SS ON SS.COD_DEVELOP = SR.SERVREQ_STATUS\n"
+        "LEFT JOIN GCTS_DICTIONARY SD ON SD.ID = SS.NAME_TYPE_XI18N AND SD.LOCALE = 'EN'\n"
+        "LEFT JOIN GCCOM_BILLING_SERVICE BS ON BS.ID_BILLING_SERVICE = AN.ID_BILLING_SERVICE\n"
+        "LEFT JOIN GCCOM_CONTRACTED_SERVICE CS ON CS.ID_CONTRACTED_SERVICE = BS.ID_CONTRACTED_SERVICE\n"
+        "LEFT JOIN GCCOM_PAYMENT_FORM PF ON PF.ID_PAYMENT_FORM = CS.ID_PAYMENT_FORM\n"
+        f"LEFT JOIN {OFFERED_TBL} OS ON OS.ID_OFFERED_SERVICE = CS.ID_OFFERED_SERVICE\n"
+        + where +
+        f"  AND AN.ANOMALOUS_STATUS NOT IN ({resolved})\n"
+        "ORDER BY SR.SR_CODE, AN.ID_ANOMALOUS;"
+    )
+
+
+def build_sanh2o_links_query(anomaly_ids: list[int]) -> str:
+    """Anomaly -> its ITB's readings -> every ITB of those readings (water + sanitary) with status."""
+    ids = ", ".join(str(i) for i in anomaly_ids)
+    return (
+        "SELECT DISTINCT AN.ID_ANOMALOUS, RA.ID_READING, RR.READ_STATUS, RR.READING_DATE, RR.ID_BILLING_PERIOD,\n"
+        "  RIT2.ID_ITEM_TO_BILL, ITB.STATUS AS ITB_STATUS, CS.ID_OFFERED_SERVICE, OS.NAME_TYPE AS SERVICE_DESC\n"
+        f"FROM {ANOMALOUS_TBL} AN\n"
+        f"JOIN {RIT_TBL} RA ON RA.ID_ITEM_TO_BILL = AN.ID_ITEM_TO_BILL\n"
+        f"JOIN {READING_TBL} RR ON RR.ID_READING = RA.ID_READING\n"
+        f"JOIN {RIT_TBL} RIT2 ON RIT2.ID_READING = RA.ID_READING\n"
+        f"JOIN {ITB_TBL} ITB ON ITB.ID_ITEM_TO_BILL = RIT2.ID_ITEM_TO_BILL\n"
+        "LEFT JOIN GCCOM_BILLING_SERVICE BS ON BS.ID_BILLING_SERVICE = ITB.ID_BILLING_SERVICE\n"
+        "LEFT JOIN GCCOM_CONTRACTED_SERVICE CS ON CS.ID_CONTRACTED_SERVICE = BS.ID_CONTRACTED_SERVICE\n"
+        f"LEFT JOIN {OFFERED_TBL} OS ON OS.ID_OFFERED_SERVICE = CS.ID_OFFERED_SERVICE\n"
+        f"WHERE AN.ID_ANOMALOUS IN ({ids})\n"
+        "ORDER BY AN.ID_ANOMALOUS, RA.ID_READING, RIT2.ID_ITEM_TO_BILL;"
+    )
+
+
+def build_sanh2o_script(anoms: list[dict], links: list[dict], *, program: str = SANH2O_DEFAULT_PROGRAM,
+                        user: str = DEFAULT_USER, clean: bool = False) -> tuple[str, str, dict]:
+    """Returns (update_sql, rollback_sql, counts). Anomalies -> ESTAN00005 (guard: still unresolved);
+    the anomaly readings' ITBs in STTOBILL00 -> STTOBILL01 (water + sanitary)."""
+    aids = clean_ids(a.get("id_anomalous") for a in anoms)
+    if not aids:
+        raise ValueError("Select at least one anomaly.")
+    itbs = clean_ids(l.get("id_item_to_bill") for l in links
+                     if str(l.get("itb_status")) == ITB_ANOMALOUS and str(l.get("id_anomalous")) in {str(a) for a in aids})
+    usr, prog, rprog = format_sql_literal(user), format_sql_literal(program), format_sql_literal(program + " ROLLBACK")
+    stamp = f"UPDATE_DATE = GETDATE(), UPDATE_USER = {usr}, UPDATE_PROGRAM = {prog}"
+    rstamp = f"UPDATE_DATE = GETDATE(), UPDATE_USER = {usr}, UPDATE_PROGRAM = {rprog}"
+    resolved = ", ".join(f"'{s}'" for s in ANOM_RESOLVED_STATUSES)
+    aid_list = ", ".join(str(i) for i in aids)
+    parts = []
+    if not clean:
+        parts.append(f"-- SANITARY ANOMALY - H2O Pending ({program}): {len(aids)} anomal(y/ies), {len(itbs)} item-to-bill(s) 00 -> 01")
+        for a in anoms:
+            parts.append(f"--   SR {a.get('sr_code')}  account {a.get('account')}  anomaly {a.get('id_anomalous')} "
+                         f"{a.get('anomalous_status')} {a.get('anom_desc') or a.get('anom_code') or ''} ({a.get('service_desc') or ''})")
+        parts.append("")
+    parts.append(f"UPDATE {ANOMALOUS_TBL}\nSET ANOMALOUS_STATUS = '{ANOM_RESOLVED}', {stamp}\n"
+                 f"WHERE ID_ANOMALOUS IN ({aid_list})\n  AND ANOMALOUS_STATUS NOT IN ({resolved});\n")
+    if itbs:
+        if not clean:
+            parts.append("-- the anomalies' readings: their item-to-bills still Anomalous (water + sanitary) -> Pending")
+        parts.append(f"UPDATE {ITB_TBL}\nSET STATUS = '{ITB_PENDING}', {stamp}\n"
+                     f"WHERE STATUS = '{ITB_ANOMALOUS}' AND ID_ITEM_TO_BILL IN ({', '.join(str(i) for i in itbs)});\n")
+    elif not clean:
+        parts.append("-- no item-to-bill in STTOBILL00 Anomalous for these anomalies' readings - nothing to move to 01")
+    # rollback: each anomaly back to the status it had at scan time; ITBs back to 00 if this program set them
+    rb = [f"-- ROLLBACK of SANITARY ANOMALY - H2O Pending ({program})\n"]
+    by_status: dict[str, list[int]] = {}
+    for a in anoms:
+        i = clean_ids([a.get("id_anomalous")])
+        if i:
+            by_status.setdefault(str(a.get("anomalous_status")), []).append(i[0])
+    for st, ids in by_status.items():
+        rb.append(f"UPDATE {ANOMALOUS_TBL}\nSET ANOMALOUS_STATUS = {format_sql_literal(st)}, {rstamp}\n"
+                  f"WHERE ID_ANOMALOUS IN ({', '.join(str(i) for i in ids)})\n"
+                  f"  AND ANOMALOUS_STATUS = '{ANOM_RESOLVED}' AND UPDATE_PROGRAM = {prog};\n")
+    if itbs:
+        rb.append(f"UPDATE {ITB_TBL}\nSET STATUS = '{ITB_ANOMALOUS}', {rstamp}\n"
+                  f"WHERE STATUS = '{ITB_PENDING}' AND UPDATE_PROGRAM = {prog} "
+                  f"AND ID_ITEM_TO_BILL IN ({', '.join(str(i) for i in itbs)});\n")
+    return "\n".join(parts), "\n".join(rb), {"anomalies": len(aids), "itbs": len(itbs)}
+
+
 def _sub(id_list: str) -> str:
     return f"(SELECT ID_ITEM_TO_BILL FROM {RIT_TBL} WHERE ID_READING IN ({id_list}))"
 
