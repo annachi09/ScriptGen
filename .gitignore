@@ -15,6 +15,14 @@ exports/
 .env
 *.key
 
+# Dev harness (2026-11-22): per-run worktrees, run artifacts and the active-run marker
+# stay local. The agents/skill/hook/settings in .claude/ ARE meant to be committed.
+.claude/worktrees/
+.claude/harness/runs/
+.claude/harness/ACTIVE
+.claude/settings.json.bak
+.claude/settings.local.json
+
 # Editor/OS cruft
 .idea/
 .vscode/

@@ -63,6 +63,22 @@ usual verification (live-checking queries / the running app via
 `/api/query/run` and the browser). Earlier the same day he had asked for
 unit tests by default "just stop when i say" - this is that stop.
 
+## Guardrails - every session (RJ, 2026-11-22)
+
+Short rules that apply to all work, big or small. The full plan/build/review workflow is
+opt-in only: `/harness` (`.claude/skills/harness/`), Opus plans + reviews, Sonnet builds in a worktree.
+
+- Don't commit to `main` unless RJ asks. `/harness` work stays on `feat/<id>` until RJ approves
+  the squash-merge. The guard hook (`.claude/hooks/guard.py`) blocks main commits without
+  `[approved-by-RJ]`, plus rm -rf / force-push / reset --hard / download-into-shell.
+  Don't work around a block - stop and ask.
+- Evidence, not claims: only say a check passed when you show its real output (live query
+  counts, command output + exit code). The usual live verification counts.
+- Never edit, weaken or delete a test or check to make it pass without RJ's OK.
+- Same error twice -> stop, show the raw error, ask RJ. No third blind attempt.
+- Big change (more than ~5 files, or a new menu) -> suggest `/harness`; don't start it unasked.
+- Repeat mistakes go in `.claude/rules/learned_patterns.md` (one line, only on the second time).
+
 ## Code shape
 
 - `app/core/*.py` modules are pure logic: they build SQL text and never
