@@ -5426,3 +5426,29 @@ Linux; on Windows you can just run `python main.py` directly instead):
 xvfb-run -a python tests/smoke_launch.py   # Linux/CI
 python tests/smoke_launch.py               # Windows (real display)
 ```
+
+### Reprocess EFTS (RJ 2026-11-23) - admin only
+
+RJ: "create a new temp menu, reprocess efts, here we need to execute in an ssh. and the ssh is the tunnel itself
+... then can be 1 or many id_efts i need to see the result also". New menu **Reprocess EFTS** (Quick fixes,
+`web/static/efts.js`, `app/core/efts_reprocess.py`, routes `/api/efts/find | send | route-check`).
+
+- **Find**: one or many `ID_EFTS_INPUT` -> RJ's query (EWA_GCCB_EFTS_INPUT, message -> base64) builds each payload
+  and shows the curl exactly in his format. receiver / sender / messageType / priority default to
+  EWABBHBMXXXX / BMAGBHBMAEFT / 996 / N and are editable.
+- Query fixes (same rows otherwise): `VARBINARY(1000)` -> `VARBINARY(MAX)` and `varchar(1000)` -> `varchar(max)`.
+  Base64 is 4/3 the size, so anything over ~750 bytes was cut. Live 2026-11-23: id 18988289 = 115 bytes / 156
+  base64 chars in both versions (identical); but 3,392 of 568,180 messages with id > 18,900,000 are over 750 bytes
+  (max 134,272) and would have been re-sent truncated by the original query. MESSAGE is varchar(max).
+- **Reprocess (n)**: ticked rows only, after a confirm. The server re-reads them live and POSTs each one ONCE to
+  `http://localhost:7005/ewaouc-ss-server/services/efts/messageReceived` on the SSH server (RJ: the curl works
+  from the MobaXterm SSH session), through the Settings > SSH tunnel login: the built-in tunnel's connection when
+  it is up, otherwise a short separate login. Sent as plain HTTP over an SSH port-forward channel
+  (`ssh_tunnel.http_post`); only if the SSH server refuses that channel, RJ's curl is run on the server
+  (`ssh_tunnel.exec_curl`). A send is never retried. Per row: HTTP status, response, ms, route. Export CSV.
+  Every click is saved in History (kind `efts_reprocess`: results + the curl of each message).
+- **Test route**: opens and closes a channel to localhost:7005 through SSH - sends nothing.
+- Admin only: `menu_access.ADMIN_ONLY_MENUS` strips it from Editor / Viewer on load and save; all routes use
+  `require_admin`.
+- SSH password: entered by RJ in Settings > SSH tunnel; stored Fernet-encrypted in data/config.json (whole file
+  encrypted, key protected by Windows DPAPI). Not baked into the .exe on purpose (see the round notes).

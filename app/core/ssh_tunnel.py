@@ -349,3 +349,156 @@ def test(cfg) -> dict:
                 "message": f"SSH login OK and {cfg.remote_host}:{cfg.remote_port} is reachable through {cfg.ssh_host}."}
     finally:
         client.close()
+
+
+# ---------------------------------------------------------------------------------------------------------
+# RJ 2026-11-23 (Reprocess EFTS): call an HTTP service that listens on the SSH server itself (e.g. the EFTS
+# service on localhost:7005 of the jump host), through the same SSH login as the DB tunnel.
+#   http_post()  - preferred: opens a direct-tcpip channel to host:port AS SEEN FROM the SSH server and sends
+#                  one plain HTTP/1.1 POST over it (no curl, no shell quoting).
+#   exec_curl()  - fallback, only when the SSH server refuses the channel: runs RJ's curl on the SSH server.
+#   route_check()- opens (and closes) the channel without sending anything - safe "is it reachable?" test.
+# Uses the built-in tunnel's live SSH connection when it is up, otherwise a short-lived login with the saved
+# Settings > SSH tunnel credentials (e.g. while MobaXterm holds the DB tunnel). Never retries a send: a POST
+# that may have reached the service is reported, not repeated.
+# ---------------------------------------------------------------------------------------------------------
+class ChannelRefused(RuntimeError):
+    """The SSH server would not open the port-forward channel - nothing was sent."""
+
+
+def _session(cfg):
+    """(client, owned): the running tunnel's client if healthy, else a fresh login the caller must close."""
+    with _LOCK:
+        client = _CLIENT
+        tr = client.get_transport() if client else None
+        if tr is not None and tr.is_active():
+            return client, False
+    if not (cfg.ssh_host and cfg.ssh_user):
+        raise RuntimeError("SSH host / user are not set - fill in Settings > SSH tunnel first.")
+    return _connect(cfg), True
+
+
+def _open_channel(client, host: str, port: int, timeout: float):
+    try:
+        chan = client.get_transport().open_channel("direct-tcpip", (host, int(port)), ("127.0.0.1", 0),
+                                                   timeout=timeout)
+    except Exception as exc:  # paramiko ChannelException / SSHException
+        raise ChannelRefused(f"SSH server refused a connection to {host}:{port}: {exc}") from exc
+    if chan is None:
+        raise ChannelRefused(f"SSH server refused a connection to {host}:{port}.")
+    return chan
+
+
+def _decode_chunked(data: bytes) -> bytes:
+    out, i = bytearray(), 0
+    while i < len(data):
+        j = data.find(b"\r\n", i)
+        if j < 0:
+            break
+        size_txt = data[i:j].split(b";")[0].strip()
+        try:
+            size = int(size_txt or b"0", 16)
+        except ValueError:
+            return bytes(data)          # not really chunked - show it raw
+        if size == 0:
+            break
+        out += data[j + 2:j + 2 + size]
+        i = j + 2 + size + 2
+    return bytes(out)
+
+
+def parse_http_response(raw: bytes) -> tuple[int, str, str]:
+    """(status, reason, body text) from a raw HTTP/1.x response (Connection: close)."""
+    head, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        raise RuntimeError(f"No HTTP response from the service ({len(raw)} bytes received).")
+    lines = head.decode("iso-8859-1", errors="replace").split("\r\n")
+    parts = lines[0].split(" ", 2)
+    if len(parts) < 2 or not parts[0].startswith("HTTP/") or not parts[1].isdigit():
+        raise RuntimeError(f"Unexpected reply from the service: {lines[0][:120]}")
+    headers = {}
+    for ln in lines[1:]:
+        k, _, v = ln.partition(":")
+        headers[k.strip().lower()] = v.strip()
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        body = _decode_chunked(body)
+    return int(parts[1]), (parts[2] if len(parts) > 2 else ""), body.decode("utf-8", errors="replace")
+
+
+def http_post(cfg, host: str, port: int, path: str, body: bytes, content_type: str = "application/json",
+              timeout: float = 60.0) -> dict:
+    """POST body to http://host:port/path as seen from the SSH server. Raises ChannelRefused if the channel
+    can't be opened (nothing sent). Any other failure after the request was written is returned as
+    {"ok": False, "sent": True, ...} - the caller must NOT resend it."""
+    t0 = time.time()
+    client, owned = _session(cfg)
+    try:
+        chan = _open_channel(client, host, port, timeout=min(timeout, 15))
+        sent = False
+        try:
+            chan.settimeout(timeout)
+            req = (f"POST {path} HTTP/1.1\r\nHost: {host}:{int(port)}\r\nUser-Agent: ScriptGen\r\n"
+                   f"Accept: */*\r\nContent-Type: {content_type}\r\nContent-Length: {len(body)}\r\n"
+                   f"Connection: close\r\n\r\n").encode("ascii") + body
+            chan.sendall(req)
+            sent = True
+            buf = bytearray()
+            while True:
+                data = chan.recv(65536)
+                if not data:
+                    break
+                buf += data
+                if len(buf) > 5_000_000:
+                    break
+            status, reason, text = parse_http_response(bytes(buf))
+            return {"ok": 200 <= status < 300, "sent": True, "status": status, "reason": reason,
+                    "body": text[:4000], "ms": int((time.time() - t0) * 1000), "via": "ssh-channel"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "sent": sent, "status": None, "reason": "",
+                    "body": f"{type(exc).__name__}: {exc}", "ms": int((time.time() - t0) * 1000),
+                    "via": "ssh-channel"}
+        finally:
+            try:
+                chan.close()
+            except Exception:
+                pass
+    finally:
+        if owned:
+            client.close()
+
+
+def exec_curl(cfg, command: str, timeout: float = 90.0) -> dict:
+    """Fallback: run a curl built with -w '\\n__SG_HTTP_STATUS__:%{http_code}' on the SSH server."""
+    t0 = time.time()
+    client, owned = _session(cfg)
+    try:
+        _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+        out = stdout.read().decode("utf-8", errors="replace")
+        err = stderr.read().decode("utf-8", errors="replace")
+        code = stdout.channel.recv_exit_status()
+        status = None
+        marker = "__SG_HTTP_STATUS__:"
+        if marker in out:
+            out, _, tail = out.rpartition(marker)
+            out = out.rstrip("\n")
+            status = int(tail.strip()) if tail.strip().isdigit() else None
+        ok = code == 0 and status is not None and 200 <= status < 300
+        return {"ok": ok, "sent": True, "status": status, "reason": f"curl exit {code}",
+                "body": (out or err)[:4000], "ms": int((time.time() - t0) * 1000), "via": "ssh-curl"}
+    finally:
+        if owned:
+            client.close()
+
+
+def route_check(cfg, host: str, port: int) -> dict:
+    """Can the SSH server reach host:port? Opens and closes a channel - sends nothing."""
+    t0 = time.time()
+    client, owned = _session(cfg)
+    try:
+        _open_channel(client, host, port, timeout=10).close()
+        return {"ok": True, "ms": int((time.time() - t0) * 1000),
+                "message": f"{host}:{port} is reachable through {cfg.ssh_user}@{cfg.ssh_host} "
+                           f"({'built-in tunnel connection' if not owned else 'separate SSH login'})."}
+    finally:
+        if owned:
+            client.close()

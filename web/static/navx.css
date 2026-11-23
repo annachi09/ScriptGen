@@ -452,3 +452,7 @@
 /* collapsed rail: a short coloured tick per section instead of a grey line */
 .sidebar.is-collapsed .navx-grp { background: color-mix(in srgb, var(--grp) 55%, transparent); height: 2px; margin: 10px 20px; border-radius: 2px; }
 .sidebar-collapse-btn:hover { background: rgba(255, 255, 255, .06) !important; color: #fff !important; }
+
+/* RJ 2026-11-23 Reprocess EFTS (efts.js) */
+#page-reprocessefts .efts-preview { max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+#page-reprocessefts .efts-resp { margin: 4px 0 0; max-width: 420px; max-height: 120px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: 11px; opacity: .85; }

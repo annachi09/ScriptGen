@@ -54,7 +54,7 @@ from web.auth import ROLES, ROLE_ADMIN
 # these ARE the ids used everywhere (server config, the admin panel, and
 # the frontend's own nav-item lookup), so there's exactly one place
 # (here) that has to change if a page is ever added/renamed/removed.
-MENU_IDS = ("overview", "workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "readingvalidation", "tnbcycledisc", "wrongstuckhierarchy", "disconnectiontnb", "doubleitb", "wrongbill", "wrongbilledconsumption", "billissuance", "incorrectbillingperiod", "bulkchecker", "anomalystats", "rebillingmonitor", "pendingsr", "tempdashboard", "readingdiscrepancies", "fixbillingcampaign", "billingstats", "srquickfix", "mptools", "documentation", "tools", "settings")
+MENU_IDS = ("overview", "workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "readingvalidation", "tnbcycledisc", "wrongstuckhierarchy", "disconnectiontnb", "doubleitb", "wrongbill", "wrongbilledconsumption", "billissuance", "incorrectbillingperiod", "bulkchecker", "anomalystats", "rebillingmonitor", "pendingsr", "tempdashboard", "readingdiscrepancies", "fixbillingcampaign", "billingstats", "srquickfix", "mptools", "reprocessefts", "documentation", "tools", "settings")
 
 MENU_LABELS = {
     "overview": "Overview",
@@ -85,6 +85,7 @@ MENU_LABELS = {
     "billingstats": "Billing Statistics",  # RJ 2026-11-04
     "srquickfix": "SR Quick Fix",  # RJ 2026-11-09
     "mptools": "MP Tools",  # RJ 2026-11-18
+    "reprocessefts": "Reprocess EFTS",  # RJ 2026-11-23 (admin only)
     "documentation": "Documentation",
     "tools": "Tools",
     "settings": "Settings",
@@ -113,6 +114,17 @@ ADMIN_REQUIRED_MENU = "settings"
 # on this config or a future one.
 ALWAYS_VISIBLE_MENU = "overview"
 
+# RJ 2026-11-23: menus only the Admin role can ever see - Reprocess EFTS re-sends real EFTS messages (RJ: "yes"
+# to admin only). Stripped from Editor / Viewer on load and on save; the API routes also require_admin.
+ADMIN_ONLY_MENUS = ("reprocessefts",)
+
+
+def _strip_admin_only(access: dict[str, list[str]]) -> dict[str, list[str]]:
+    for role in ROLES:
+        if role != ROLE_ADMIN:
+            access[role] = [m for m in access.get(role, []) if m not in ADMIN_ONLY_MENUS]
+    return access
+
 # New pages should just APPEAR (RJ, 2026-09-25: added TNB CYCLE/DISC
 # Analysis, restarted, "not showing" - his saved config predated the new
 # id, so the old allow-list rule silently kept it hidden for every role).
@@ -133,7 +145,7 @@ MENU_IDS_ADDED_BEFORE_TRACKING = ("tnbcycledisc", "wrongstuckhierarchy", "discon
 def default_access() -> dict[str, list[str]]:
     """Every role sees every menu - today's behavior, and what a fresh
     install (no saved file) returns."""
-    return {role: list(MENU_IDS) for role in ROLES}
+    return _strip_admin_only({role: list(MENU_IDS) for role in ROLES})
 
 
 @dataclass
@@ -180,7 +192,7 @@ class MenuAccessStore:
         for role in ROLES:
             if ALWAYS_VISIBLE_MENU not in data[role]:
                 data[role].append(ALWAYS_VISIBLE_MENU)
-        return cls(access=data)
+        return cls(access=_strip_admin_only(data))
 
     def save(self) -> None:
         raw = {"access": self.access, "known_ids": list(MENU_IDS)}
@@ -218,6 +230,6 @@ def set_access(new_access: dict[str, list[str]]) -> MenuAccessStore:
             f"Admin must always keep '{MENU_LABELS[ADMIN_REQUIRED_MENU]}' visible - "
             "otherwise no admin could ever get back here to fix it."
         )
-    store = MenuAccessStore(access=cleaned)
+    store = MenuAccessStore(access=_strip_admin_only(cleaned))
     store.save()
     return store

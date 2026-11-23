@@ -64,6 +64,8 @@ KIND_SR_INC_BP = "sr_incorrect_billing_period"
 KIND_SR_SAN_H2O = "sr_sanitary_anomaly_h2o_pending"
 # RJ 2026-11-18: MP Tools tab 1 - TMP ACTIVATE MP
 KIND_MP_TMP_ACTIVATE = "mp_tmp_activate"
+# RJ 2026-11-23: Reprocess EFTS - one entry per Reprocess click (results + the curl of each message)
+KIND_EFTS_REPROCESS = "efts_reprocess"
 
 
 @dataclass

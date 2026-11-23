@@ -59,6 +59,7 @@ from app.core import billing_stats   # RJ 2026-11-04 Billing Statistics dashboar
 from app.core import sr_quick_fix    # RJ 2026-11-09 SR Quick FIX menu
 from app.core import mp_tools        # RJ 2026-11-18 MP Tools menu
 from app.core import ssh_tunnel      # RJ 2026-11-19 built-in SSH tunnel
+from app.core import efts_reprocess  # RJ 2026-11-23 Reprocess EFTS menu
 from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -5243,6 +5244,116 @@ def mp_tmp_activate_generate(body: MpActivateGenerateRequest, user: str = Depend
     _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "REVERT of TMP ACTIVATE MP (MP + MP_STATUS_HIST)",
                    program, revert, statements=revert.count("UPDATE "))
     return {"sql": sql_text, "rollback_sql": revert, **counts}
+
+
+# Reprocess EFTS (RJ 2026-11-23) - app/core/efts_reprocess.py. Admin only: it re-sends real EFTS messages
+# to the EFTS service on the SSH server (localhost:7005 there) through the Settings > SSH tunnel login.
+class EftsFindRequest(BaseModel):
+    ids: str = ""
+    receiver: str = efts_reprocess.DEFAULT_RECEIVER
+    sender: str = efts_reprocess.DEFAULT_SENDER
+    message_type: str = efts_reprocess.DEFAULT_MESSAGE_TYPE
+    priority: str = efts_reprocess.DEFAULT_PRIORITY
+
+
+def _efts_fields(body) -> tuple[str, str, str, str]:
+    try:
+        return (efts_reprocess.check_field("receiver", body.receiver), efts_reprocess.check_field("sender", body.sender),
+                efts_reprocess.check_field("messageType", body.message_type),
+                efts_reprocess.check_field("priority", body.priority))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _efts_read(ids: list[int]):
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, efts_reprocess.build_query(ids))
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return _row_dicts(res), res.elapsed_ms
+
+
+@app.post("/api/efts/find")
+def efts_find(body: EftsFindRequest, user: str = Depends(require_admin)):
+    ids = efts_reprocess.parse_ids(body.ids)
+    if not ids:
+        raise HTTPException(status_code=400, detail="Enter at least one ID_EFTS_INPUT (one per line or comma separated).")
+    if len(ids) > efts_reprocess.MAX_IDS:
+        raise HTTPException(status_code=400, detail=f"Max {efts_reprocess.MAX_IDS} ids per search ({len(ids)} given).")
+    receiver, sender, mtype, prio = _efts_fields(body)
+    rows, ms = _efts_read(ids)
+    shaped = efts_reprocess.shape_rows(rows, receiver, sender, mtype, prio)
+    found = {r["id_efts_input"] for r in shaped}
+    return {"rows": shaped, "count": len(shaped), "elapsed_ms": ms,
+            "missing": [str(i) for i in ids if str(i) not in found], "url": efts_reprocess.SERVICE_URL}
+
+
+class EftsSendRequest(EftsFindRequest):
+    confirm_count: int = 0   # the page sends the number RJ confirmed; must match the ids
+
+
+@app.post("/api/efts/send")
+def efts_send(body: EftsSendRequest, user: str = Depends(require_admin)):
+    """Re-reads the rows live, then POSTs each payload once (in order) through SSH. Never retries a send."""
+    ids = efts_reprocess.parse_ids(body.ids)
+    if not ids:
+        raise HTTPException(status_code=400, detail="Tick at least one row to reprocess.")
+    if len(ids) > efts_reprocess.MAX_SEND:
+        raise HTTPException(status_code=400, detail=f"Max {efts_reprocess.MAX_SEND} messages per click ({len(ids)} ticked).")
+    if body.confirm_count != len(ids):
+        raise HTTPException(status_code=400, detail="Confirmation count does not match the ticked rows - press Reprocess again.")
+    receiver, sender, mtype, prio = _efts_fields(body)
+    rows, _ms = _efts_read(ids)
+    by_id = {str(r.get("id_efts_input")): r for r in rows}
+    ssh_cfg = load_config().ssh
+    results, use_exec = [], False
+    for i in ids:
+        r = by_id.get(str(i))
+        if r is None:
+            results.append({"id_efts_input": str(i), "ok": False, "sent": False, "status": None,
+                            "body": "Not found in EWA_GCCB_EFTS_INPUT - not sent.", "ms": 0, "via": ""})
+            continue
+        payload = efts_reprocess.build_body(r, receiver, sender, mtype, prio)
+        if not payload["message"]:
+            results.append({"id_efts_input": str(i), "msg_ref": payload["reference"], "ok": False, "sent": False,
+                            "status": None, "body": "Empty message - not sent.", "ms": 0, "via": ""})
+            continue
+        try:
+            if use_exec:
+                res = ssh_tunnel.exec_curl(ssh_cfg, efts_reprocess.curl_exec_command(payload))
+            else:
+                try:
+                    res = ssh_tunnel.http_post(ssh_cfg, efts_reprocess.SERVICE_HOST, efts_reprocess.SERVICE_PORT,
+                                               efts_reprocess.SERVICE_PATH, efts_reprocess.body_json(payload).encode("utf-8"))
+                except ssh_tunnel.ChannelRefused:
+                    use_exec = True   # nothing was sent - run RJ's curl on the SSH server instead (this and the rest)
+                    res = ssh_tunnel.exec_curl(ssh_cfg, efts_reprocess.curl_exec_command(payload))
+        except Exception as exc:  # noqa: BLE001 - SSH login failed etc.: nothing sent for this row
+            res = {"ok": False, "sent": False, "status": None, "body": f"SSH: {exc}", "ms": 0, "via": ""}
+        results.append({"id_efts_input": str(i), "msg_ref": payload["reference"], **res})
+    ok = sum(1 for x in results if x.get("ok"))
+    lines = [f"-- Reprocess EFTS by {user}: {ok} OK / {len(results) - ok} failed - {efts_reprocess.SERVICE_URL}"]
+    for x in results:
+        lines.append(f"-- {x['id_efts_input']} ref {x.get('msg_ref', '')}: {'OK' if x.get('ok') else 'FAILED'} "
+                     f"HTTP {x.get('status')} via {x.get('via') or '-'} - {str(x.get('body') or '')[:200]}")
+    lines += [efts_reprocess.curl_text(efts_reprocess.build_body(by_id[str(i)], receiver, sender, mtype, prio))
+              for i in ids if str(i) in by_id]
+    _record_script(user, script_history.KIND_EFTS_REPROCESS,
+                   f"Reprocess EFTS - {len(results)} message(s), {ok} OK, id(s) {', '.join(map(str, ids[:10]))}",
+                   "REPROCESS_EFTS", "\n".join(lines), statements=len(results))
+    return {"results": results, "ok": ok, "failed": len(results) - ok, "url": efts_reprocess.SERVICE_URL}
+
+
+@app.post("/api/efts/route-check")
+def efts_route_check(user: str = Depends(require_admin)):
+    """Is the EFTS service port reachable through SSH? Opens and closes a channel - sends nothing."""
+    try:
+        return ssh_tunnel.route_check(load_config().ssh, efts_reprocess.SERVICE_HOST, efts_reprocess.SERVICE_PORT)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
 
 
 # SR Quick FIX tab 2 (RJ 2026-11-17): SANITARY ANOMALY - H2O Pending - by SR code

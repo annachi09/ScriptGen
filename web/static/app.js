@@ -160,6 +160,7 @@ const SG_ENDPOINT_OWNER = [
   ["/api/sr-quick-fix/incorrect-bp/", "srquickfix", "incbp"],   // RJ 2026-11-09 SR Quick FIX
   ["/api/sr-quick-fix/san-h2o/", "srquickfix", "sanh2o"],   // RJ 2026-11-17 Sanitary Anomaly - H2O Pending
   ["/api/mp-tools/tmp-activate/", "mptools", "tmpact"],   // RJ 2026-11-18 MP Tools
+  ["/api/efts/", "reprocessefts", ""],   // RJ 2026-11-23 Reprocess EFTS
   ["/api/fix-billing-campaign/", "fixbillingcampaign", "campaign"],
   ["/api/pending-sr/", "pendingsr", ""],
   ["/api/rebilling-monitor/open", "rebillingmonitor", "open"],
@@ -677,6 +678,12 @@ const OVERVIEW_CARDS = [
     key: "mptools", icon: "🔌", label: "MP Tools - TMP Activate MP", color: "#14b8a6",
     desc: "Activate an inactive MP: readings in Calculated usage, MP + status history.",
     page: "mptools", group: "MP Tools", nocount: true,
+  },
+  {
+    // RJ 2026-11-23: Reprocess EFTS - input-driven (ID_EFTS_INPUT), admin only, no count
+    key: "reprocessefts", icon: "📨", label: "Reprocess EFTS", color: "#a78bfa",
+    desc: "Re-send EFTS input messages through the SSH tunnel and see each result.",
+    page: "reprocessefts", group: "Quick fixes", nocount: true,
   },
   {
     key: "incorrectbillingperiod", icon: "📅", label: "Incorrect Billing Period", color: "#ec4899",
@@ -10521,6 +10528,7 @@ const HX_REFRESH = {
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
   fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn", bfacat: "#fbk-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),
   srquickfix: () => ({ btn: hxActiveSub("data-srq-sub") === "sanh2o" ? "#sh2o-detect-btn" : "#srq-detect-btn" }),
+  reprocessefts: () => ({ btn: "#efts-find-btn" }),   // RJ 2026-11-23 (re-runs Find)
   mptools: () => ({ btn: "#mpt-detect-btn" }),   // RJ 2026-11-18 (re-runs the last scan)   // RJ 2026-11-09 / 11-17 SR Quick FIX
   billingstats: () => ({ btn: "#bst-refresh-btn" }),   // RJ 2026-11-04 (page loads itself on open, like Anomalies Statistics)   // multi (RJ 2026-10-28) re-runs the campaign Scan
 };

@@ -159,6 +159,9 @@
         <button class="nav-item" data-page="mptools" title="MP Tools"><!-- RJ 2026-11-18 -->
           <span class="nav-icon">🔌</span><span class="nav-label">MP Tools</span>
         </button>
+        <button class="nav-item" data-page="reprocessefts" title="Reprocess EFTS"><!-- RJ 2026-11-23 (admin only) -->
+          <span class="nav-icon">📨</span><span class="nav-label">Reprocess EFTS</span>
+        </button>
         <button class="nav-item" data-page="tempdashboard" title="Temp Dashboard">
           <span class="nav-icon">🧪</span><span class="nav-label">Temp Dashboard</span>
         </button>
@@ -3353,6 +3356,57 @@
         <div id="as-root" class="as-root" aria-live="polite"></div>
       </section>
 
+      <!-- ===== Reprocess EFTS (RJ 2026-11-23) - efts.js - admin only =====
+           "create a new temp menu, reprocess efts, here we need to execute in an ssh ... i need to see the result also" -->
+      <section class="page" id="page-reprocessefts">
+        <header class="page-header">
+          <h1>Reprocess EFTS</h1>
+          <p class="page-subtitle">Re-send EFTS input messages to the EFTS service through the SSH tunnel and see each result. Admin only.</p>
+          <div class="hint-text" id="efts-meta">Enter ID_EFTS_INPUT(s) and press Enter / Find.</div>
+        </header>
+        <div class="biss-info-banner">
+          ℹ️ Find reads <strong>EWA_GCCB_EFTS_INPUT</strong> and builds each payload (message as base64 + reference) - nothing
+          is sent. <strong>Reprocess</strong> posts the ticked rows once each to
+          <code>http://localhost:7005/ewaouc-ss-server/services/efts/messageReceived</code> on the SSH server
+          (Settings › SSH tunnel login), after a confirmation. Every run is saved in History.
+        </div>
+        <div class="card">
+          <div class="card-header"><h2>Find</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill-sm" id="efts-route-btn" title="Opens a connection to localhost:7005 through SSH and closes it - sends nothing">🔌 Test route</button>
+              <button type="button" class="btn btn-pill" id="efts-find-btn">🔍 Find</button>
+            </div>
+          </div>
+          <label class="field" style="display:block;"><span class="hint-text">ID_EFTS_INPUT - one per line or comma separated (max 500)</span>
+            <textarea id="efts-ids" class="text-input" rows="2" placeholder="e.g. 18988289"></textarea></label>
+          <div class="key-panel-row" style="gap:12px;flex-wrap:wrap;align-items:flex-end;margin-top:8px;">
+            <label class="field"><span class="hint-text">receiver</span><input type="text" id="efts-receiver" class="text-input text-input-sm" value="EWABBHBMXXXX" style="width:150px;" /></label>
+            <label class="field"><span class="hint-text">sender</span><input type="text" id="efts-sender" class="text-input text-input-sm" value="BMAGBHBMAEFT" style="width:150px;" /></label>
+            <label class="field"><span class="hint-text">messageType</span><input type="text" id="efts-type" class="text-input text-input-sm" value="996" style="width:80px;" /></label>
+            <label class="field"><span class="hint-text">priority</span><input type="text" id="efts-priority" class="text-input text-input-sm" value="N" style="width:60px;" /></label>
+          </div>
+          <div class="hint-text" id="efts-route-info" style="margin-top:8px;"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h2>Messages</h2>
+            <div class="card-header-actions">
+              <span class="hint-text" id="efts-shown"></span>
+              <button type="button" class="btn btn-pill-sm" id="efts-export-btn" disabled>⬇ Export CSV</button>
+              <button type="button" class="btn btn-pill" id="efts-send-btn" disabled>🚀 Reprocess (0)</button>
+            </div>
+          </div>
+          <div id="efts-kpis"></div>
+          <div class="hint-text" id="efts-send-info"></div>
+          <div class="grid-wrap" style="margin-top:12px;">
+            <table class="data-grid" id="efts-table">
+              <thead><tr><th><input type="checkbox" id="efts-check-all" title="Select all" /></th><th>ID_EFTS_INPUT</th><th>Reference</th>
+                <th>Size</th><th>Message (start)</th><th>curl</th><th>Result</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- ===== MP Tools (RJ 2026-11-18) - mptools.js ===== -->
       <section class="page" id="page-mptools">
         <header class="page-header">
@@ -4019,6 +4073,7 @@
   <script src="/mptools.js"></script><!-- RJ 2026-11-18 MP Tools -->
   <script src="/settings.js"></script><!-- RJ 2026-11-19 Settings: sections + built-in SSH tunnel -->
   <script src="/sg-std.js"></script><!-- RJ 2026-11-19 page standard kit (docs/UI_STANDARD.md) -->
+  <script src="/efts.js"></script><!-- RJ 2026-11-23 Reprocess EFTS (admin only) -->
   <script src="/navx.js"></script><!-- RJ 2026-11-18 new sidebar (search + favorite tiles + spaces) and tab cards -->
   <script src="/srq_sanh2o.js"></script><!-- RJ 2026-11-17 SR Quick FIX - Sanitary Anomaly - H2O Pending -->
   <script src="/docs-content.js"></script>
