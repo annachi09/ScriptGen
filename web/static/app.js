@@ -161,6 +161,8 @@ const SG_ENDPOINT_OWNER = [
   ["/api/sr-quick-fix/san-h2o/", "srquickfix", "sanh2o"],   // RJ 2026-11-17 Sanitary Anomaly - H2O Pending
   ["/api/mp-tools/tmp-activate/", "mptools", "tmpact"],   // RJ 2026-11-18 MP Tools
   ["/api/efts/", "reprocessefts", ""],   // RJ 2026-11-23 Reprocess EFTS
+  ["/api/sanitary-status/disc-charged/", "sanitarystatus", "disccharged"],   // RJ 2026-11-24 Sanitary Status
+  ["/api/tnb-dashboard/not-transferred/", "tnbdashboard", "nottransferred"],   // RJ 2026-11-25 TNB Dashboard
   ["/api/fix-billing-campaign/", "fixbillingcampaign", "campaign"],
   ["/api/pending-sr/", "pendingsr", ""],
   ["/api/rebilling-monitor/open", "rebillingmonitor", "open"],
@@ -281,6 +283,33 @@ function sgAddQueryButtons() {
 document.addEventListener("DOMContentLoaded", sgAddQueryButtons);
 if (document.readyState !== "loading") setTimeout(sgAddQueryButtons, 0);
 
+// RJ 2026-11-24: "for bill issuance validator, the top cards are not updated, no more to detect but cards are
+// still showing number, case 1". The tab cards (and Overview cards) show overviewLive[key], which was only
+// refreshed when the Overview page loaded - a new scan on the page itself never updated it. Now a scan on a
+// page whose Overview counter calls that same detect (same parameters) pushes its fresh number into
+// overviewLive. Only endpoints called WITHOUT parameters are listed (Case 2 / 3 scans take a days-back /
+// filter setting, so their number can legitimately differ from the Overview's default one).
+const SG_SCAN_COUNTERS = [
+  ["/api/bill-issuance/detect", "billissuance_case1", (d) => (Array.isArray(d.rows) ? d.rows.length : null)],
+  ["/api/bill-issuance/case4/detect", "billissuance_case4", (d) => d.account_count],
+  ["/api/bill-issuance/case5/detect", "billissuance_case5", (d) => d.account_count],
+  ["/api/sanitary-status/disc-charged/detect", "sanitarystatus_disccharged", (d) => d.count],   // RJ 2026-11-24
+  ["/api/tnb-dashboard/not-transferred/detect", "tnbdashboard_nottransferred", (d) => d.count],   // RJ 2026-11-25
+];
+function sgSyncOverviewCount(path, data) {
+  try {
+    const hit = data && SG_SCAN_COUNTERS.find(([p]) => p === path);
+    if (!hit) return;
+    const n = hit[2](data);
+    if (typeof n !== "number" || !Number.isFinite(n)) return;
+    overviewLive[hit[1]] = n;
+    delete overviewLiveErr[hit[1]];
+    const card = OVERVIEW_CARDS.find((c) => c.key === hit[1]);
+    if (card) overviewUpdateCard(card, null);   // also refreshes the tab cards (navxRefresh)
+    else window.navxRefresh?.();
+  } catch (_) { /* a counter sync must never break the scan itself */ }
+}
+
 async function api(path, options = {}) {
   _apiInflight++;
   // options.quiet: background loads (e.g. Bulk Checker prefetch) don't hold
@@ -304,6 +333,7 @@ async function api(path, options = {}) {
       const message = (data && data.detail) || `Request failed (${resp.status})`;
       throw new Error(message);
     }
+    sgSyncOverviewCount(path, data);   // RJ 2026-11-24
     return data;
   } finally {
     _apiInflight--;
@@ -732,6 +762,18 @@ const OVERVIEW_CARDS = [
     desc: "Searches run from this workstation.",
     page: "bulkchecker", localValue: (s) => s.bulk_checker_search_count,
     group: "Bulk Checker",
+  },
+  {
+    // RJ 2026-11-25: TNB Dashboard tab 1 - headline = the page's row count (TNB bills not transferred)
+    key: "tnbdashboard_nottransferred", icon: "⚡", label: "TNB billed - debt not transferred", color: "#38bdf8",
+    desc: "Solved TNB RCCS whose source bill was never transferred to the destination account.",
+    page: "tnbdashboard", subAttr: "data-tnbd-sub", subValue: "nottransferred", group: "TNB Dashboard",
+  },
+  {
+    // RJ 2026-11-24: Sanitary Status tab 1 - headline = the page's row count
+    key: "sanitarystatus_disccharged", icon: "🚱", label: "Sanitary - Disconnected, still charged", color: "#38bdf8",
+    desc: "Premise disconnected from the sanitary network, service still on W-SAN01 Sanitary Charges.",
+    page: "sanitarystatus", subAttr: "data-sst-sub", subValue: "disccharged", group: "Sanitary Status",
   },
   {
     key: "pendingsr", icon: "🎫", label: "Pending Service Request", color: "#ec4899",
@@ -10528,6 +10570,8 @@ const HX_REFRESH = {
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
   fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn", bfacat: "#fbk-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),
   srquickfix: () => ({ btn: hxActiveSub("data-srq-sub") === "sanh2o" ? "#sh2o-detect-btn" : "#srq-detect-btn" }),
+  sanitarystatus: () => ({ btn: "#sst1-detect-btn" }),   // RJ 2026-11-24
+  tnbdashboard: () => ({ btn: "#tnb1-detect-btn" }),   // RJ 2026-11-25
   reprocessefts: () => ({ btn: "#efts-find-btn" }),   // RJ 2026-11-23 (re-runs Find)
   mptools: () => ({ btn: "#mpt-detect-btn" }),   // RJ 2026-11-18 (re-runs the last scan)   // RJ 2026-11-09 / 11-17 SR Quick FIX
   billingstats: () => ({ btn: "#bst-refresh-btn" }),   // RJ 2026-11-04 (page loads itself on open, like Anomalies Statistics)   // multi (RJ 2026-10-28) re-runs the campaign Scan
@@ -10585,7 +10629,7 @@ document.addEventListener("keydown", (e) => {
 // are left alone; Wrong Bill and Anomalies Statistics already auto-load.
 const HX_AUTO_PAGES = new Set(["hierarchy", "tnbcycledisc", "wrongstuckhierarchy", "doubleitb",
   "wrongbilledconsumption", "disconnectiontnb", "billissuance", "incorrectbillingperiod", "dateanomaly", "rebillingmonitor", "pendingsr",
-  "readingdiscrepancies", "fixbillingcampaign"]);
+  "readingdiscrepancies", "fixbillingcampaign", "sanitarystatus", "tnbdashboard"]);
 const hxAutoLoaded = new Set();
 let hxAutoTimer = null;
 

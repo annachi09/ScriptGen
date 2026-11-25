@@ -43,7 +43,7 @@
     incorrectbillingperiod: "Incorrect Billing Period", bulkchecker: "Bulk Checker", anomalystats: "Anomaly Statistics",
     rebillingmonitor: "Rebilling Monitor", pendingsr: "Pending Service Requests", tempdashboard: "Temp Dashboard",
     readingdiscrepancies: "Reading Discrepancies", fixbillingcampaign: "Fix Billing Campaign 2026",
-    billingstats: "Billing Statistics", srquickfix: "SR Quick Fix", mptools: "MP Tools", reprocessefts: "Reprocess EFTS",
+    billingstats: "Billing Statistics", srquickfix: "SR Quick Fix", mptools: "MP Tools", reprocessefts: "Reprocess EFTS", sanitarystatus: "Sanitary Status", tnbdashboard: "TNB Dashboard",
     documentation: "Documentation", tools: "Tools", settings: "Settings",
   };
   // RJ 2026-11-18: "when i hover on the menu, add a small description of what it is doing, make it user
@@ -71,6 +71,8 @@
     billingstats: "Bills issued per period, type and status, with fixed-billing and signal breakdowns.",
     srquickfix: "Quick fixes for service-request cases: incorrect billing period, sanitary anomaly with water pending.",
     mptools: "Measuring point tools - re-activate an inactive MP and release its calculated readings.",
+    tnbdashboard: "TNB dashboard: termination-not-billed RCCS billed on the old account but the debt never transferred to the new one.",
+    sanitarystatus: "Sanitary dashboard: premises disconnected from the sanitary network but still on the Sanitary Charges tariff.",
     reprocessefts: "Re-send EFTS input messages to the EFTS service through the SSH tunnel and see each result (admin).",
     tempdashboard: "Working board: accounts and readings, sanitary status not matching water.",
     readingdiscrepancies: "Readings pending validation for more than 3 days and readings never billed.",
@@ -107,6 +109,8 @@
     billingstats: '<path d="M3 3v18h18"/><path d="M18 17V9M13 17V5M8 17v-3"/>',
     srquickfix: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
     mptools: '<path d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/>',
+    tnbdashboard: '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/><path d="M17 17h4m-2-2 2 2-2 2"/>',
+    sanitarystatus: '<path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"/><path d="m4 4 16 16"/>',
     reprocessefts: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
     tempdashboard: '<path d="M10 2v7.5a2 2 0 0 1-.2.9L4.7 20.6a1 1 0 0 0 .9 1.4h12.8a1 1 0 0 0 .9-1.4l-5.1-10.2a2 2 0 0 1-.2-.9V2M8.5 2h7M7 16h10"/>',
     readingdiscrepancies: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
@@ -188,7 +192,7 @@
     ["admin", "Admin & help", "#94a3b8", '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>'],
   ];
   const GROUP_OF = {
-    anomalystats: "monitor", billingstats: "monitor", rebillingmonitor: "monitor", pendingsr: "monitor", tempdashboard: "monitor",
+    anomalystats: "monitor", billingstats: "monitor", rebillingmonitor: "monitor", pendingsr: "monitor", tempdashboard: "monitor", sanitarystatus: "monitor", tnbdashboard: "monitor",
     billissuance: "billing", doubleitb: "billing", wrongbill: "billing", wrongbilledconsumption: "billing",
     incorrectbillingperiod: "billing", fixbillingcampaign: "billing",
     dateanomaly: "readings", readingvalidation: "readings", hierarchy: "readings", wrongstuckhierarchy: "readings",

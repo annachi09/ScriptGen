@@ -54,7 +54,7 @@ from web.auth import ROLES, ROLE_ADMIN
 # these ARE the ids used everywhere (server config, the admin panel, and
 # the frontend's own nav-item lookup), so there's exactly one place
 # (here) that has to change if a page is ever added/renamed/removed.
-MENU_IDS = ("overview", "workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "readingvalidation", "tnbcycledisc", "wrongstuckhierarchy", "disconnectiontnb", "doubleitb", "wrongbill", "wrongbilledconsumption", "billissuance", "incorrectbillingperiod", "bulkchecker", "anomalystats", "rebillingmonitor", "pendingsr", "tempdashboard", "readingdiscrepancies", "fixbillingcampaign", "billingstats", "srquickfix", "mptools", "reprocessefts", "documentation", "tools", "settings")
+MENU_IDS = ("overview", "workspace", "script", "history", "dashboard", "ai", "dateanomaly", "hierarchy", "readingvalidation", "tnbcycledisc", "wrongstuckhierarchy", "disconnectiontnb", "doubleitb", "wrongbill", "wrongbilledconsumption", "billissuance", "incorrectbillingperiod", "bulkchecker", "anomalystats", "rebillingmonitor", "pendingsr", "tempdashboard", "readingdiscrepancies", "fixbillingcampaign", "billingstats", "srquickfix", "mptools", "reprocessefts", "sanitarystatus", "tnbdashboard", "documentation", "tools", "settings")
 
 MENU_LABELS = {
     "overview": "Overview",
@@ -86,6 +86,8 @@ MENU_LABELS = {
     "srquickfix": "SR Quick Fix",  # RJ 2026-11-09
     "mptools": "MP Tools",  # RJ 2026-11-18
     "reprocessefts": "Reprocess EFTS",  # RJ 2026-11-23 (admin only)
+    "sanitarystatus": "Sanitary Status",  # RJ 2026-11-24
+    "tnbdashboard": "TNB Dashboard",  # RJ 2026-11-25
     "documentation": "Documentation",
     "tools": "Tools",
     "settings": "Settings",

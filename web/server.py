@@ -60,6 +60,8 @@ from app.core import sr_quick_fix    # RJ 2026-11-09 SR Quick FIX menu
 from app.core import mp_tools        # RJ 2026-11-18 MP Tools menu
 from app.core import ssh_tunnel      # RJ 2026-11-19 built-in SSH tunnel
 from app.core import efts_reprocess  # RJ 2026-11-23 Reprocess EFTS menu
+from app.core import sanitary_status  # RJ 2026-11-24 Sanitary Status dashboard
+from app.core import tnb_dashboard    # RJ 2026-11-25 TNB Dashboard
 from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -1448,11 +1450,10 @@ def _ov_hierarchy(conn, user):
 
 
 def _ov_biss1(conn, user):
-    stuck, nc = _run_queries_parallel(conn, [
-        bill_issuance_validator.build_stuck_bills_query(limit=bill_issuance_validator.BILL_ISSUANCE_DEFAULT_LIMIT),
-        bill_issuance_validator.build_new_contract_match_query(limit=bill_issuance_validator.NEW_CONTRACT_MATCH_DEFAULT_LIMIT),
-    ])
-    return len(stuck.rows) + len(nc.rows)
+    # RJ 2026-11-24: "for bill issuance validator, the top cards are not updated, no more to detect but cards
+    # are still showing number, case 1". The card counted its own copy of the two queries (default next-period
+    # window, no one-row-per-account rule) - now it calls the page's own detect, so it is the page's row count.
+    return len(bill_issuance_detect(user=user)["rows"])
 
 
 # RJ 2026-10-21: "for bill issuance validator, why in the overview there is 600++ but when i
@@ -1520,6 +1521,10 @@ _OVERVIEW_COUNTERS = {
     "fixbillingcampaign": lambda conn, user: fix_billing_campaign_detect(FixBillingCampaignRequest(), user=user)["main_count"],  # RJ 2026-10-29: = Campaign tab default (successful requests, no cancelled)
     # RJ 2026-10-09: pending service requests with a JIRA comment
     "pendingsr": lambda conn, user: pending_service_request_detect(user=user)["count"],
+    # RJ 2026-11-24: Sanitary Status tab 1 - the page's own detect, same number the page leads with
+    "sanitarystatus_disccharged": lambda conn, user: sanitary_status_disc_charged_detect(user=user)["count"],
+    # RJ 2026-11-25: TNB Dashboard tab 1 - the page's own detect (TNB bills not debt-transferred)
+    "tnbdashboard_nottransferred": lambda conn, user: tnb_dashboard_not_transferred_detect(user=user)["count"],
     # RJ 2026-11-04: Billing Statistics headline = distinct accounts with an INVOICED (ESTFAC0005,
     # page default status) Service bill in the current billing period. Not an anomaly - kept out
     # of the daily digest.
@@ -1548,6 +1553,8 @@ _DIGEST_LABELS = {
     "readingdiscrepancies": "Readings pending validation > 3 days",
     "fixbillingcampaign": "FIX BILLING CAMPAIGN 2026 successful requests",   # RJ 2026-10-29
     "pendingsr": "Pending Service Requests (JIRA)",
+    "sanitarystatus_disccharged": "Sanitary - disconnected premise still on Sanitary Charges",   # RJ 2026-11-24
+    "tnbdashboard_nottransferred": "TNB billed - debt not transferred to the destination account",   # RJ 2026-11-25
     "srquickfix_incbp": "SR Incorrect Billing Period - readings lower than previous",  # RJ 2026-11-09
 }
 alerts.register_digest_counters({k: (_DIGEST_LABELS.get(k, k), fn) for k, fn in _OVERVIEW_COUNTERS.items()
@@ -5244,6 +5251,43 @@ def mp_tmp_activate_generate(body: MpActivateGenerateRequest, user: str = Depend
     _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "REVERT of TMP ACTIVATE MP (MP + MP_STATUS_HIST)",
                    program, revert, statements=revert.count("UPDATE "))
     return {"sql": sql_text, "rollback_sql": revert, **counts}
+
+
+# TNB Dashboard (RJ 2026-11-25) - app/core/tnb_dashboard.py. Read only.
+@app.post("/api/tnb-dashboard/not-transferred/detect")
+def tnb_dashboard_not_transferred_detect(user: str = Depends(require_login)):
+    """Case 1: solved TNB RCCS with a destination account whose Fraud Off Cycle bill on the source account was
+    never debt-transferred (no Credit Allocation collection)."""
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, tnb_dashboard.build_not_transferred_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = tnb_dashboard.shape_rows(_row_dicts(res))
+    return {"rows": rows, "count": len(rows), "elapsed_ms": res.elapsed_ms,
+            "rccs_count": len({r.get("cod_ref_complaint") for r in rows}),
+            "half_done": sum(1 for r in rows if r.get("half_done"))}
+
+
+# Sanitary Status dashboard (RJ 2026-11-24) - app/core/sanitary_status.py. Read only.
+@app.post("/api/sanitary-status/disc-charged/detect")
+def sanitary_status_disc_charged_detect(user: str = Depends(require_login)):
+    """Case 1: premise disconnected (latest sanitary-network action) but the active sanitary service is still on
+    W-SAN01 Sanitary Charges (not the zero tariff / subsidy)."""
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, sanitary_status.build_disc_charged_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = _row_dicts(res)
+    for r in rows:
+        r["cs_status_name"] = sanitary_status.CS_STATUS_NAMES.get(r.get("cs_status"), r.get("cs_status"))
+    return {"rows": rows, "count": len(rows), "elapsed_ms": res.elapsed_ms,
+            "premise_count": len({r.get("id_premise") for r in rows})}
 
 
 # Reprocess EFTS (RJ 2026-11-23) - app/core/efts_reprocess.py. Admin only: it re-sends real EFTS messages

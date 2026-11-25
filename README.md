@@ -5452,3 +5452,58 @@ RJ: "create a new temp menu, reprocess efts, here we need to execute in an ssh. 
   `require_admin`.
 - SSH password: entered by RJ in Settings > SSH tunnel; stored Fernet-encrypted in data/config.json (whole file
   encrypted, key protected by Windows DPAPI). Not baked into the .exe on purpose (see the round notes).
+
+### Bill Issuance Case 1 - tab / Overview card stays on an old number (RJ 2026-11-24)
+
+RJ: "for bill issuance validator, the top cards are not updated, no more to detect but cards are still showing
+number, case 1". Two causes, both fixed:
+- The tab cards (and Overview cards) show `overviewLive[key]`, which was only refreshed when the Overview page
+  loaded; scanning on the page never updated it. `api()` in app.js now calls `sgSyncOverviewCount()`: after a
+  scan whose Overview counter runs the same detect with the same (default) parameters, the fresh number goes
+  into `overviewLive` and the cards redraw. Wired for Case 1 (`/api/bill-issuance/detect`, rows), Case 4 and
+  Case 5 (`account_count`). Case 2 / 3 are left out on purpose: their page scans take a days-back / filter
+  setting, so their number can differ from the Overview's default one. Live-checked: card forced to 37,
+  Scan Case 1 -> 0 rows -> card 0.
+- `_ov_biss1` (Overview counter) ran its own copy of the two queries without the page's 11-periods-ahead window
+  and one-row-per-account rule. It now calls `bill_issuance_detect()` and returns the page's row count
+  (standing rule: Overview card = the page's own number).
+
+### Sanitary Status dashboard - Case 1 "Disconnected, still charged" (RJ 2026-11-24)
+
+RJ: "create a new menu for new dashboard, sanitary status, first case is to find all sanitary where the premise is
+disconnected but the tariff is sanitary billing not subsidized or zero tarif". New Monitor menu **Sanitary Status**
+(`app/core/sanitary_status.py`, `web/static/sanitarystatus.js`, `/api/sanitary-status/disc-charged/detect`), tab 1:
+- Premise disconnected = its LATEST row in `EWA_GCGT_NS_SANITARY_PREMISE` (FROM_DATE, then ID_SAN_PREMISE) is
+  `Disconnected`. Live, Disconnected rows are one-day events (TO_DATE set) - only Connected rows stay open - so
+  "TO_DATE IS NULL" would find none. 882 premises today.
+- GCCOM_SUPPLY.ID_PREMISE -> GCCOM_SECTOR_SUPPLY -> Sanitary (190) contracted service not Pending / Terminated /
+  Cancelled -> billing service ID_FARE not 10000000021 (W-SAN02 Zero) / 10000000022 (W-SAN03 Subsidy) = W-SAN01.
+- Extra columns: sanitary bills since the disconnection date (not cancelled / rebilled / credit note), their total.
+- Live 2026-11-24: 36 services, 7 premises, all disconnected 2026-01-01, 376 bills / 4,214.910 since; 1.5 s.
+  Checked: premise 122657's billing service went W-SAN02 -> W-SAN01 on 2026-01-01 (BILLING_SERVICE_HIST), the
+  day of the disconnection, and is billed monthly since. Same premises: 208 services correctly on W-SAN02, 9 on
+  W-SAN03 subsidy (left out).
+- Overview card `sanitarystatus_disccharged` = the page's own detect (also in the daily digest); scan on the page
+  updates the card (`SG_SCAN_COUNTERS`). Auto-scans on open.
+
+### TNB Dashboard - Case 1 "Billed, debt not transferred" (RJ 2026-11-25)
+
+RJ: "create a new menu for TNB Dashboard, 1st tab is TNB billed but transferred transaction is not done. for EXAMPLE
+... RCALL260814218 ... the RCCS is resolved and the account is billed of the rccs, bill number 11029015172609040001
+irregularities, fraud cycle". New Monitor menu **TNB Dashboard** (`app/core/tnb_dashboard.py`,
+`web/static/tnbdashboard.js`, `/api/tnb-dashboard/not-transferred/detect`), tab 1.
+- TNB workflow (graph 10000000781, read live): RCCS 5164COMTYP -> Fraud WO -> Fraud Billing (TIPFAC0013 "Fraud Off
+  Cycle" bill on the source/terminated account) -> Destination Account Search (GCCC_COMPLAINT_ATT 'TNBDESTACC' =
+  destination REFERENCE) -> Validate Owner -> STEP122094 Debt Transfer (ACTI700308) -> Solved COMPLST054.
+- A done transfer (RCALL261035493, 33.02): wfLaunchAction credits the source TNB bill with a TIMOPA0006 "Credit
+  Allocation" online collection and creates the same amount as a TIPFAC0004 / TFGEN10027 Off-cycle bill on the
+  destination.
+- Case: Solved + destination + TNB bill amount > 0 (not cancelled / rebilled) + NO active Credit Allocation
+  collection on it. Live 2026-11-25: 72 bills / 67 RCCS / 3,965.90 - all with the Debt Transfer action "Solved".
+  23 still pending on the source (1,445.87), 49 paid by the customer on the source (EFT / wire, 2,520.03 - RJ's
+  example: 0.45 paid by EFT 2026-09-26, nothing on destination 879834). Normal: 910 transferred. 59 zero-amount TNB
+  bills left out.
+- KPI "Destination billed, source not credited" (8, 79.66): the destination has the transfer's TFGEN10027 bill
+  but the source bill was never credited - charged twice (RCALL251106477: destination bill 1077073448 1.54 paid,
+  source 1074620757 1.54 still pending).
+- Overview card `tnbdashboard_nottransferred` = page's own detect (also in the daily digest); auto-scan on open.

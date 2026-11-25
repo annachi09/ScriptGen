@@ -162,6 +162,12 @@
         <button class="nav-item" data-page="reprocessefts" title="Reprocess EFTS"><!-- RJ 2026-11-23 (admin only) -->
           <span class="nav-icon">📨</span><span class="nav-label">Reprocess EFTS</span>
         </button>
+        <button class="nav-item" data-page="tnbdashboard" title="TNB Dashboard"><!-- RJ 2026-11-25 -->
+          <span class="nav-icon">⚡</span><span class="nav-label">TNB Dashboard</span>
+        </button>
+        <button class="nav-item" data-page="sanitarystatus" title="Sanitary Status"><!-- RJ 2026-11-24 -->
+          <span class="nav-icon">🚱</span><span class="nav-label">Sanitary Status</span>
+        </button>
         <button class="nav-item" data-page="tempdashboard" title="Temp Dashboard">
           <span class="nav-icon">🧪</span><span class="nav-label">Temp Dashboard</span>
         </button>
@@ -3356,6 +3362,91 @@
         <div id="as-root" class="as-root" aria-live="polite"></div>
       </section>
 
+      <!-- ===== TNB Dashboard (RJ 2026-11-25) - tnbdashboard.js =====
+           "create a new menu for TNB Dashboard, 1st tab is TNB billed but transferred transaction is not done" -->
+      <section class="page" id="page-tnbdashboard">
+        <header class="page-header">
+          <h1>TNB Dashboard</h1>
+          <p class="page-subtitle">Termination-not-billed (TNB) RCCS: billed on the terminated account but the debt never reached the destination account. Read only.</p>
+        </header>
+        <nav class="da-subnav" aria-label="TNB Dashboard cases">
+          <button type="button" class="da-subnav-btn is-active" data-tnbd-sub="nottransferred">Billed, debt not transferred</button>
+        </nav>
+        <div class="da-subpage is-active" data-tnbd-sub="nottransferred">
+          <div class="biss-info-banner">
+            ℹ️ RCCS type <strong>5164COMTYP</strong> (Billing of Termination not billed), status <strong>Solved</strong>, with a destination
+            account (TNBDESTACC), and a <strong>Fraud Off Cycle (TIPFAC0013)</strong> bill on the terminated account with amount &gt; 0 -
+            but that bill has <strong>no Credit Allocation (TIMOPA0006)</strong> collection, i.e. the Debt Transfer never moved it to the
+            destination (a done transfer credits the source bill and creates the same amount as an Off-cycle TFGEN10027 bill on the destination).
+          </div>
+          <div class="card">
+            <div class="card-header"><h2>TNB billed, debt not transferred</h2>
+              <div class="card-header-actions">
+                <button type="button" class="btn btn-pill-sm" id="tnb1-export-btn" disabled>⬇ Export CSV</button>
+                <button type="button" class="btn btn-pill" id="tnb1-detect-btn">🔍 Scan</button>
+              </div>
+            </div>
+            <div class="hint-text" id="tnb1-meta">Scanning on open…</div>
+            <div id="tnb1-kpis"></div>
+            <div class="key-panel-row" style="gap:10px;flex-wrap:wrap;align-items:center;">
+              <input type="text" id="tnb1-search" class="text-input text-input-sm" placeholder="Filter: RCCS, account, destination, bill" style="width:280px;" />
+              <button type="button" class="btn btn-pill-sm" id="tnb1-clear" hidden>✕ Clear filters</button>
+              <span class="hint-text" id="tnb1-shown"></span>
+            </div>
+            <div class="grid-wrap" style="margin-top:12px;">
+              <table class="data-grid" id="tnb1-table">
+                <thead><tr><th><input type="checkbox" id="tnb1-check-all" title="Select all shown" /></th><th>RCCS</th><th>Source account (terminated)</th>
+                  <th>Destination account</th><th>TNB bill</th><th>Amount</th><th>Source bill status</th><th>Debt Transfer action</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Sanitary Status (RJ 2026-11-24) - sanitarystatus.js =====
+           "create a new menu for new dashboard, sanitary status, first case is to find all sanitary where the premise
+           is disconnected but the tariff is sanitary billing not subsidized or zero tarif" -->
+      <section class="page" id="page-sanitarystatus">
+        <header class="page-header">
+          <h1>Sanitary Status</h1>
+          <p class="page-subtitle">Sanitary dashboard: premises disconnected from the sanitary network but still on the Sanitary Charges tariff. Read only.</p>
+        </header>
+        <nav class="da-subnav" aria-label="Sanitary Status cases">
+          <button type="button" class="da-subnav-btn is-active" data-sst-sub="disccharged">Disconnected, still charged</button>
+        </nav>
+        <div class="da-subpage is-active" data-sst-sub="disccharged">
+          <div class="biss-info-banner">
+            ℹ️ Premises whose <strong>latest</strong> sanitary-network action (EWA_GCGT_NS_SANITARY_PREMISE) is
+            <strong>Disconnected</strong>, with an active Sanitary (190) service (not Pending / Terminated / Cancelled) whose billing
+            service is still on <strong>W-SAN01 Sanitary Charges</strong> - not W-SAN02 Zero tariff or W-SAN03 Subsidy. Bills / amount =
+            sanitary bills issued since the disconnection date (not cancelled, rebilled or credit notes).
+          </div>
+          <div class="card">
+            <div class="card-header"><h2>Disconnected premise, still charged</h2>
+              <div class="card-header-actions">
+                <button type="button" class="btn btn-pill-sm" id="sst1-export-btn" disabled>⬇ Export CSV</button>
+                <button type="button" class="btn btn-pill" id="sst1-detect-btn">🔍 Scan</button>
+              </div>
+            </div>
+            <div class="hint-text" id="sst1-meta">Scanning on open…</div>
+            <div id="sst1-kpis"></div>
+            <div class="key-panel-row" style="gap:10px;flex-wrap:wrap;align-items:center;">
+              <input type="text" id="sst1-search" class="text-input text-input-sm" placeholder="Filter: account, NISS, premise, service" style="width:280px;" />
+              <button type="button" class="btn btn-pill-sm" id="sst1-clear" hidden>✕ Clear filters</button>
+              <span class="hint-text" id="sst1-shown"></span>
+            </div>
+            <div class="grid-wrap" style="margin-top:12px;">
+              <table class="data-grid" id="sst1-table">
+                <thead><tr><th><input type="checkbox" id="sst1-check-all" title="Select all shown" /></th><th>Account</th><th>NISS</th><th>Premise</th>
+                  <th>Sanitary network</th><th>Sanitary service</th><th>Tariff</th><th>Bills since</th><th>Billed since</th><th>Last bill</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- ===== Reprocess EFTS (RJ 2026-11-23) - efts.js - admin only =====
            "create a new temp menu, reprocess efts, here we need to execute in an ssh ... i need to see the result also" -->
       <section class="page" id="page-reprocessefts">
@@ -4073,6 +4164,8 @@
   <script src="/mptools.js"></script><!-- RJ 2026-11-18 MP Tools -->
   <script src="/settings.js"></script><!-- RJ 2026-11-19 Settings: sections + built-in SSH tunnel -->
   <script src="/sg-std.js"></script><!-- RJ 2026-11-19 page standard kit (docs/UI_STANDARD.md) -->
+  <script src="/tnbdashboard.js"></script><!-- RJ 2026-11-25 TNB Dashboard -->
+  <script src="/sanitarystatus.js"></script><!-- RJ 2026-11-24 Sanitary Status dashboard -->
   <script src="/efts.js"></script><!-- RJ 2026-11-23 Reprocess EFTS (admin only) -->
   <script src="/navx.js"></script><!-- RJ 2026-11-18 new sidebar (search + favorite tiles + spaces) and tab cards -->
   <script src="/srq_sanh2o.js"></script><!-- RJ 2026-11-17 SR Quick FIX - Sanitary Anomaly - H2O Pending -->
