@@ -76,7 +76,7 @@
     readingdiscrepancies: "Readings pending validation for more than 3 days and readings never billed.",
     fixbillingcampaign: "Fix Billing Campaign 2026 requests: who qualifies, bank / no bank, wallet payment day.",
     pendingsr: "Open service requests by type and status, oldest first.",
-    rebillingmonitor: "Open rebillings (and the ones ScriptGen tagged) - follow them until they're billed.",
+    rebillingmonitor: "Open rebillings, the ones ScriptGen tagged, and rebillings complete whose End Massive Rebilling action is stuck - follow them until they're billed.",
     documentation: "User guide, technical notes and the query library behind every page.",
     tools: "Handy utilities and housekeeping helpers.",
     settings: "Database connection, built-in SSH tunnel, AI, e-mail alerts, users and menu access - all in one place.",

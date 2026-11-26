@@ -5556,3 +5556,109 @@ loosing the information, and make it elegant and professional looking" + "once a
 - Styling: `.tnbx-*` in navx.css, theme variables only (light / dark).
 - Live 2026-11-25 11:04: case 1 125 bills / 7,000.90 (19 charged twice, 402.22), case 2 87 cancelled-only (73 open),
   case 3 2,532 pairs, case 4 5,312 readings (4,537 read after contract end).
+
+#### TNB Dashboard - Case 1 rework + new Case 2 "Transferred to wrong account" (RJ 2026-11-26)
+
+RJ: drop source = destination rows; "half done" cases look transferred (RCALL260121978); add a "Proposed by system"
+column; new tab for TNB billed and transferred but not to the selected destination (TNBDESTACC in RCCS ATT).
+- How a Debt Transfer moves money: TFGEN10027 **pairs** - negative on the source, the same positive amount on the
+  receiving account at the next ID_BILLs (+1..+50, opposite amount, other ID_PAYMENT_FORM). The TNB bill itself is
+  usually settled by a Credit Allocation (TIMOPA0006) collection.
+- Queries are a staged temp-table batch (`_stage_sql`: #tc, #tb, #dt, #ca, #px) - ~10-15 s instead of 54-120 s.
+- Case 1 now excludes: same account, bill credit-allocated, RCCS-level transfer pair within 10 min of the Debt
+  Transfer action, destination got the same amount. Half-done KPI / pill removed (those are transferred).
+  New **Proposed by system** column after Destination - placeholder (`proposed_dest` in `shape_rows`) until RJ
+  sends the query.
+- New **Case 2** (`build_wrong_destination_query`, `/api/tnb-dashboard/wrong-destination/detect`, tnb5): Credit
+  Allocation collections on the TNB bill whose transfer pair went to an account other than the selected destination.
+  Shows where it actually went, whether that is another RCCS's destination, and whether the transfer happened
+  before or after the destination was selected. Overview card `tnbdashboard_wrongdest`.
+- Tabs renumbered: Summary | 1 Debt not transferred | 2 Transferred to wrong account | 3 Cancelled contract |
+  4 Cycle vs Disconnection | 5 TNB disconnections. Summary hero "Customers charged twice" replaced by
+  "Transferred to the wrong account".
+- Live 2026-11-26: case 1 38 bills / 35 RCCS / 3,538.35 (5 pending on source, 33 paid on source); case 2 10 bills /
+  9 RCCS / 1,217.89 (2 after selection, 6 to another RCCS's destination, 4 to an unselected account).
+
+### Rebilling Monitor tab 3 - "Rebilling complete with offline task error" (RJ 2026-11-26)
+
+RJ: "create a new tab in rebilling monitor menu, rebilling complete with offline task error. there will be 2 main
+case, 1 the RCCS, 2 the Service request. Reverse this correction scripts to find all the cases, add the correction
+script to correct them" (+ his RCCS fix EWAOUCEAM-13011 and SR fix EWAOUCEAM-15330).
+- The massive rebilling of an RCCS / SR is closed by the workflow action **End Massive Rebilling Activity**
+  (RCCS ACTI600007 / MODULE0010, SR ACTI600008 / MODULE0011). When the offline task fails the action stays
+  **ACTSTA0001** in GCGT_WF_CACTIVITY although the rebilling is **Rebilled (ESTREF0004)**. Example RCALL260613631:
+  rebilled 2026-06-24, action pending until the manual fix of 2026-11-10.
+- GCOFF_TASK has no reference to the activity, so the case is found by state (`app/core/rebilling_offline_error.py`).
+  Rebilling link: RCCS `ID_RECLAMATION = ID_COMPLAINT`; SR `SELECTED_ACCOUNT = SR.ID_ACCOUNT`, created between the
+  SR creation and the action + 10 min (or ID_RECLAMATION when filled).
+- States: Rebilled - action pending (fixable) / rebilling still open / latest rejected / no rebilling found.
+- `/api/rebilling-monitor/offline-error/detect` + `/generate` (re-scans live, only fixable selected cases). Script =
+  RJ's two blocks per case type with the codes + an `ID_ACTIVITY IN (...)` guard; rollback restores ACTSTA0001 and the
+  original UPDATE_* per activity, guarded on ACTSTA0002 + the program. History kind `rebilling_offline_task_error`.
+- UI: `web/static/rbmoffline.js` (sgStd KPIs, case filter, checkboxes only on fixable rows, Export CSV, script +
+  rollback). Overview card `rebillingmonitor_offlineerr` = fixable count.
+- Live 2026-11-26: 100 pending actions; **44 fixable (12 RCCS, 32 SR)**, 50 rebilling still open, 6 RCCS with no
+  rebilling activity. Scan ~5 s.
+
+### Rebilling Monitor tab 4 - "Anomaly in bill date (LACKS DATA)" (RJ 2026-11-26)
+
+RJ: "find all bills in status disputed, and is having an anomalous reb_dn_information. get the reading item to bill
+from the item to bill using the id_bill, then get the re_reading ... column for the last billing date, billing date
+and reading_prev_date and reading date, add a filter for those with 1 only reading and filter for more than 1, in the
+update script, we will update the disputed bill with the reading prev_date value of re reading to its
+last_billing_date, make it look nice".
+- Scope: GCCOM_BILL **ESTFAC0010 Disputed** + GCCOM_REB_ACTIVITY_INFORMATION **EREALB0008** whose latest
+  GCCOM_REB_STATUS_HISTORY anomalous comment is **NOSUFDATFO - Lacks Data**. Readings: GCCOM_ITEMS_TO_BILL (ID_BILL)
+  -> GCCOM_READINGS_ITEMSTOBILL -> GCGT_RE_READING (distinct readings per bill).
+- Proposed LAST_BILLING_DATE = READING_PREV_DATE (earliest one when the bill has more than one reading). Typical
+  case: the bill's LAST_BILLING_DATE is 1 day after the reading's previous date.
+- `app/core/rebilling_lacks_data.py`, `/api/rebilling-monitor/lacks-data/detect` + `/generate` (re-scans live).
+  Script: one UPDATE per bill guarded on ESTFAC0010 + the old LAST_BILLING_DATE, stamps UPDATE_*; rollback restores
+  the old date and UPDATE_* where the bill still has the new date + program. History kind `rebilling_lacks_data_bill_date`.
+- UI `web/static/rbmlacksdata.js` + `.rld-*` in navx.css: hero banner with the table chain, KPIs (need change /
+  more than 1 day off / already matches / no reading), segmented filter All | 1 reading only | More than 1 reading,
+  "only bills that need a change", reading chips (prev date -> reading date, the proposed source highlighted),
+  old -> new date with the day difference, CSV one line per reading. Overview card `rebillingmonitor_lacksdata`.
+- Live 2026-11-26: **102 bills** (80 accounts), 64 with 1 reading, 37 with more than 1, 1 without; 96 need the change
+  (6 more than 1 day off), 5 already match. Scan ~2 s.
+- RJ 2026-11-26 (2): "show also related RCCS rebilling, status, and rebilling activity and status, yes for multi, use
+  the earliest". New columns **Rebilling activity** (id, status + type in English, created) and **Related RCCS**
+  (ID_RECLAMATION = ID_COMPLAINT -> COD_REF_COMPLAINT, GCCC_COMPLAINT_STATUS in English, opened); filters "RCCS
+  status" and "rebilling status" with counts; both in the CSV. Multi-reading rule confirmed: earliest READING_PREV_DATE.
+  Live 12:33: 100 bills - RCCS Resolved (Applicable) 75, In Resolution (Rebilling) 10, no RCCS 15; rebilling In process
+  84, Pending 16.
+
+#### Lacks Data tab - same-day bills only (RJ 2026-11-26 12:44)
+
+RJ: "the rebilling with anomaly lacks data, focus on the billing date and last billing date are the same. remove the
+rest, show it better". The detect query now keeps only bills with `CAST(LAST_BILLING_DATE AS date) = CAST(BILLING_DATE AS
+date)` (a zero-day period) - live 14 of 100 (13 with 1 reading, 1 with 2; 9 where the reading starts 1 day before, 5
+earlier). Layout: Bill | Now (the one date + "0-day period") | Reading (prev -> reading date) | After the fix (timeline
+new LAST_BILLING_DATE -> BILLING_DATE, "n-day period", old date struck) | Rebilling + RCCS with status pills. KPIs: same-day
+bills, reading starts 1 day before (safe), starts earlier (check), more than 1 reading, ticked. The "only bills that need a
+change" toggle is gone (every row needs it). `period_days_after` added in `shape_rows`. Fix script unchanged.
+- RJ 2026-11-26 16:01 "include disputed in the checks" (RCALL260804309 was missed: its line is still EREALB0001 Disputed,
+  never processed): lines **Disputed (EREALB0001)** are included next to Anomalous Lacks Data; `LINE_STATUS` returned,
+  KPIs "Line Anomalous · Lacks Data" / "Line Disputed · not run yet", "Line" pill per row. Live 16:05: 17 bills (16
+  Disputed lines + 1 Anomalous) after RJ's 15:20 fix of the earlier ones.
+
+### Today's pages - info collapsed, Search screen, new KPI strip (RJ 2026-11-26)
+
+RJ: "for all the recent changes you did today, why the info is show, remeber we wanted it to be minimised as default,
+also why no search scrreen, also the cards looks bad, you can do better". Applies to TNB Dashboard case 1 / 2 and
+Rebilling Monitor tabs 3 / 4 (rules now in docs/UI_STANDARD.md).
+- Info: the Lacks Data hero panel became a standard banner (collapsed "ⓘ How this works"); the "What this script does"
+  lists of tabs 3 / 4 are collapsed too.
+- Search screen: `.sg-find` block (Search | Detect all) on the 4 tabs, `sgStd.find`. Endpoints take `{ inputs }`
+  (`FindRequest`, `app/core/search_inputs.py`, max 500 values) and filter in SQL:
+  TNB case 1 / 2 - RCCS code, account (source or destination) or bill number -> keeps the whole account(s) in #tc;
+  tab 3 - RCCS / SR code, account reference or id; tab 4 - ID_BILL, bill number, account, RCCS code, rebilling activity.
+  TNB Summary says when a case shows a search (Scan all reloads everything). Tab 3 now shows the account reference.
+- KPI strip redesign (`sgStd.kpis` + navx.css): one joined card, equal-height cells, dot + label, big number, tone bar.
+- RJ 13:07 "filter to search by account rccs rebilling number, the usual you add for the results": the results filter on
+  the 4 tabs is now the usual "paste many" box (`sgStd.terms / matches / bindFilter`, textarea `.sg-filter`, "n values"
+  counter): values split on spaces / commas / new lines, a row stays when ANY value matches. Fields - Lacks Data: account,
+  RCCS, rebilling number, bill, reading, MP; tab 3: account, RCCS / SR, rebilling number, activity; TNB 1 / 2: source /
+  destination account, actual account, RCCS, bill. Live: 3 values -> 3 of 14 (Lacks Data), 3 of 97 (tab 3).
+- Live SQL check: tab 4 search (bill 7174654 + RCALL240612691) -> 2 bills; tab 3 (RCALL250309218 + SR0020651442) -> 2;
+  TNB (RCALL251106980) -> #tc 2,467 -> 4 RCCS of that account.

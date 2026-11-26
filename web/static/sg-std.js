@@ -32,8 +32,8 @@
     el.innerHTML = cards.map((c) =>
       `<button type="button" class="sg-kpi${active && active === c.key ? " is-active" : ""}" data-tone="${esc(c.tone || "neutral")}"` +
       ` data-sg-kpi="${esc(c.key || "")}"${c.key && onPick ? "" : " disabled"} title="${esc(c.tip || c.label)}">` +
-      `<span class="sg-kpi-label">${esc(c.label)}</span><span class="sg-kpi-value">${typeof c.value === "number" ? fmt(c.value) : esc(c.value)}</span>` +
-      (c.sub ? `<span class="sg-kpi-sub">${esc(c.sub)}</span>` : "") + `</button>`).join("");
+      `<span class="sg-kpi-label"><i class="sg-kpi-dot"></i>${esc(c.label)}</span><span class="sg-kpi-value">${typeof c.value === "number" ? fmt(c.value) : esc(c.value)}</span>` +
+      `<span class="sg-kpi-sub">${esc(c.sub || "")}</span></button>`).join("");
     if (onPick && !el.dataset.sgBound) {
       el.dataset.sgBound = "1";
       el.addEventListener("click", (e) => {
@@ -95,5 +95,57 @@
     return sel;
   }
 
-  window.sgStd = { scanMeta, kpis, pill, scriptPanel, selection, STATUS };
+  /** Block 2 (RJ 2026-11-26 "why no search screen"): wires a static .sg-find block (Search | Detect all).
+   *  root = [data-sg-find] element; onSearch(text) / onAll() run the page's scan. Enter = search,
+   *  Shift+Enter = new line. Returns { setMode(mode), mode(), text() }. */
+  function find(root, { onSearch, onAll } = {}) {
+    if (!root) return null;
+    const ta = root.querySelector(".sg-find-input"), cnt = root.querySelector(".sg-find-count");
+    const count = () => (ta?.value.match(/[A-Za-z0-9_.\-]+/g) || []).length;
+    const setMode = (m) => {
+      root.querySelectorAll(".sg-find-modes button").forEach((b) => b.classList.toggle("is-active", b.dataset.mode === m));
+      root.querySelectorAll(".sg-find-pane").forEach((p) => { p.hidden = p.dataset.pane !== m; });
+      root.dataset.mode = m;
+      if (m === "search") setTimeout(() => ta?.focus(), 0);
+    };
+    root.querySelector(".sg-find-modes").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-mode]"); if (b) setMode(b.dataset.mode);
+    });
+    const go = () => {
+      if (!count()) { showToast("Type or paste at least one value to search.", true); ta?.focus(); return; }
+      onSearch?.(ta.value);
+    };
+    root.querySelector('[data-pane="search"] .sg-find-go')?.addEventListener("click", go);
+    ta?.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); go(); } });
+    ta?.addEventListener("input", () => { const n = count(); if (cnt) cnt.textContent = n ? `${n} value${n === 1 ? "" : "s"} · Enter = search` : "Enter = search"; });
+    root.querySelector('[data-pane="all"] .sg-find-go')?.addEventListener("click", () => setMode("all"));
+    root.dataset.mode = root.querySelector(".sg-find-modes .is-active")?.dataset.mode || "all";
+    return { setMode, mode: () => root.dataset.mode, text: () => ta?.value || "" };
+  }
+
+  /** Scope line for a result: "Detect all" or "Search · 3 values" (+ a link back to Detect all). */
+  function scopeNote(searched) {
+    return searched && searched.length ? `Search · ${searched.length} value${searched.length === 1 ? "" : "s"}` : "Detect all";
+  }
+
+  /** Results filter (RJ 2026-11-26 "filter to search by account rccs rebilling number, the usual you add for the
+   *  results"): the "paste many" box - values split on spaces / commas / new lines, a row is kept when ANY value is
+   *  found in any of its fields. terms(el) -> lower-case values; matches(terms, fields) -> bool;
+   *  bindFilter(textarea, countEl, onChange) wires the "n values" counter. */
+  function terms(el) { return String(el?.value || "").split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean); }
+  function matches(list, fields) {
+    if (!list.length) return true;
+    const hay = fields.flat().map((v) => String(v ?? "").toLowerCase()).join(" | ");
+    return list.some((t) => hay.includes(t));
+  }
+  function bindFilter(input, countEl, onChange) {
+    if (!input) return;
+    input.addEventListener("input", () => {
+      const n = terms(input).length;
+      if (countEl) countEl.textContent = n > 1 ? `${n} values` : "";
+      onChange?.();
+    });
+  }
+
+  window.sgStd = { scanMeta, kpis, pill, scriptPanel, selection, find, scopeNote, terms, matches, bindFilter, STATUS };
 })();

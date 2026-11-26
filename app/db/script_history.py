@@ -64,6 +64,10 @@ KIND_SR_INC_BP = "sr_incorrect_billing_period"
 KIND_SR_SAN_H2O = "sr_sanitary_anomaly_h2o_pending"
 # RJ 2026-11-18: MP Tools tab 1 - TMP ACTIVATE MP
 KIND_MP_TMP_ACTIVATE = "mp_tmp_activate"
+# RJ 2026-11-26: Rebilling Monitor tab 3 - rebilling complete with offline task error
+KIND_REBILLING_OFFLINE_ERROR = "rebilling_offline_task_error"
+# RJ 2026-11-26: Rebilling Monitor tab 4 - LACKS DATA bill date (LAST_BILLING_DATE := READING_PREV_DATE)
+KIND_REBILLING_LACKS_DATA = "rebilling_lacks_data_bill_date"
 # RJ 2026-11-23: Reprocess EFTS - one entry per Reprocess click (results + the curl of each message)
 KIND_EFTS_REPROCESS = "efts_reprocess"
 

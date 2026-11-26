@@ -164,10 +164,13 @@ const SG_ENDPOINT_OWNER = [
   ["/api/sanitary-status/disc-charged/", "sanitarystatus", "disccharged"],   // RJ 2026-11-24 Sanitary Status
   ["/api/tnb-dashboard/not-transferred/", "tnbdashboard", "nottransferred"],   // RJ 2026-11-25 TNB Dashboard
   ["/api/tnb-dashboard/cancelled-contract/", "tnbdashboard", "cancelled"],   // RJ 2026-11-25 TNB Dashboard tab 2
+  ["/api/tnb-dashboard/wrong-destination/", "tnbdashboard", "wrongdest"],   // RJ 2026-11-26 TNB Dashboard case 2
   ["/api/fix-billing-campaign/", "fixbillingcampaign", "campaign"],
   ["/api/pending-sr/", "pendingsr", ""],
   ["/api/rebilling-monitor/open", "rebillingmonitor", "open"],
   ["/api/rebilling-monitor/detect", "rebillingmonitor", "tagged"],
+  ["/api/rebilling-monitor/offline-error/", "rebillingmonitor", "offlineerr"],   // RJ 2026-11-26
+  ["/api/rebilling-monitor/lacks-data/", "rebillingmonitor", "lacksdata"],   // RJ 2026-11-26
   ["/api/double-itb/sanitary-only", "doubleitb", "sanonly"],   // RJ 2026-10-24
   ["/api/double-itb/", "doubleitb", "main"],
   ["/api/disconnection-tnb/", "tnbdashboard", "disctnb"],   // RJ 2026-11-25: now TNB Dashboard case 4
@@ -300,6 +303,9 @@ const SG_SCAN_COUNTERS = [
   ["/api/sanitary-status/disc-charged/detect", "sanitarystatus_disccharged", (d) => d.count],   // RJ 2026-11-24
   ["/api/tnb-dashboard/not-transferred/detect", "tnbdashboard_nottransferred", (d) => d.count],   // RJ 2026-11-25
   ["/api/tnb-dashboard/cancelled-contract/detect", "tnbdashboard_cancelled", (d) => d.only_cancelled_count],   // RJ 2026-11-25
+  ["/api/tnb-dashboard/wrong-destination/detect", "tnbdashboard_wrongdest", (d) => d.count],   // RJ 2026-11-26
+  ["/api/rebilling-monitor/offline-error/detect", "rebillingmonitor_offlineerr", (d) => d.complete],   // RJ 2026-11-26
+  ["/api/rebilling-monitor/lacks-data/detect", "rebillingmonitor_lacksdata", (d) => d.count],   // RJ 2026-11-26
 ];
 function sgSyncOverviewCount(path, data) {
   try {
@@ -775,6 +781,12 @@ const OVERVIEW_CARDS = [
     page: "tnbdashboard", subAttr: "data-tnbd-sub", subValue: "nottransferred", group: "TNB Dashboard",
   },
   {
+    // RJ 2026-11-26: TNB Dashboard case 2 - TNB bills transferred to an account that is not the selected destination
+    key: "tnbdashboard_wrongdest", icon: "⚡", label: "TNB transferred to wrong account", color: "#38bdf8",
+    desc: "TNB debt transferred, but not to the RCCS's selected destination account.",
+    page: "tnbdashboard", subAttr: "data-tnbd-sub", subValue: "wrongdest", group: "TNB Dashboard",
+  },
+  {
     // RJ 2026-11-25: TNB Dashboard tab 2 - headline = RCCS whose only contracts on that service are Cancelled
     key: "tnbdashboard_cancelled", icon: "⚡", label: "TNB on cancelled contract", color: "#38bdf8",
     desc: "TNB RCCS whose account has only Cancelled contracts for that service.",
@@ -795,6 +807,18 @@ const OVERVIEW_CARDS = [
     key: "rebillingmonitor", icon: "🔁", label: "Rebilling Monitor", color: "#0ea5e9",
     desc: "Open rebilling activities - Pending / In process (the page's main tab).",
     page: "rebillingmonitor", subAttr: "data-rbm-sub", subValue: "open", group: "History",
+  },
+  {
+    // RJ 2026-11-26: Rebilling Monitor tab 3 - headline = cases ready to fix (rebilled, action still pending)
+    key: "rebillingmonitor_offlineerr", icon: "🔁", label: "Rebilling complete - offline task error", color: "#0ea5e9",
+    desc: "RCCS / SR whose rebilling is Rebilled but the End Massive Rebilling action is still Pending.",
+    page: "rebillingmonitor", subAttr: "data-rbm-sub", subValue: "offlineerr", group: "History",
+  },
+  {
+    // RJ 2026-11-26: Rebilling Monitor tab 4 - headline = Disputed bills with the Lacks Data rebilling anomaly
+    key: "rebillingmonitor_lacksdata", icon: "📅", label: "Rebilling anomaly - Lacks Data (bill date)", color: "#0ea5e9",
+    desc: "Disputed bills with billing date = last billing date on an Anomalous (Lacks Data) or still Disputed rebilling line.",
+    page: "rebillingmonitor", subAttr: "data-rbm-sub", subValue: "lacksdata", group: "History",
   },
   // RJ 2026-10-21: cards for the menus added after the Overview was built
   {
@@ -10573,7 +10597,7 @@ const HX_REFRESH = {
   incorrectbillingperiod: () => ({ btn: "#ibp-detect-btn" }),
   // Refresh bypasses the server cache (RJ 2026-10-07 cache).
   bulkchecker: () => ({ fn: () => bcRunSearch({ refresh: true }) }),
-  rebillingmonitor: () => ({ btn: hxActiveSub("data-rbm-sub") === "tagged" ? "#rbm-detect-btn" : "#rbo-detect-btn" }),
+  rebillingmonitor: () => ({ btn: { tagged: "#rbm-detect-btn", offlineerr: "#rbx-detect-btn", lacksdata: "#rld-detect-btn" }[hxActiveSub("data-rbm-sub")] || "#rbo-detect-btn" }),
   pendingsr: () => ({ btn: "#psr-detect-btn" }),
   tempdashboard: () => ({ btn: ({ sanitary: "#tsan-detect-btn", wsstatus: "#tws-detect-btn", ddi: "#tddi-detect-btn", rccslist: "#trl-detect-btn", sanlbd: "#tslb-detect-btn", duprccs: "#tdr-detect-btn" })[hxActiveSub("data-tmpd-sub")] || "#tmpd-detect-btn" }),
   readingdiscrepancies: () => ({ btn: hxActiveSub("data-rdisc-sub") === "unbilled" ? "#rdu-detect-btn" : "#rdisc-detect-btn" }),
@@ -10584,7 +10608,7 @@ const HX_REFRESH = {
   tnbdashboard: () => {
     const sub = hxActiveSub("data-tnbd-sub") || "summary";
     if (sub === "summary") return { fn: () => window.tnbDashboard?.scanAll() };
-    return { btn: { nottransferred: "#tnb1-detect-btn", cancelled: "#tnb2-detect-btn", cycledisc: "#tcd-detect-btn", disctnb: "#dtnb-detect-btn" }[sub] };
+    return { btn: { nottransferred: "#tnb1-detect-btn", wrongdest: "#tnb5-detect-btn", cancelled: "#tnb2-detect-btn", cycledisc: "#tcd-detect-btn", disctnb: "#dtnb-detect-btn" }[sub] };
   },
   reprocessefts: () => ({ btn: "#efts-find-btn" }),   // RJ 2026-11-23 (re-runs Find)
   mptools: () => ({ btn: "#mpt-detect-btn" }),   // RJ 2026-11-18 (re-runs the last scan)   // RJ 2026-11-09 / 11-17 SR Quick FIX

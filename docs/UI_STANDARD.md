@@ -34,11 +34,25 @@ icons and the active bar.
 
 Read-only (Monitor) pages stop after block 4.
 
+RJ 2026-11-26 ("remember we wanted it to be minimised as default, also why no search screen, also the cards looks bad"):
+- **Info is always collapsed by default.** Use `.biss-info-banner` / long `.hint-text` (hxCollapseInfo wraps them in
+  "ⓘ How this works"); a "What this script does" list goes inside `<details class="hx-hint">`. No always-open hero panels.
+- **Find block = `.sg-find` + `sgStd.find(root, { onSearch })`**: segmented *Search | Detect all*; Search = textarea
+  (codes one per line / comma, Enter = search, value counter), Detect all keeps the old `<prefix>-detect-btn` id (Scan all /
+  Refresh still click it). The endpoint takes an optional body `{ inputs }` (`FindRequest`, parsed by
+  `app/core/search_inputs.py`) and narrows the scan in SQL; the response echoes `searched`, the meta line says
+  `sgStd.scopeNote(searched)` ("Detect all" / "Search · n values").
+- **KPI cards = one joined strip** (`sgStd.kpis`): equal-height cells, dot + uppercase label, big number, sub line, tone bar
+  on hover / active; first cell is the headline (number in its tone).
+
 ## 3. Script rules (all generators)
 
 - Every UPDATE is guarded on the value it expects (`WHERE STATUS = '<old>'`), stamps UPDATE_DATE /
   UPDATE_USER / UPDATE_PROGRAM, and has a matching rollback guarded on the new value.
 - No BEGIN TRANSACTION / COMMIT (RJ 2026-11-18).
+- No DECLARE / BEGIN ... END / GO / @variables either (RJ 2026-11-26: "do not use begin, and delcare, just the normal
+  script, its more difficult to execute") - plain UPDATE statements with the user / program / values written inline,
+  each ending with `;`.
 - Clean script option drops whole-line `--` comments only.
 - Record both the script and the rollback with `_record_script` (History).
 

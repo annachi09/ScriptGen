@@ -2444,6 +2444,8 @@
         <nav class="da-subnav" aria-label="Rebilling Monitor tabs">
           <button type="button" class="da-subnav-btn is-active" data-rbm-sub="open">Open rebillings</button>
           <button type="button" class="da-subnav-btn" data-rbm-sub="tagged">ScriptGen-tagged</button>
+          <button type="button" class="da-subnav-btn" data-rbm-sub="offlineerr">Rebilling complete with offline task error</button><!-- RJ 2026-11-26 -->
+          <button type="button" class="da-subnav-btn" data-rbm-sub="lacksdata">Anomaly in bill date (LACKS DATA)</button><!-- RJ 2026-11-26 -->
         </nav>
 
         <div class="da-subpage is-active" data-rbm-sub="open">
@@ -2519,6 +2521,186 @@
             <table class="data-grid" id="rbo-table"><thead><tr></tr></thead><tbody></tbody></table>
           </div>
         </div>
+        </div>
+
+        <!-- RJ 2026-11-26: "rebilling complete with offline task error. there will be 2 main case, 1 the RCCS, 2 the Service
+             request. Reverse this correction scripts to find all the cases, add the correction script" (rbmoffline.js) -->
+        <div class="da-subpage" data-rbm-sub="offlineerr">
+          <div class="biss-info-banner">
+            ℹ️ The massive rebilling of an <strong>RCCS</strong> / <strong>service request</strong> is closed by the workflow action
+            <strong>End Massive Rebilling Activity</strong> (RCCS ACTI600007 · MODULE0010, SR ACTI600008 · MODULE0011). When the
+            offline task that should solve it fails, the action stays <strong>Pending (ACTSTA0001)</strong> in GCGT_WF_CACTIVITY although
+            the rebilling activity is already <strong>Rebilled (ESTREF0004)</strong>, and the case never moves on. Rebilling link:
+            RCCS by ID_RECLAMATION; SR by the account (SELECTED_ACCOUNT) created between the SR and the action.
+            The script sets the action → <strong>Solved (ACTSTA0002)</strong>; only cases still in that state are touched.
+          </div>
+          <div class="card">
+            <div class="card-header"><h2>End Massive Rebilling action still pending</h2>
+              <div class="card-header-actions">
+                <button type="button" class="btn btn-pill-sm" id="rbx-export-btn" disabled>⬇ Export CSV</button>
+              </div>
+            </div>
+            <!-- RJ 2026-11-26: Find block (UI standard block 2) - Search | Detect all (sgStd.find) -->
+            <div class="sg-find" data-sg-find="rbx">
+              <div class="sg-find-modes" role="tablist">
+                <button type="button" data-mode="search">🔎 Search</button>
+                <button type="button" data-mode="all" class="is-active">⚡ Detect all</button>
+              </div>
+              <div class="sg-find-pane" data-pane="search" hidden>
+                <textarea id="rbx-find" class="text-input sg-find-input" rows="2" placeholder="RCCS code, SR code or account - one per line or comma separated"></textarea>
+                <div class="sg-find-side">
+                  <button type="button" class="btn btn-pill sg-find-go" id="rbx-find-btn">🔎 Search</button>
+                  <span class="sg-find-count" id="rbx-find-count">Enter = search</span>
+                </div>
+              </div>
+              <div class="sg-find-pane" data-pane="all">
+                <p class="sg-find-desc">Every RCCS / SR whose End Massive Rebilling action is still pending (~5 s).</p>
+                <div class="sg-find-side"><button type="button" class="btn btn-pill sg-find-go" id="rbx-detect-btn">⚡ Detect all</button></div>
+              </div>
+            </div>
+            <div class="hint-text" id="rbx-meta">Click Scan to load.</div>
+            <div id="rbx-kpis"></div>
+            <div class="key-panel-row" id="rbx-filter-row" hidden style="gap:10px;flex-wrap:wrap;">
+              <select id="rbx-case" class="text-input text-input-sm" style="width:auto;">
+                <option value="">RCCS + Service requests</option><option value="RCCS">1 · RCCS</option><option value="SR">2 · Service requests</option>
+              </select>
+              <textarea id="rbx-search" class="text-input text-input-sm sg-filter" rows="1" placeholder="Filter: account / RCCS / SR / rebilling number … or paste many" style="width:300px;"></textarea>
+              <span class="hint-text" id="rbx-search-count"></span>
+              <button type="button" class="btn btn-pill-sm" id="rbx-clear">✕ Clear filters</button>
+              <span class="hint-text" id="rbx-shown"></span>
+            </div>
+            <div class="grid-wrap" style="margin-top:10px;">
+              <table class="data-grid" id="rbx-table">
+                <thead><tr><th><input type="checkbox" id="rbx-check-all" title="Select all shown (fixable only)" /></th><th>Case</th><th>RCCS / SR</th>
+                  <th>Account</th><th>Action pending since</th><th>Rebilling activity</th><th>Rebilled on</th><th>Stuck (days)</th><th>State</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header"><h2>Fix script</h2>
+              <div class="card-header-actions"><button type="button" class="btn btn-pill" id="rbx-gen-btn" disabled>🛠 Generate script</button></div>
+            </div>
+            <details class="hx-hint"><summary>ⓘ What this script does</summary>
+            <ol class="hint-text" style="margin:0 0 10px 18px;padding:0;">
+              <li>Re-reads the cases live; only the selected ones still "rebilling complete - action pending" are kept.</li>
+              <li>RCCS: GCGT_WF_CACTIVITY MODULE0010 / ACTI600007 ACTSTA0001 → ACTSTA0002 for the RCCS codes (COD_REF_COMPLAINT).</li>
+              <li>SR: GCGT_WF_CACTIVITY MODULE0011 / ACTI600008 ACTSTA0001 → ACTSTA0002 for the SR codes (SR_CODE).</li>
+              <li>Each block is also guarded on the ID_ACTIVITY checked live. Rollback restores ACTSTA0001 and the original UPDATE_* values.</li>
+            </ol>
+            </details>
+            <div class="key-panel-row" style="gap:12px;flex-wrap:wrap;align-items:flex-end;">
+              <label class="field"><span class="hint-text">UPDATE_USER</span><input type="text" id="rbx-user" class="text-input text-input-sm" value="RMA" style="width:120px;" /></label>
+              <label class="field"><span class="hint-text">JIRA / UPDATE_PROGRAM - RCCS</span><input type="text" id="rbx-prog-rccs" class="text-input text-input-sm" value="EWAOUCEAM-13011" style="width:170px;" /></label>
+              <label class="field"><span class="hint-text">JIRA / UPDATE_PROGRAM - SR</span><input type="text" id="rbx-prog-sr" class="text-input text-input-sm" value="EWAOUCEAM-15330" style="width:170px;" /></label>
+              <label class="hint-text"><input type="checkbox" id="rbx-clean" /> Clean script (no comments)</label>
+            </div>
+            <div id="rbx-out-wrap" hidden style="margin-top:10px;">
+              <div class="hint-text" id="rbx-out-info"></div>
+              <div class="key-panel-row" style="gap:8px;margin:8px 0;">
+                <button type="button" class="btn btn-pill-sm" id="rbx-copy-btn">📋 Copy</button>
+                <button type="button" class="btn btn-pill-sm" id="rbx-download-btn">⬇ Download .sql</button>
+                <button type="button" class="btn btn-pill-sm" id="rbx-rb-copy-btn">📋 Copy rollback</button>
+                <button type="button" class="btn btn-pill-sm" id="rbx-rb-download-btn">⬇ Download rollback</button>
+              </div>
+              <pre class="script-output" id="rbx-out"></pre>
+              <details open><summary class="hint-text" style="margin-top:8px;"><b>Rollback</b></summary>
+              <pre class="script-output" id="rbx-rb-out"></pre></details>
+            </div>
+          </div>
+        </div>
+
+        <!-- RJ 2026-11-26: "rebilling with anomaly in bill date(LACKS DATA) ... bills in status disputed, and is having an
+             anomalous reb_dn_information ... update the disputed bill with the reading prev_date ... to its last_billing_date" (rbmlacksdata.js) -->
+        <div class="da-subpage" data-rbm-sub="lacksdata">
+          <div class="biss-info-banner">
+            ℹ️ Bill <strong>Disputed (ESTFAC0010)</strong> with a rebilling line <strong>Anomalous (EREALB0008)</strong> whose latest reason is
+            <strong>NOSUFDATFO - Lacks Data</strong>. The bill's readings: GCCOM_BILL → GCCOM_ITEMS_TO_BILL → GCCOM_READINGS_ITEMSTOBILL →
+            GCGT_RE_READING. The rebilling needs the bill's <strong>LAST_BILLING_DATE</strong> to start where the reading starts
+            (<strong>READING_PREV_DATE</strong> - the earliest one when there is more than one reading); usually it is one day after.
+            Related: the line's rebilling activity and its RCCS (ID_RECLAMATION).
+            Lines still <strong>Disputed (EREALB0001)</strong> are included too - not processed yet, they fail on Lacks Data when the rebilling runs.
+            <strong>Only bills whose BILLING_DATE and LAST_BILLING_DATE are the same day</strong> are listed (a zero-day period);
+            the fix gives them a real period from the reading's previous date to the billing date.
+          </div>
+          <div class="card">
+            <div class="card-header"><h2>Same-day disputed bills · Lacks Data / not run yet</h2>
+              <div class="card-header-actions">
+                <button type="button" class="btn btn-pill-sm" id="rld-export-btn" disabled>⬇ Export CSV</button>
+              </div>
+            </div>
+            <!-- RJ 2026-11-26: Find block (UI standard block 2) - Search | Detect all (sgStd.find) -->
+            <div class="sg-find" data-sg-find="rld">
+              <div class="sg-find-modes" role="tablist">
+                <button type="button" data-mode="search">🔎 Search</button>
+                <button type="button" data-mode="all" class="is-active">⚡ Detect all</button>
+              </div>
+              <div class="sg-find-pane" data-pane="search" hidden>
+                <textarea id="rld-find" class="text-input sg-find-input" rows="2" placeholder="ID_BILL, bill number, account, RCCS code or rebilling activity - one per line or comma separated"></textarea>
+                <div class="sg-find-side">
+                  <button type="button" class="btn btn-pill sg-find-go" id="rld-find-btn">🔎 Search</button>
+                  <span class="sg-find-count" id="rld-find-count">Enter = search</span>
+                </div>
+              </div>
+              <div class="sg-find-pane" data-pane="all">
+                <p class="sg-find-desc">Every Disputed bill whose billing date and last billing date are the same day, on a rebilling line that is Anomalous (Lacks Data) or still Disputed (~2 s).</p>
+                <div class="sg-find-side"><button type="button" class="btn btn-pill sg-find-go" id="rld-detect-btn">⚡ Detect all</button></div>
+              </div>
+            </div>
+            <div class="hint-text" id="rld-meta">Click Scan to load.</div>
+            <div id="rld-kpis"></div>
+            <div class="rld-toolbar" id="rld-toolbar" hidden>
+              <div class="rld-seg" id="rld-seg" role="tablist" aria-label="Readings">
+                <button type="button" data-g="" class="is-active">All <em id="rld-seg-all"></em></button>
+                <button type="button" data-g="one">1 reading only <em id="rld-seg-one"></em></button>
+                <button type="button" data-g="many">More than 1 reading <em id="rld-seg-many"></em></button>
+              </div>
+              <select id="rld-rccs-status" class="text-input text-input-sm" style="width:auto;" title="Related RCCS status"><option value="">Any RCCS status</option></select>
+              <select id="rld-reb-status" class="text-input text-input-sm" style="width:auto;" title="Rebilling activity status"><option value="">Any rebilling status</option></select>
+              <textarea id="rld-search" class="text-input text-input-sm sg-filter" rows="1" placeholder="Filter: account / RCCS / rebilling number / bill … or paste many" style="width:300px;"></textarea>
+              <span class="hint-text" id="rld-search-count"></span>
+              <button type="button" class="btn btn-pill-sm" id="rld-clear">✕ Clear filters</button>
+              <span class="hint-text" id="rld-shown"></span>
+            </div>
+            <div class="grid-wrap" style="margin-top:10px;">
+              <table class="data-grid rld-table" id="rld-table">
+                <thead><tr><th><input type="checkbox" id="rld-check-all" title="Select all shown (needing a change)" /></th>
+                  <th>Bill</th><th>Now · last billing = billing</th><th>Reading · prev date → reading date</th>
+                  <th>After the fix · new period</th><th>Rebilling · RCCS</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header"><h2>Fix script</h2>
+              <div class="card-header-actions"><button type="button" class="btn btn-pill" id="rld-gen-btn" disabled>🛠 Generate script</button></div>
+            </div>
+            <details class="hx-hint"><summary>ⓘ What this script does</summary>
+            <ol class="hint-text" style="margin:0 0 10px 18px;padding:0;">
+              <li>Re-reads the bills live; only the selected ones whose date still differs are kept.</li>
+              <li>GCCOM_BILL.<b>LAST_BILLING_DATE := READING_PREV_DATE</b> of the bill's reading (the earliest one when the bill has more than one reading).</li>
+              <li>Each UPDATE is guarded on the bill still Disputed (ESTFAC0010) and its LAST_BILLING_DATE unchanged; stamps UPDATE_DATE / USER / PROGRAM.</li>
+              <li>Rollback puts back the original date and UPDATE_* where the bill still carries the new date.</li>
+            </ol>
+            </details>
+            <div class="key-panel-row" style="gap:12px;flex-wrap:wrap;align-items:flex-end;">
+              <label class="field"><span class="hint-text">JIRA / UPDATE_PROGRAM</span><input type="text" id="rld-program" class="text-input text-input-sm" value="REB_LACKS_DATA" style="width:180px;" /></label>
+              <label class="field"><span class="hint-text">UPDATE_USER</span><input type="text" id="rld-user" class="text-input text-input-sm" value="RMA" style="width:110px;" /></label>
+              <label class="hint-text"><input type="checkbox" id="rld-clean" /> Clean script (no comments)</label>
+            </div>
+            <div id="rld-out-wrap" hidden style="margin-top:10px;">
+              <div class="hint-text" id="rld-out-info"></div>
+              <div class="key-panel-row" style="gap:8px;margin:8px 0;">
+                <button type="button" class="btn btn-pill-sm" id="rld-copy-btn">📋 Copy</button>
+                <button type="button" class="btn btn-pill-sm" id="rld-download-btn">⬇ Download .sql</button>
+                <button type="button" class="btn btn-pill-sm" id="rld-rb-copy-btn">📋 Copy rollback</button>
+                <button type="button" class="btn btn-pill-sm" id="rld-rb-download-btn">⬇ Download rollback</button>
+              </div>
+              <pre class="script-output" id="rld-out"></pre>
+              <details open><summary class="hint-text" style="margin-top:8px;"><b>Rollback</b></summary>
+              <pre class="script-output" id="rld-rb-out"></pre></details>
+            </div>
+          </div>
         </div>
 
         <div class="da-subpage" data-rbm-sub="tagged">
@@ -3280,9 +3462,10 @@
         <nav class="da-subnav" aria-label="TNB Dashboard">
           <button type="button" class="da-subnav-btn is-active" data-tnbd-sub="summary" title="Headline numbers of the four TNB cases and what to act on first">Summary</button>
           <button type="button" class="da-subnav-btn" data-tnbd-sub="nottransferred">Case 1 · Debt not transferred</button>
-          <button type="button" class="da-subnav-btn" data-tnbd-sub="cancelled">Case 2 · Cancelled contract</button>
-          <button type="button" class="da-subnav-btn" data-tnbd-sub="cycledisc">Case 3 · Cycle vs Disconnection</button>
-          <button type="button" class="da-subnav-btn" data-tnbd-sub="disctnb">Case 4 · TNB disconnections</button>
+          <button type="button" class="da-subnav-btn" data-tnbd-sub="wrongdest">Case 2 · Transferred to wrong account</button><!-- RJ 2026-11-26 -->
+          <button type="button" class="da-subnav-btn" data-tnbd-sub="cancelled">Case 3 · Cancelled contract</button>
+          <button type="button" class="da-subnav-btn" data-tnbd-sub="cycledisc">Case 4 · Cycle vs Disconnection</button>
+          <button type="button" class="da-subnav-btn" data-tnbd-sub="disctnb">Case 5 · TNB disconnections</button>
         </nav>
 
         <!-- RJ 2026-11-25: Summary - headline KPIs, one card per case, Electricity vs Water, priority list -->
@@ -3292,7 +3475,7 @@
           <div class="tnbx-cases" id="tnbx-cases"></div>
           <div class="tnbx-grid2">
             <div class="card tnbx-panel">
-              <div class="card-header"><h2>Act on first</h2><span class="hint-text">charged twice → still pending → stuck on cancelled contract</span></div>
+              <div class="card-header"><h2>Act on first</h2><span class="hint-text">wrong account → still pending → stuck on cancelled contract</span></div>
               <div id="tnbx-priority"></div>
             </div>
             <div class="card tnbx-panel">
@@ -3305,33 +3488,102 @@
           <div class="biss-info-banner">
             ℹ️ RCCS type <strong>5164COMTYP / 5163COMTYP</strong> (Electricity / Water - Billing of Termination not billed), status <strong>Solved</strong>, with a destination
             account (TNBDESTACC), and a <strong>Fraud Off Cycle (TIPFAC0013)</strong> bill on the terminated account with amount &gt; 0 (each bill belongs to the latest TNB RCCS opened before it) -
-            but that bill has <strong>no Credit Allocation (TIMOPA0006)</strong> collection, i.e. the Debt Transfer never moved it to the
-            destination (a done transfer puts a negative Off-cycle TFGEN10027 credit on the source, applies it to the TNB bill as Credit Allocation, and creates the same amount as an Off-cycle TFGEN10027 bill on the destination).
+            that was <strong>never transferred</strong>: no Credit Allocation (TIMOPA0006) on the bill, and the RCCS's Debt Transfer created no transfer pair
+            (a done transfer creates a negative Off-cycle TFGEN10027 credit on the source and the same amount as TFGEN10027 on the receiving account).
+            Left out as OK: source = destination, and transfers where the destination already holds the transferred amount.
           </div>
           <div class="card">
             <div class="card-header"><h2>TNB billed, debt not transferred</h2>
               <div class="card-header-actions">
                 <button type="button" class="btn btn-pill-sm" id="tnb1-export-btn" disabled>⬇ Export CSV</button>
-                <button type="button" class="btn btn-pill" id="tnb1-detect-btn">🔍 Scan</button>
+              </div>
+            </div>
+            <!-- RJ 2026-11-26: Find block (UI standard block 2) - Search | Detect all (sgStd.find) -->
+            <div class="sg-find" data-sg-find="tnb1">
+              <div class="sg-find-modes" role="tablist">
+                <button type="button" data-mode="search">🔎 Search</button>
+                <button type="button" data-mode="all" class="is-active">⚡ Detect all</button>
+              </div>
+              <div class="sg-find-pane" data-pane="search" hidden>
+                <textarea id="tnb1-find" class="text-input sg-find-input" rows="2" placeholder="RCCS code, account (source or destination) or TNB bill number - one per line or comma separated"></textarea>
+                <div class="sg-find-side">
+                  <button type="button" class="btn btn-pill sg-find-go" id="tnb1-find-btn">🔎 Search</button>
+                  <span class="sg-find-count" id="tnb1-find-count">Enter = search</span>
+                </div>
+              </div>
+              <div class="sg-find-pane" data-pane="all">
+                <p class="sg-find-desc">Every solved TNB RCCS with a destination - runs with Scan all on the Summary.</p>
+                <div class="sg-find-side"><button type="button" class="btn btn-pill sg-find-go" id="tnb1-detect-btn">⚡ Detect all</button></div>
               </div>
             </div>
             <div class="hint-text" id="tnb1-meta">Runs with Scan all (Summary) - or Scan this case.</div>
             <div id="tnb1-kpis"></div>
             <div class="key-panel-row" style="gap:10px;flex-wrap:wrap;align-items:center;">
-              <input type="text" id="tnb1-search" class="text-input text-input-sm" placeholder="Filter: RCCS, account, destination, bill" style="width:280px;" />
+              <textarea id="tnb1-search" class="text-input text-input-sm sg-filter" rows="1" placeholder="Filter: account / RCCS / destination / bill … or paste many" style="width:300px;"></textarea>
+              <span class="hint-text" id="tnb1-search-count"></span>
               <button type="button" class="btn btn-pill-sm" id="tnb1-clear" hidden>✕ Clear filters</button>
               <span class="hint-text" id="tnb1-shown"></span>
             </div>
             <div class="grid-wrap" style="margin-top:12px;">
               <table class="data-grid" id="tnb1-table">
                 <thead><tr><th><input type="checkbox" id="tnb1-check-all" title="Select all shown" /></th><th>RCCS</th><th>Source account (terminated)</th>
-                  <th>Destination account</th><th>TNB bill</th><th>Amount</th><th>Source bill status</th><th>Debt Transfer action</th></tr></thead>
+                  <th>Destination account</th><th title="RJ 2026-11-26: the account the system proposes - query to come">Proposed by system</th><th>TNB bill</th><th>Amount</th><th>Source bill status</th><th>Debt Transfer action</th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
           </div>
         </div>
-              <!-- RJ 2026-11-25: tab 2 "TNB on Cancelled contract" -->
+              <!-- RJ 2026-11-26: case 2 "TNB billed and transferred, but not on the selected account" (tnbdashboard.js W) -->
+        <div class="da-subpage" data-tnbd-sub="wrongdest">
+          <div class="biss-info-banner">
+            ℹ️ Solved TNB RCCS (Electricity / Water) whose TNB bill <strong>was</strong> transferred (Credit Allocation), but the transfer's
+            receiving bill (TFGEN10027, same amount, created right after the source credit) is on an account that is <strong>not</strong> the
+            destination selected in the RCCS (TNBDESTACC). "Before selection" = the transfer ran before that destination was chosen;
+            "after selection" = it ran later and still went elsewhere.
+          </div>
+          <div class="card">
+            <div class="card-header"><h2>Transferred, but not to the selected destination</h2>
+              <div class="card-header-actions">
+                <button type="button" class="btn btn-pill-sm" id="tnb5-export-btn" disabled>⬇ Export CSV</button>
+              </div>
+            </div>
+            <!-- RJ 2026-11-26: Find block (UI standard block 2) - Search | Detect all (sgStd.find) -->
+            <div class="sg-find" data-sg-find="tnb5">
+              <div class="sg-find-modes" role="tablist">
+                <button type="button" data-mode="search">🔎 Search</button>
+                <button type="button" data-mode="all" class="is-active">⚡ Detect all</button>
+              </div>
+              <div class="sg-find-pane" data-pane="search" hidden>
+                <textarea id="tnb5-find" class="text-input sg-find-input" rows="2" placeholder="RCCS code, account (source or destination) or TNB bill number - one per line or comma separated"></textarea>
+                <div class="sg-find-side">
+                  <button type="button" class="btn btn-pill sg-find-go" id="tnb5-find-btn">🔎 Search</button>
+                  <span class="sg-find-count" id="tnb5-find-count">Enter = search</span>
+                </div>
+              </div>
+              <div class="sg-find-pane" data-pane="all">
+                <p class="sg-find-desc">Every transferred TNB bill - runs with Scan all on the Summary.</p>
+                <div class="sg-find-side"><button type="button" class="btn btn-pill sg-find-go" id="tnb5-detect-btn">⚡ Detect all</button></div>
+              </div>
+            </div>
+            <div class="hint-text" id="tnb5-meta">Runs with Scan all (Summary) - or Scan this case.</div>
+            <div id="tnb5-kpis"></div>
+            <div class="key-panel-row" style="gap:10px;flex-wrap:wrap;align-items:center;">
+              <textarea id="tnb5-search" class="text-input text-input-sm sg-filter" rows="1" placeholder="Filter: account / RCCS / bill … or paste many" style="width:300px;"></textarea>
+              <span class="hint-text" id="tnb5-search-count"></span>
+              <button type="button" class="btn btn-pill-sm" id="tnb5-clear" hidden>✕ Clear filters</button>
+              <span class="hint-text" id="tnb5-shown"></span>
+            </div>
+            <div class="grid-wrap" style="margin-top:12px;">
+              <table class="data-grid" id="tnb5-table">
+                <thead><tr><th><input type="checkbox" id="tnb5-check-all" title="Select all shown" /></th><th>RCCS</th><th>Source account</th>
+                  <th>Selected destination</th><th>Actually transferred to</th><th>TNB bill</th><th>Transfer</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- RJ 2026-11-25: tab 2 "TNB on Cancelled contract" -->
         <div class="da-subpage" data-tnbd-sub="cancelled">
           <div class="biss-info-banner">
             ℹ️ TNB RCCS (5164COMTYP Electricity / 5163COMTYP Water, <strong>any status</strong>) whose account (ID_ACCOUNT = ID_PAYMENT_FORM)
@@ -4218,6 +4470,8 @@
   <script src="/settings.js"></script><!-- RJ 2026-11-19 Settings: sections + built-in SSH tunnel -->
   <script src="/sg-std.js"></script><!-- RJ 2026-11-19 page standard kit (docs/UI_STANDARD.md) -->
   <script src="/tnbdashboard.js"></script><!-- RJ 2026-11-25 TNB Dashboard -->
+  <script src="/rbmoffline.js"></script><!-- RJ 2026-11-26 Rebilling Monitor tab 3 - offline task error -->
+  <script src="/rbmlacksdata.js"></script><!-- RJ 2026-11-26 Rebilling Monitor tab 4 - LACKS DATA bill date -->
   <script src="/sanitarystatus.js"></script><!-- RJ 2026-11-24 Sanitary Status dashboard -->
   <script src="/efts.js"></script><!-- RJ 2026-11-23 Reprocess EFTS (admin only) -->
   <script src="/navx.js"></script><!-- RJ 2026-11-18 new sidebar (search + favorite tiles + spaces) and tab cards -->

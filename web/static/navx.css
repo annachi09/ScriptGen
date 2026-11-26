@@ -520,3 +520,100 @@
 .tnbx-prio td:last-child { white-space: normal; color: var(--text-secondary); }
 .tnbx-prio a { color: var(--accent); font-weight: 600; text-decoration: none; }
 .tnbx-prio a:hover { text-decoration: underline; }
+
+/* ===== Rebilling Monitor tab 4 - LACKS DATA bill date (RJ 2026-11-26, rbmlacksdata.js) ===== */
+.rld-hero { display: flex; gap: 24px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 18px 22px; margin: 0 0 14px;
+  border-radius: 14px; border: 1px solid var(--border-color, rgba(148,163,184,.25));
+  background: linear-gradient(120deg, rgba(14,165,233,.12), rgba(99,102,241,.08) 55%, transparent); }
+.rld-hero h2 { margin: 2px 0 6px; font-size: 18px; }
+.rld-hero p { margin: 0; max-width: 760px; font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+.rld-eyebrow { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #0ea5e9; }
+.rld-flow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; }
+.rld-flow span { padding: 4px 8px; border-radius: 8px; background: var(--bg-elevated, rgba(148,163,184,.12)); border: 1px solid var(--border-color, rgba(148,163,184,.25)); font-family: ui-monospace, monospace; }
+.rld-flow i { color: #0ea5e9; font-style: normal; }
+.rld-toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 6px 0 2px; }
+.rld-seg { display: inline-flex; border: 1px solid var(--border-color, rgba(148,163,184,.3)); border-radius: 10px; overflow: hidden; }
+.rld-seg button { border: 0; background: transparent; padding: 6px 12px; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+.rld-seg button + button { border-left: 1px solid var(--border-color, rgba(148,163,184,.3)); }
+.rld-seg button.is-active { background: #0ea5e9; color: #fff; }
+.rld-seg em { font-style: normal; opacity: .8; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.rld-chk { display: inline-flex; gap: 6px; align-items: center; }
+.rld-table td { vertical-align: top; }
+.rld-date { font-variant-numeric: tabular-nums; font-weight: 600; }
+.rld-date.is-off { color: #ef4444; }
+.rld-reads { display: flex; flex-direction: column; gap: 4px; }
+.rld-read { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; padding: 3px 8px; border-radius: 8px; font-size: 12px;
+  background: var(--bg-elevated, rgba(148,163,184,.08)); border: 1px solid var(--border-color, rgba(148,163,184,.2)); }
+.rld-read.is-src { border-color: #0ea5e9; box-shadow: inset 3px 0 0 #0ea5e9; }
+.rld-read b { font-variant-numeric: tabular-nums; }
+.rld-read .rld-range { font-variant-numeric: tabular-nums; }
+.rld-read .rld-range i { color: #0ea5e9; font-style: normal; margin: 0 4px; }
+.rld-read small { color: var(--text-secondary); }
+.rld-table th:nth-child(2), .rld-table td:nth-child(2) { min-width: 190px; }
+.rld-table td:nth-child(3) { white-space: nowrap; }
+.rld-prop { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.rld-prop .rld-arrow { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text-secondary); }
+.rld-prop .rld-arrow s { color: #ef4444; }
+.rld-prop .rld-arrow b { color: #10b981; }
+
+/* =====================================================================================================
+   RJ 2026-11-26: "the cards looks bad, you can do better" + "why no search screen" - KPI strip redesign
+   (sgStd.kpis: one joined strip, equal height, tone bar + dot, tinted when active) and the Find block
+   (sgStd.find: Search | Detect all). Applies to the pages built on sg-std (TNB Dashboard cases, Rebilling
+   Monitor tabs 3 / 4).
+   ===================================================================================================== */
+.sg-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0; margin: 14px 0 10px;
+  border: 1px solid var(--card-border); border-radius: 14px; overflow: hidden; background: var(--card-bg); }
+.sg-kpi { position: relative; display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: 4px;
+  min-height: 92px; padding: 14px 16px 12px; border: 0; border-radius: 0; box-shadow: none; background: transparent;
+  border-right: 1px solid var(--card-border); border-bottom: 1px solid var(--card-border); margin: 0 -1px -1px 0;
+  transition: background .15s; }
+.sg-kpi::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--sg-tone); opacity: 0; transition: opacity .15s; }
+.sg-kpi:hover:not([disabled]) { background: color-mix(in srgb, var(--sg-tone) 6%, transparent); border-color: var(--card-border); }
+.sg-kpi.is-active { background: color-mix(in srgb, var(--sg-tone) 10%, transparent); box-shadow: none; border-color: var(--card-border); }
+.sg-kpi.is-active::after, .sg-kpi:hover:not([disabled])::after { opacity: 1; }
+.sg-kpi-label { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--text-secondary); line-height: 1.25; }
+.sg-kpi-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--sg-tone); box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-tone) 18%, transparent); }
+.sg-kpi-value { font-size: 26px; font-weight: 700; letter-spacing: -.01em; line-height: 1.1; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.sg-kpi:first-child .sg-kpi-value { color: var(--sg-tone); }
+.sg-kpi-sub { font-size: 11.5px; color: var(--text-secondary); line-height: 1.3; min-height: 15px; }
+
+.sg-find { margin: 12px 0 4px; border: 1px solid var(--card-border); border-radius: 14px; padding: 12px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent, #6366f1) 5%, transparent), transparent); }
+.sg-find-modes { display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px; background: color-mix(in srgb, var(--text-secondary) 10%, transparent); margin-bottom: 10px; }
+.sg-find-modes button { border: 0; background: transparent; padding: 6px 14px; border-radius: 8px; font: inherit; font-size: 12.5px; font-weight: 600;
+  color: var(--text-secondary); cursor: pointer; transition: background .12s, color .12s; }
+.sg-find-modes button.is-active { background: var(--card-bg); color: var(--text-primary); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.sg-find-pane { display: flex; gap: 12px; align-items: stretch; }
+.sg-find-pane[hidden] { display: none; }
+.sg-find-input { flex: 1; min-height: 44px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.sg-find-side { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; justify-content: center; }
+.sg-find-count { font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
+.sg-find-desc { flex: 1; margin: 0; align-self: center; font-size: 12.5px; color: var(--text-secondary); }
+.sg-scope { display: inline-flex; align-items: center; gap: 6px; margin-left: 6px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  background: color-mix(in srgb, var(--accent, #6366f1) 12%, transparent); color: var(--accent, #6366f1); }
+.sg-scope[data-scope="search"] { background: color-mix(in srgb, #f59e0b 16%, transparent); color: #b45309; }
+
+/* RJ 2026-11-26 (3): Lacks Data - same-day bills: "now" vs "after the fix" timeline, compact status column */
+.rld-table td { padding-top: 10px; padding-bottom: 10px; }
+.rld-table tr.is-ticked td { background: color-mix(in srgb, #0ea5e9 6%, transparent); }
+.rld-now { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.rld-now small, .rld-tl small, .rld-st small { font-size: 11px; color: var(--text-secondary); }
+.rld-tl { min-width: 190px; display: flex; flex-direction: column; gap: 4px; }
+.rld-tl-ends { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.rld-tl-ends b:first-child { color: #10b981; }
+.rld-tl-bar { position: relative; height: 6px; border-radius: 999px; background: color-mix(in srgb, #10b981 18%, transparent); }
+.rld-tl-bar i { position: absolute; inset: 0; border-radius: 999px; background: linear-gradient(90deg, #10b981, #0ea5e9); }
+.rld-tl-bar::before, .rld-tl-bar::after { content: ""; position: absolute; top: 50%; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%;
+  background: var(--card-bg); border: 2px solid #10b981; z-index: 1; }
+.rld-tl-bar::before { left: -2px; } .rld-tl-bar::after { right: -2px; border-color: #0ea5e9; }
+.rld-tl-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rld-tl-foot s { color: #ef4444; } .rld-tl-foot b { color: #10b981; }
+.rld-st { display: flex; flex-direction: column; gap: 6px; }
+.rld-st > div { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.rld-st small { width: 58px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+
+/* RJ 2026-11-26: results filter = "paste many" box (sgStd.terms / matches) - grows while typing many values */
+textarea.sg-filter { min-height: 32px; height: 32px; resize: vertical; font-family: inherit; line-height: 1.35; padding-top: 6px; }
+textarea.sg-filter:focus { height: 64px; }

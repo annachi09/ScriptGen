@@ -62,6 +62,9 @@ from app.core import ssh_tunnel      # RJ 2026-11-19 built-in SSH tunnel
 from app.core import efts_reprocess  # RJ 2026-11-23 Reprocess EFTS menu
 from app.core import sanitary_status  # RJ 2026-11-24 Sanitary Status dashboard
 from app.core import tnb_dashboard    # RJ 2026-11-25 TNB Dashboard
+from app.core import rebilling_offline_error  # RJ 2026-11-26 Rebilling Monitor tab 3
+from app.core import rebilling_lacks_data     # RJ 2026-11-26 Rebilling Monitor tab 4
+from app.core import search_inputs            # RJ 2026-11-26 Search screen on today's pages
 from app.core.sql_format import format_sql_literal
 from app.core import stats as stats_mod
 from app.core import snapshot_diff
@@ -1527,6 +1530,10 @@ _OVERVIEW_COUNTERS = {
     "tnbdashboard_nottransferred": lambda conn, user: tnb_dashboard_not_transferred_detect(user=user)["count"],
     # RJ 2026-11-25: TNB Dashboard tab 2 - headline = RCCS whose only contracts on that service are Cancelled
     "tnbdashboard_cancelled": lambda conn, user: tnb_dashboard_cancelled_contract_detect(user=user)["only_cancelled_count"],
+    # RJ 2026-11-26: TNB Dashboard case 2 - bills transferred to an account that is not the selected destination
+    "tnbdashboard_wrongdest": lambda conn, user: tnb_dashboard_wrong_destination_detect(user=user)["count"],
+    "rebillingmonitor_offlineerr": lambda conn, user: rebilling_offline_error_detect(user=user)["complete"],   # RJ 2026-11-26
+    "rebillingmonitor_lacksdata": lambda conn, user: rebilling_lacks_data_detect(user=user)["count"],   # RJ 2026-11-26
     # RJ 2026-11-04: Billing Statistics headline = distinct accounts with an INVOICED (ESTFAC0005,
     # page default status) Service bill in the current billing period. Not an anomaly - kept out
     # of the daily digest.
@@ -1558,6 +1565,9 @@ _DIGEST_LABELS = {
     "sanitarystatus_disccharged": "Sanitary - disconnected premise still on Sanitary Charges",   # RJ 2026-11-24
     "tnbdashboard_nottransferred": "TNB billed - debt not transferred to the destination account",   # RJ 2026-11-25
     "tnbdashboard_cancelled": "TNB RCCS on a cancelled contract only",   # RJ 2026-11-25
+    "tnbdashboard_wrongdest": "TNB debt transferred to the wrong account",   # RJ 2026-11-26
+    "rebillingmonitor_offlineerr": "Rebilling complete - End Massive Rebilling action still pending",   # RJ 2026-11-26
+    "rebillingmonitor_lacksdata": "Disputed bills - rebilling anomaly Lacks Data (bill date)",   # RJ 2026-11-26
     "srquickfix_incbp": "SR Incorrect Billing Period - readings lower than previous",  # RJ 2026-11-09
 }
 alerts.register_digest_counters({k: (_DIGEST_LABELS.get(k, k), fn) for k, fn in _OVERVIEW_COUNTERS.items()
@@ -5256,22 +5266,54 @@ def mp_tmp_activate_generate(body: MpActivateGenerateRequest, user: str = Depend
     return {"sql": sql_text, "rollback_sql": revert, **counts}
 
 
+class FindRequest(BaseModel):
+    """RJ 2026-11-26 ("why no search screen"): optional Search input - empty = Detect all."""
+    inputs: str = ""
+
+
+def _find_inputs(body) -> list[str]:
+    try:
+        return search_inputs.parse(body.inputs if body else "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 # TNB Dashboard (RJ 2026-11-25) - app/core/tnb_dashboard.py. Read only.
 @app.post("/api/tnb-dashboard/not-transferred/detect")
-def tnb_dashboard_not_transferred_detect(user: str = Depends(require_login)):
+def tnb_dashboard_not_transferred_detect(body: Optional[FindRequest] = None, user: str = Depends(require_login)):
     """Case 1: solved TNB RCCS with a destination account whose Fraud Off Cycle bill on the source account was
     never debt-transferred (no Credit Allocation collection)."""
     conn = load_config().get_active_connection()
     if not conn:
         raise HTTPException(status_code=400, detail="No connection configured.")
     try:
-        res = mssql.run_query(conn, tnb_dashboard.build_not_transferred_query())
+        # RJ 2026-11-26: staged batch (temp tables), ~10-15 s - allow up to 3 min over the tunnel
+        inputs = _find_inputs(body)
+        res = mssql.run_query(conn, tnb_dashboard.build_not_transferred_query(inputs), timeout_seconds=180)
     except mssql.ConnectionError_ as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     rows = tnb_dashboard.shape_rows(_row_dicts(res))
-    return {"rows": rows, "count": len(rows), "elapsed_ms": res.elapsed_ms,
+    return {"rows": rows, "count": len(rows), "elapsed_ms": res.elapsed_ms, "searched": inputs,
             "rccs_count": len({r.get("cod_ref_complaint") for r in rows}),
             "half_done": sum(1 for r in rows if r.get("half_done"))}
+
+
+@app.post("/api/tnb-dashboard/wrong-destination/detect")
+def tnb_dashboard_wrong_destination_detect(body: Optional[FindRequest] = None, user: str = Depends(require_login)):
+    """Case 2 (RJ 2026-11-26): TNB bills transferred (Credit Allocation) whose transfer pair landed on an account that
+    is not the RCCS's selected destination (TNBDESTACC). One row per bill."""
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        inputs = _find_inputs(body)
+        res = mssql.run_query(conn, tnb_dashboard.build_wrong_destination_query(inputs), timeout_seconds=180)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = tnb_dashboard.shape_wrong_destination_rows(_row_dicts(res))
+    return {"rows": rows, "count": len(rows), "elapsed_ms": res.elapsed_ms, "searched": inputs,
+            "rccs_count": len({r.get("cod_ref_complaint") for r in rows}),
+            "after_selection": sum(1 for r in rows if not r.get("selected_after_transfer"))}
 
 
 @app.post("/api/tnb-dashboard/cancelled-contract/detect")
@@ -5795,6 +5837,108 @@ def rebilling_monitor_detect(user: str = Depends(require_login)):
     out = rebilling_monitor.shape(rows)
     out["stuck_days_default"] = rebilling_monitor.DEFAULT_STUCK_DAYS
     return out
+
+
+# RJ 2026-11-26: tab 3 "Rebilling complete with offline task error" - RCCS (ACTI600007) / SR (ACTI600008)
+# "End Massive Rebilling Activity" action still Pending although its rebilling is Rebilled.
+# app/core/rebilling_offline_error.py
+def _rebilling_offline_rows(inputs: list[str] | None = None):
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, rebilling_offline_error.build_detect_query(inputs), timeout_seconds=180)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return rebilling_offline_error.shape_rows(_row_dicts(res)), res.elapsed_ms
+
+
+@app.post("/api/rebilling-monitor/offline-error/detect")
+def rebilling_offline_error_detect(body: Optional[FindRequest] = None, user: str = Depends(require_login)):
+    inputs = _find_inputs(body)
+    rows, ms = _rebilling_offline_rows(inputs)
+    return {"rows": rows, "searched": inputs, **rebilling_offline_error.summary(rows), "states": rebilling_offline_error.STATES,
+            "cases": {k: {"label": v["label"], "program": v["program"], "action": v["action"]}
+                      for k, v in rebilling_offline_error.CASES.items()},
+            "default_user": rebilling_offline_error.DEFAULT_USER, "elapsed_ms": ms}
+
+
+class RebillingOfflineFixRequest(BaseModel):
+    activity_ids: list[str]
+    user: str = rebilling_offline_error.DEFAULT_USER
+    program_rccs: str = rebilling_offline_error.CASES["RCCS"]["program"]
+    program_sr: str = rebilling_offline_error.CASES["SR"]["program"]
+    clean: bool = False
+
+
+@app.post("/api/rebilling-monitor/offline-error/generate")
+def rebilling_offline_error_generate(body: RebillingOfflineFixRequest, user: str = Depends(require_editor)):
+    """Re-scans live; only selected cases still 'complete' get the fix (RJ's two scripts)."""
+    if not body.activity_ids:
+        raise HTTPException(status_code=400, detail="Select at least one case.")
+    rows, _ = _rebilling_offline_rows()
+    try:
+        sql_text, rollback, counts = rebilling_offline_error.build_fix_script(
+            rows, body.activity_ids, user=body.user,
+            programs={"RCCS": body.program_rccs, "SR": body.program_sr}, clean=body.clean)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    program = ", ".join(p for p, n in ((body.program_rccs, counts["rccs"]), (body.program_sr, counts["sr"])) if n)
+    _record_script(user, script_history.KIND_REBILLING_OFFLINE_ERROR,
+                   f"Rebilling complete with offline task error - {counts['rccs']} RCCS, {counts['sr']} SR",
+                   program, sql_text, statements=sql_text.count("UPDATE "))
+    _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "ROLLBACK of Rebilling complete with offline task error",
+                   program, rollback, statements=rollback.count("UPDATE "))
+    return {"sql": sql_text, "rollback_sql": rollback, **counts}
+
+
+# RJ 2026-11-26: tab 4 "Rebilling with anomaly in bill date (LACKS DATA)" - Disputed bills whose rebilling line is
+# Anomalous 'NOSUFDATFO - Lacks Data'; fix = LAST_BILLING_DATE := READING_PREV_DATE. app/core/rebilling_lacks_data.py
+def _rebilling_lacks_data_rows(inputs: list[str] | None = None):
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, rebilling_lacks_data.build_detect_query(inputs), timeout_seconds=180)
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return rebilling_lacks_data.shape_rows(_row_dicts(res)), res.elapsed_ms
+
+
+@app.post("/api/rebilling-monitor/lacks-data/detect")
+def rebilling_lacks_data_detect(body: Optional[FindRequest] = None, user: str = Depends(require_login)):
+    inputs = _find_inputs(body)
+    rows, ms = _rebilling_lacks_data_rows(inputs)
+    return {"rows": rows, "searched": inputs, **rebilling_lacks_data.summary(rows), "reason": rebilling_lacks_data.REASON_LABEL,
+            "default_program": rebilling_lacks_data.DEFAULT_PROGRAM, "default_user": rebilling_lacks_data.DEFAULT_USER,
+            "elapsed_ms": ms}
+
+
+class RebillingLacksDataFixRequest(BaseModel):
+    bill_ids: list[str]
+    user: str = rebilling_lacks_data.DEFAULT_USER
+    program: str = rebilling_lacks_data.DEFAULT_PROGRAM
+    clean: bool = False
+
+
+@app.post("/api/rebilling-monitor/lacks-data/generate")
+def rebilling_lacks_data_generate(body: RebillingLacksDataFixRequest, user: str = Depends(require_editor)):
+    """Re-scans live; only selected bills that still need the date change are scripted."""
+    if not body.bill_ids:
+        raise HTTPException(status_code=400, detail="Select at least one bill.")
+    rows, _ = _rebilling_lacks_data_rows()
+    try:
+        sql_text, rollback, counts = rebilling_lacks_data.build_fix_script(
+            rows, body.bill_ids, user=body.user, program=body.program, clean=body.clean)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    program = body.program.strip() or rebilling_lacks_data.DEFAULT_PROGRAM
+    _record_script(user, script_history.KIND_REBILLING_LACKS_DATA,
+                   f"Rebilling LACKS DATA - LAST_BILLING_DATE of {counts['bills']} disputed bill(s)",
+                   program, sql_text, statements=sql_text.count("UPDATE "))
+    _record_script(user, script_history.KIND_GENERATED_ROLLBACK, "ROLLBACK of Rebilling LACKS DATA bill date fix",
+                   program, rollback, statements=rollback.count("UPDATE "))
+    return {"sql": sql_text, "rollback_sql": rollback, **counts}
 
 
 class UnusualSanitaryRebillRequest(BaseModel):
