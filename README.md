@@ -5507,3 +5507,52 @@ irregularities, fraud cycle". New Monitor menu **TNB Dashboard** (`app/core/tnb_
   but the source bill was never credited - charged twice (RCALL251106477: destination bill 1077073448 1.54 paid,
   source 1074620757 1.54 still pending).
 - Overview card `tnbdashboard_nottransferred` = page's own detect (also in the daily digest); auto-scan on open.
+- RJ (later): "this is the example of debt transfer 10543488322611030004 bill number, please verify if your
+  condition is correct". Verified: that bill is the transfer's credit on the source (TFGEN10027 -44.95, account
+  216421) applied as TIMOPA0006 Credit Allocation on TNB bill 10543488322611040004; +44.95 went to destination
+  1087412712 - so the Credit Allocation check is right. Two fixes: (1) its RCCS is 5163COMTYP (Water TNB) - both
+  5163 and 5164 are in scope now; (2) 216421 has 4 TNB RCCS in a row - a bill now belongs to the LATEST TNB RCCS
+  (any status) opened before it, listed only if that RCCS is Solved with a destination (216421's 4 RCCS -> their
+  own 4 bills, all transferred). Live after: 123 bills / 107 RCCS / 6,994.37 (66 Electricity, 57 Water); 47
+  pending on source (3,154.56), 76 paid on source, 19 half done (402.22); 2,127 transferred normally. 1.7 s.
+
+#### TNB Dashboard tab 2 - "TNB on cancelled contract" (RJ 2026-11-25)
+
+RJ: "create 2nd tab, TNB on Cancelled contract, so you check the RCCS id payment form and id offered service, here
+you will show if there is an RCCS TNB where its linked to a cancelled contract. show the status of the TNB".
+`/api/tnb-dashboard/cancelled-contract/detect`, `tnb_dashboard.build_cancelled_contract_query()`.
+- Link: GCCC_COMPLAINT.ID_ACCOUNT = contracted service ID_PAYMENT_FORM + the TNB type's offered service (the complaint
+  has no offered-service column: 5164COMTYP Electricity -> 1, 5163COMTYP Water -> 19). Every TNB RCCS (any status)
+  with at least one Cancelled (ESTSC00005) contract there is listed.
+- TNB status = COD_STATUS_COMPLAINT, which for TNB is the workflow step (COMPLST155 Billing of TNB Usage, 142
+  Assignation, 157 Validate Owner Account, 158 Debt Transfer, 054 Solved, 001 Canceled, 061 Rejected, 002 In
+  Resolution) - status filter on the page.
+- Live 2026-11-25: 202 RCCS (1.7 s). Headline 87 = every contract on that service is Cancelled (70 stuck at Billing
+  of TNB Usage; 5 Solved and billed on the cancelled contract). 115 also have an Active / Terminated contract - there
+  the TNB bill went to the other contract (e.g. RCALL261006912 -> terminated 20009751). Some cancelled-contract TNBs
+  carry suspicious usages (29,874 KWH, 99,992 m3) - the TNB usage from MOTIVE is shown per row.
+- Overview card `tnbdashboard_cancelled` = the 87 headline; tab auto-scans when opened.
+
+#### TNB Dashboard redesign - Summary + every TNB menu as a case (RJ 2026-11-25)
+
+RJ: "add all tnb related menu as a case in TNB dashboard menu, make it look more better and advance, add a main
+summary page first on the top. make better KPIS and show the data more clean and straight to the point without
+loosing the information, and make it elegant and professional looking" + "once added, remove the old menus for tnb".
+- Tabs: **Summary** | Case 1 Debt not transferred | Case 2 Cancelled contract | Case 3 Cycle vs Disconnection |
+  Case 4 TNB disconnections. Cases 3 / 4 are the former **TNB CYCLE/DISC Analysis** and **Disconnection TNB** menus,
+  moved in with their markup / ids / app.js logic (tcd*, dtnb*) unchanged; their nav items and pages are removed
+  (index.html, navx.js maps, menu_access MENU_IDS). Their Overview cards (same keys, same counters, digest
+  included) now open TNB Dashboard on case 3 / 4.
+- Summary (tnbdashboard.js): one **Scan all** runs the 4 cases' own scans in parallel (live: 6.9 s) and every tab
+  renders from that result - opening a case tab does not rescan; header Refresh = Scan all on Summary, that case's
+  scan on a case tab. Auto-runs the first time the page is shown (MutationObserver on the page).
+  - Headline KPIs: Money not transferred, Customers charged twice, TNB stuck on cancelled contract, TNB readings to
+    review - each opens its case (charged twice opens case 1 filtered).
+  - One card per case: count, 3 key figures, a split bar, Open case. No usage totals on the summary (meter-rollover
+    readings make them meaningless - 123 M / 5.4 B); they stay on the case tabs.
+  - "Act on first": top 10 - charged twice (by amount), still pending on the old account, open RCCS on a cancelled
+    contract (by TNB usage); the RCCS link opens the case filtered to it.
+  - Electricity vs Water for cases 1 / 2.
+- Styling: `.tnbx-*` in navx.css, theme variables only (light / dark).
+- Live 2026-11-25 11:04: case 1 125 bills / 7,000.90 (19 charged twice, 402.22), case 2 87 cancelled-only (73 open),
+  case 3 2,532 pairs, case 4 5,312 readings (4,537 read after contract end).

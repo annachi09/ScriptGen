@@ -135,7 +135,7 @@ const SG_ENDPOINT_OWNER = [
   ["/api/bill-issuance/", "billissuance", "case1"],
   ["/api/incorrect-billing-period/", "incorrectbillingperiod", ""],
   ["/api/reading-validation/", "readingvalidation", ""],
-  ["/api/tnb-cycle-disc/", "tnbcycledisc", ""],
+  ["/api/tnb-cycle-disc/", "tnbdashboard", "cycledisc"],   // RJ 2026-11-25: now TNB Dashboard case 3
   ["/api/wrong-stuck-hierarchy/sanitary/", "wrongstuckhierarchy", "sanitary"],
   ["/api/wrong-stuck-hierarchy/generate", "wrongstuckhierarchy", null],
   ["/api/wrong-stuck-hierarchy/", "wrongstuckhierarchy", "primary"],
@@ -163,13 +163,14 @@ const SG_ENDPOINT_OWNER = [
   ["/api/efts/", "reprocessefts", ""],   // RJ 2026-11-23 Reprocess EFTS
   ["/api/sanitary-status/disc-charged/", "sanitarystatus", "disccharged"],   // RJ 2026-11-24 Sanitary Status
   ["/api/tnb-dashboard/not-transferred/", "tnbdashboard", "nottransferred"],   // RJ 2026-11-25 TNB Dashboard
+  ["/api/tnb-dashboard/cancelled-contract/", "tnbdashboard", "cancelled"],   // RJ 2026-11-25 TNB Dashboard tab 2
   ["/api/fix-billing-campaign/", "fixbillingcampaign", "campaign"],
   ["/api/pending-sr/", "pendingsr", ""],
   ["/api/rebilling-monitor/open", "rebillingmonitor", "open"],
   ["/api/rebilling-monitor/detect", "rebillingmonitor", "tagged"],
   ["/api/double-itb/sanitary-only", "doubleitb", "sanonly"],   // RJ 2026-10-24
   ["/api/double-itb/", "doubleitb", "main"],
-  ["/api/disconnection-tnb/", "disconnectiontnb", ""],
+  ["/api/disconnection-tnb/", "tnbdashboard", "disctnb"],   // RJ 2026-11-25: now TNB Dashboard case 4
   ["/api/bulk-checker/", "bulkchecker", ""],
   ["/api/anomaly-stats/", "anomalystats", ""],
   ["/api/dashboard/", "dashboard", ""],
@@ -289,12 +290,16 @@ if (document.readyState !== "loading") setTimeout(sgAddQueryButtons, 0);
 // page whose Overview counter calls that same detect (same parameters) pushes its fresh number into
 // overviewLive. Only endpoints called WITHOUT parameters are listed (Case 2 / 3 scans take a days-back /
 // filter setting, so their number can legitimately differ from the Overview's default one).
+// RJ 2026-11-25: TNB Dashboard cases 3 / 4 (former TNB CYCLE/DISC + Disconnection TNB menus) added.
 const SG_SCAN_COUNTERS = [
+  ["/api/tnb-cycle-disc/detect", "tnbcycledisc", (d) => d.count],
+  ["/api/disconnection-tnb/detect", "disconnectiontnb", (d) => d.count],
   ["/api/bill-issuance/detect", "billissuance_case1", (d) => (Array.isArray(d.rows) ? d.rows.length : null)],
   ["/api/bill-issuance/case4/detect", "billissuance_case4", (d) => d.account_count],
   ["/api/bill-issuance/case5/detect", "billissuance_case5", (d) => d.account_count],
   ["/api/sanitary-status/disc-charged/detect", "sanitarystatus_disccharged", (d) => d.count],   // RJ 2026-11-24
   ["/api/tnb-dashboard/not-transferred/detect", "tnbdashboard_nottransferred", (d) => d.count],   // RJ 2026-11-25
+  ["/api/tnb-dashboard/cancelled-contract/detect", "tnbdashboard_cancelled", (d) => d.only_cancelled_count],   // RJ 2026-11-25
 ];
 function sgSyncOverviewCount(path, data) {
   try {
@@ -746,16 +751,16 @@ const OVERVIEW_CARDS = [
     desc: "Look up and correct readings by NISS / account.",
     page: "readingvalidation", group: "Hierarchy & readings", nocount: true,
   },
-  // ---- TNB / disconnection
+  // ---- TNB / disconnection - RJ 2026-11-25: both menus are now TNB Dashboard cases 3 and 4 (same counters)
   {
-    key: "tnbcycledisc", icon: "📍", label: "TNB CYCLE/DISC Analysis", color: "#14b8a6",
-    desc: "TNB cycle / disconnection readings to review.",
-    page: "tnbcycledisc", group: "TNB / Disconnection",
+    key: "tnbcycledisc", icon: "📍", label: "TNB - Cycle vs Disconnection", color: "#38bdf8",
+    desc: "Cycle + disconnection reading on the same date, at least one TNB.",
+    page: "tnbdashboard", subAttr: "data-tnbd-sub", subValue: "cycledisc", group: "TNB Dashboard",
   },
   {
-    key: "disconnectiontnb", icon: "⛔", label: "Disconnection TNB", color: "#14b8a6",
-    desc: "Disconnection TNB cases.",
-    page: "disconnectiontnb", group: "TNB / Disconnection",
+    key: "disconnectiontnb", icon: "⛔", label: "TNB - Disconnections", color: "#38bdf8",
+    desc: "Disconnection readings in TNB with ready usage.",
+    page: "tnbdashboard", subAttr: "data-tnbd-sub", subValue: "disctnb", group: "TNB Dashboard",
   },
   {
     key: "bulkchecker", icon: "📋", label: "Bulk Checker", color: "#10b981",
@@ -766,8 +771,14 @@ const OVERVIEW_CARDS = [
   {
     // RJ 2026-11-25: TNB Dashboard tab 1 - headline = the page's row count (TNB bills not transferred)
     key: "tnbdashboard_nottransferred", icon: "⚡", label: "TNB billed - debt not transferred", color: "#38bdf8",
-    desc: "Solved TNB RCCS whose source bill was never transferred to the destination account.",
+    desc: "Solved TNB RCCS (Electricity / Water) whose source bill was never transferred to the destination account.",
     page: "tnbdashboard", subAttr: "data-tnbd-sub", subValue: "nottransferred", group: "TNB Dashboard",
+  },
+  {
+    // RJ 2026-11-25: TNB Dashboard tab 2 - headline = RCCS whose only contracts on that service are Cancelled
+    key: "tnbdashboard_cancelled", icon: "⚡", label: "TNB on cancelled contract", color: "#38bdf8",
+    desc: "TNB RCCS whose account has only Cancelled contracts for that service.",
+    page: "tnbdashboard", subAttr: "data-tnbd-sub", subValue: "cancelled", group: "TNB Dashboard",
   },
   {
     // RJ 2026-11-24: Sanitary Status tab 1 - headline = the page's row count
@@ -10549,13 +10560,11 @@ const HX_REFRESH = {
   readingvalidation: () => (rvActiveSupply
     ? { fn: () => rvLoadSupply(rvActiveSupply) }
     : { btn: "#rv-supply-search-btn" }),
-  tnbcycledisc: () => ({ btn: "#tcd-detect-btn" }),
   wrongstuckhierarchy: () => ({ btn: hxActiveSub("data-wsh-sub") === "sanitary" ? "#wshs-detect-btn" : "#wsh-detect-btn" }),
   doubleitb: () => ({ btn: hxActiveSub("data-ditb-sub") === "sanonly" ? "#dsan-detect-btn" : "#ditb-detect-btn" }),
   // Wrong Bill: one entry per case tab (add more as cases are added).
   wrongbill: () => ({ btn: ({ case1: "#usan-detect-btn", case2: "#wbpd-detect-btn", case3: "#wbsz-detect-btn", case4: "#wbfr-detect-btn" })[hxActiveSub("data-wb-sub") || "case1"] || "#usan-detect-btn" }),
   wrongbilledconsumption: () => ({ btn: "#wbc-detect-btn" }),
-  disconnectiontnb: () => ({ btn: "#dtnb-detect-btn" }),
   billissuance: () => {
     const sub = hxActiveSub("data-biss-sub") || "case1";
     // RJ 2026-11-08: Case 5's scan button is #bis5-detect-btn
@@ -10571,7 +10580,12 @@ const HX_REFRESH = {
   fixbillingcampaign: () => ({ btn: ({ planned: "#fsp-detect-btn", subsidy: "#tsub-detect-btn", bfacat: "#fbk-detect-btn" })[hxActiveSub("data-fbc-sub")] || "#fbc-detect-btn" }),
   srquickfix: () => ({ btn: hxActiveSub("data-srq-sub") === "sanh2o" ? "#sh2o-detect-btn" : "#srq-detect-btn" }),
   sanitarystatus: () => ({ btn: "#sst1-detect-btn" }),   // RJ 2026-11-24
-  tnbdashboard: () => ({ btn: "#tnb1-detect-btn" }),   // RJ 2026-11-25
+  // RJ 2026-11-25: TNB Dashboard - Refresh on the Summary re-scans all 4 cases, on a case tab just that case
+  tnbdashboard: () => {
+    const sub = hxActiveSub("data-tnbd-sub") || "summary";
+    if (sub === "summary") return { fn: () => window.tnbDashboard?.scanAll() };
+    return { btn: { nottransferred: "#tnb1-detect-btn", cancelled: "#tnb2-detect-btn", cycledisc: "#tcd-detect-btn", disctnb: "#dtnb-detect-btn" }[sub] };
+  },
   reprocessefts: () => ({ btn: "#efts-find-btn" }),   // RJ 2026-11-23 (re-runs Find)
   mptools: () => ({ btn: "#mpt-detect-btn" }),   // RJ 2026-11-18 (re-runs the last scan)   // RJ 2026-11-09 / 11-17 SR Quick FIX
   billingstats: () => ({ btn: "#bst-refresh-btn" }),   // RJ 2026-11-04 (page loads itself on open, like Anomalies Statistics)   // multi (RJ 2026-10-28) re-runs the campaign Scan
@@ -10627,14 +10641,14 @@ document.addEventListener("keydown", (e) => {
 // Refresh for that. Pages that need an input first (Workspace query,
 // Reading Validation NISS, DIFF DATES single NISS / batch, Bulk Checker)
 // are left alone; Wrong Bill and Anomalies Statistics already auto-load.
-const HX_AUTO_PAGES = new Set(["hierarchy", "tnbcycledisc", "wrongstuckhierarchy", "doubleitb",
-  "wrongbilledconsumption", "disconnectiontnb", "billissuance", "incorrectbillingperiod", "dateanomaly", "rebillingmonitor", "pendingsr",
-  "readingdiscrepancies", "fixbillingcampaign", "sanitarystatus", "tnbdashboard"]);
+const HX_AUTO_PAGES = new Set(["hierarchy", "wrongstuckhierarchy", "doubleitb",
+  "wrongbilledconsumption", "billissuance", "incorrectbillingperiod", "dateanomaly", "rebillingmonitor", "pendingsr",
+  "readingdiscrepancies", "fixbillingcampaign", "sanitarystatus"]);
 const hxAutoLoaded = new Set();
 let hxAutoTimer = null;
 
 function hxAutoKey(page) {
-  const sub = { dateanomaly: "data-da-sub", wrongstuckhierarchy: "data-wsh-sub", billissuance: "data-biss-sub", rebillingmonitor: "data-rbm-sub" }[page];
+  const sub = { dateanomaly: "data-da-sub", wrongstuckhierarchy: "data-wsh-sub", billissuance: "data-biss-sub", rebillingmonitor: "data-rbm-sub", tnbdashboard: "data-tnbd-sub" }[page];
   return sub ? `${page}:${hxActiveSub(sub) || ""}` : page;
 }
 

@@ -1525,6 +1525,8 @@ _OVERVIEW_COUNTERS = {
     "sanitarystatus_disccharged": lambda conn, user: sanitary_status_disc_charged_detect(user=user)["count"],
     # RJ 2026-11-25: TNB Dashboard tab 1 - the page's own detect (TNB bills not debt-transferred)
     "tnbdashboard_nottransferred": lambda conn, user: tnb_dashboard_not_transferred_detect(user=user)["count"],
+    # RJ 2026-11-25: TNB Dashboard tab 2 - headline = RCCS whose only contracts on that service are Cancelled
+    "tnbdashboard_cancelled": lambda conn, user: tnb_dashboard_cancelled_contract_detect(user=user)["only_cancelled_count"],
     # RJ 2026-11-04: Billing Statistics headline = distinct accounts with an INVOICED (ESTFAC0005,
     # page default status) Service bill in the current billing period. Not an anomaly - kept out
     # of the daily digest.
@@ -1544,9 +1546,9 @@ _DIGEST_LABELS = {
     "billissuance_case1": "Bill Issuance Case 1", "billissuance_case2": "Bill Issuance Case 2",
     "billissuance_case3": "Bill Issuance Case 3", "billissuance_case4": "Bill Issuance Case 4 (unclassified)",
     "billissuance_case5": "Bill Issuance Case 5 (Temp Stop PCAL)",
-    "incorrectbillingperiod": "Incorrect Billing Period", "tnbcycledisc": "TNB Cycle/Disc",
+    "incorrectbillingperiod": "Incorrect Billing Period", "tnbcycledisc": "TNB Dashboard - Cycle vs Disconnection",
     "wrongstuckhierarchy": "Wrong Stuck in Hierarchy ITB", "wrongstuckhierarchy_sanitary": "Wrong Stuck - Sanitary vs Water",
-    "disconnectiontnb": "Disconnection TNB", "doubleitb": "DOUBLE ITB (needs rebilling)",
+    "disconnectiontnb": "TNB Dashboard - TNB disconnections", "doubleitb": "DOUBLE ITB (needs rebilling)",
     "unusualsanitary": "Wrong Bill Case 1 - High Sanitary", "wrongbill_case2": "Wrong Bill Case 2",
     "wrongbill_case3": "Wrong Bill Case 3", "wrongbill_case4": "Wrong Bill Case 4",
     "rebillingmonitor": "Open rebilling activities",
@@ -1555,6 +1557,7 @@ _DIGEST_LABELS = {
     "pendingsr": "Pending Service Requests (JIRA)",
     "sanitarystatus_disccharged": "Sanitary - disconnected premise still on Sanitary Charges",   # RJ 2026-11-24
     "tnbdashboard_nottransferred": "TNB billed - debt not transferred to the destination account",   # RJ 2026-11-25
+    "tnbdashboard_cancelled": "TNB RCCS on a cancelled contract only",   # RJ 2026-11-25
     "srquickfix_incbp": "SR Incorrect Billing Period - readings lower than previous",  # RJ 2026-11-09
 }
 alerts.register_digest_counters({k: (_DIGEST_LABELS.get(k, k), fn) for k, fn in _OVERVIEW_COUNTERS.items()
@@ -5269,6 +5272,22 @@ def tnb_dashboard_not_transferred_detect(user: str = Depends(require_login)):
     return {"rows": rows, "count": len(rows), "elapsed_ms": res.elapsed_ms,
             "rccs_count": len({r.get("cod_ref_complaint") for r in rows}),
             "half_done": sum(1 for r in rows if r.get("half_done"))}
+
+
+@app.post("/api/tnb-dashboard/cancelled-contract/detect")
+def tnb_dashboard_cancelled_contract_detect(user: str = Depends(require_login)):
+    """Tab 2 (RJ 2026-11-25): TNB RCCS whose account + offered service has a Cancelled contract; headline =
+    RCCS whose only contracts on that service are Cancelled."""
+    conn = load_config().get_active_connection()
+    if not conn:
+        raise HTTPException(status_code=400, detail="No connection configured.")
+    try:
+        res = mssql.run_query(conn, tnb_dashboard.build_cancelled_contract_query())
+    except mssql.ConnectionError_ as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = tnb_dashboard.shape_cancelled_rows(_row_dicts(res))
+    return {"rows": rows, "count": len(rows), "elapsed_ms": res.elapsed_ms,
+            "only_cancelled_count": sum(1 for r in rows if r.get("only_cancelled"))}
 
 
 # Sanitary Status dashboard (RJ 2026-11-24) - app/core/sanitary_status.py. Read only.

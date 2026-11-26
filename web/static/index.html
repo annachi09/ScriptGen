@@ -120,14 +120,8 @@
         <button class="nav-item" data-page="readingvalidation" title="Reading Validation/Modif">
           <span class="nav-icon">📏</span><span class="nav-label">Reading Validation/Modif</span>
         </button>
-        <button class="nav-item" data-page="tnbcycledisc" title="TNB CYCLE/DISC Analysis">
-          <span class="nav-icon">🔌</span><span class="nav-label">TNB CYCLE/DISC Analysis</span>
-        </button>
         <button class="nav-item" data-page="wrongstuckhierarchy" title="Wrong Stuck in Hierarchy ITB">
           <span class="nav-icon">🪜</span><span class="nav-label">Wrong Stuck in Hierarchy ITB</span>
-        </button>
-        <button class="nav-item" data-page="disconnectiontnb" title="Disconnection TNB">
-          <span class="nav-icon">⛔</span><span class="nav-label">Disconnection TNB</span>
         </button>
         <button class="nav-item" data-page="doubleitb" title="DOUBLE ITB">
           <span class="nav-icon">👯</span><span class="nav-label">DOUBLE ITB</span>
@@ -1020,60 +1014,7 @@
       </section>
 
       <!-- ===== TNB CYCLE/DISC Analysis page ===== -->
-      <section class="page" id="page-tnbcycledisc">
-        <header class="page-header">
-          <h1>TNB CYCLE/DISC Analysis</h1>
-          <p class="page-subtitle">Sector supplies with a Cycle reading and a Disconnection reading on the same reading date, where at least one of the two is Terminated Not Billed — one row per pair, cycle and disconnection side by side.</p>
-        </header>
-
-        <div class="card">
-          <div class="card-header">
-            <h2>Cycle / Disconnection Pairs</h2>
-            <div class="card-header-actions">
-              <button type="button" class="btn btn-pill" id="tcd-detect-btn">🔍 Scan</button>
-              <button type="button" class="btn btn-pill" id="tcd-export-btn" disabled>⬇ Export CSV</button>
-            </div>
-          </div>
-          <div class="hint-text" id="tcd-summary">Click Scan to load (takes ~20–30s — it scans every reading).</div>
-          <div class="hx-dashboard" id="tcd-dash" hidden></div>
-
-          <div class="key-panel-row" id="tcd-filter-row" hidden>
-            <label class="field-label">Billing period</label>
-            <select id="tcd-filter-bp" class="text-input text-input-sm"><option value="">All</option></select>
-            <label class="field-label">NISS</label>
-            <input id="tcd-filter-niss" class="text-input text-input-sm" placeholder="NISS (partial ok)…" style="width:180px;" />
-            <label class="field-label">TNB side</label>
-            <select id="tcd-filter-tnb" class="text-input text-input-sm">
-              <option value="">Either</option>
-              <option value="cycle">Cycle is TNB</option>
-              <option value="disc">Disconnection is TNB</option>
-              <option value="both">Both TNB</option>
-            </select>
-            <label class="field-label">In contract</label>
-            <select id="tcd-filter-contract" class="text-input text-input-sm">
-              <option value="">All</option>
-              <option value="yes">Yes</option>
-              <option value="no">No</option>
-            </select>
-            <button type="button" class="btn btn-pill-sm" id="tcd-filter-clear-btn">✕ Clear filters</button>
-          </div>
-          <div class="hint-text" id="tcd-filtered-count"></div>
-
-          <div class="grid-wrap" style="margin-top:14px;">
-            <table class="data-grid" id="tcd-table">
-              <thead>
-                <tr class="tcd-group-row">
-                  <th colspan="4"></th>
-                  <th colspan="10" class="tcd-group-cycle">Cycle reading</th>
-                  <th colspan="10" class="tcd-group-disc">Disconnection reading</th>
-                </tr>
-                <tr class="tcd-col-row"></tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
+      <!-- RJ 2026-11-25: TNB CYCLE/DISC Analysis moved into TNB Dashboard (case 3) -->
 
       <!-- ===== Wrong Stuck in Hierarchy ITB page ===== -->
       <section class="page" id="page-wrongstuckhierarchy">
@@ -1821,46 +1762,7 @@
       </section>
 
       <!-- ===== Disconnection TNB page ===== -->
-      <section class="page" id="page-disconnectiontnb">
-        <header class="page-header">
-          <h1>Disconnection TNB</h1>
-          <p class="page-subtitle">Disconnection readings in Terminated Not Billed with a non-zero ready usage — ideally these should not be TNB. Each is shown with the nearest contracted service (by end date) on the same sector supply.</p>
-        </header>
-
-        <div class="card">
-          <div class="card-header">
-            <h2>TNB Disconnections</h2>
-            <div class="card-header-actions">
-              <button type="button" class="btn btn-pill" id="dtnb-detect-btn">🔍 Scan</button>
-              <button type="button" class="btn btn-pill" id="dtnb-export-btn" disabled>⬇ Export CSV</button>
-            </div>
-          </div>
-          <div class="hint-text" id="dtnb-summary">Click Scan to load.</div>
-          <div class="hx-dashboard" id="dtnb-dash" hidden></div>
-
-          <div class="key-panel-row" id="dtnb-filter-row" hidden>
-            <label class="field-label">Billing period</label>
-            <select id="dtnb-filter-bp" class="text-input text-input-sm"><option value="">All</option></select>
-            <label class="field-label">NISS</label>
-            <input id="dtnb-filter-niss" class="text-input text-input-sm" placeholder="NISS (partial ok)…" style="width:170px;" />
-            <label class="field-label">Contract status</label>
-            <select id="dtnb-filter-contract" class="text-input text-input-sm"><option value="">All</option></select>
-            <label class="field-label">Estimated</label>
-            <select id="dtnb-filter-est" class="text-input text-input-sm">
-              <option value="">All</option><option value="1">Yes</option><option value="0">No</option>
-            </select>
-            <button type="button" class="btn btn-pill-sm" id="dtnb-filter-clear-btn">✕ Clear filters</button>
-          </div>
-          <div class="hint-text" id="dtnb-filtered-count"></div>
-
-          <div class="grid-wrap" style="margin-top:14px;">
-            <table class="data-grid" id="dtnb-table">
-              <thead><tr></tr></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
+      <!-- RJ 2026-11-25: Disconnection TNB moved into TNB Dashboard (case 4) -->
 
       <!-- ===== Temp Dashboard (RJ 2026-10-11) ===== -->
       <section class="page" id="page-tempdashboard">
@@ -3365,19 +3267,46 @@
       <!-- ===== TNB Dashboard (RJ 2026-11-25) - tnbdashboard.js =====
            "create a new menu for TNB Dashboard, 1st tab is TNB billed but transferred transaction is not done" -->
       <section class="page" id="page-tnbdashboard">
-        <header class="page-header">
-          <h1>TNB Dashboard</h1>
-          <p class="page-subtitle">Termination-not-billed (TNB) RCCS: billed on the terminated account but the debt never reached the destination account. Read only.</p>
+        <header class="page-header tnbx-header">
+          <div>
+            <h1>TNB Dashboard</h1>
+            <p class="page-subtitle">Termination-not-billed (TNB) health: billing, debt transfer, contracts and readings - every TNB case in one place. Read only.</p>
+          </div>
+          <div class="tnbx-header-actions">
+            <span class="hint-text" id="tnbx-meta">Not scanned yet</span>
+            <button type="button" class="btn btn-pill" id="tnbx-scan-btn">↻ Scan all</button>
+          </div>
         </header>
-        <nav class="da-subnav" aria-label="TNB Dashboard cases">
-          <button type="button" class="da-subnav-btn is-active" data-tnbd-sub="nottransferred">Billed, debt not transferred</button>
+        <nav class="da-subnav" aria-label="TNB Dashboard">
+          <button type="button" class="da-subnav-btn is-active" data-tnbd-sub="summary" title="Headline numbers of the four TNB cases and what to act on first">Summary</button>
+          <button type="button" class="da-subnav-btn" data-tnbd-sub="nottransferred">Case 1 · Debt not transferred</button>
+          <button type="button" class="da-subnav-btn" data-tnbd-sub="cancelled">Case 2 · Cancelled contract</button>
+          <button type="button" class="da-subnav-btn" data-tnbd-sub="cycledisc">Case 3 · Cycle vs Disconnection</button>
+          <button type="button" class="da-subnav-btn" data-tnbd-sub="disctnb">Case 4 · TNB disconnections</button>
         </nav>
-        <div class="da-subpage is-active" data-tnbd-sub="nottransferred">
+
+        <!-- RJ 2026-11-25: Summary - headline KPIs, one card per case, Electricity vs Water, priority list -->
+        <div class="da-subpage is-active" data-tnbd-sub="summary" id="tnbx-summary">
+          <div class="tnbx-hero" id="tnbx-hero"></div>
+          <div class="tnbx-section-title">Cases</div>
+          <div class="tnbx-cases" id="tnbx-cases"></div>
+          <div class="tnbx-grid2">
+            <div class="card tnbx-panel">
+              <div class="card-header"><h2>Act on first</h2><span class="hint-text">charged twice → still pending → stuck on cancelled contract</span></div>
+              <div id="tnbx-priority"></div>
+            </div>
+            <div class="card tnbx-panel">
+              <div class="card-header"><h2>Electricity vs Water</h2></div>
+              <div id="tnbx-split"></div>
+            </div>
+          </div>
+        </div>
+        <div class="da-subpage" data-tnbd-sub="nottransferred">
           <div class="biss-info-banner">
-            ℹ️ RCCS type <strong>5164COMTYP</strong> (Billing of Termination not billed), status <strong>Solved</strong>, with a destination
-            account (TNBDESTACC), and a <strong>Fraud Off Cycle (TIPFAC0013)</strong> bill on the terminated account with amount &gt; 0 -
+            ℹ️ RCCS type <strong>5164COMTYP / 5163COMTYP</strong> (Electricity / Water - Billing of Termination not billed), status <strong>Solved</strong>, with a destination
+            account (TNBDESTACC), and a <strong>Fraud Off Cycle (TIPFAC0013)</strong> bill on the terminated account with amount &gt; 0 (each bill belongs to the latest TNB RCCS opened before it) -
             but that bill has <strong>no Credit Allocation (TIMOPA0006)</strong> collection, i.e. the Debt Transfer never moved it to the
-            destination (a done transfer credits the source bill and creates the same amount as an Off-cycle TFGEN10027 bill on the destination).
+            destination (a done transfer puts a negative Off-cycle TFGEN10027 credit on the source, applies it to the TNB bill as Credit Allocation, and creates the same amount as an Off-cycle TFGEN10027 bill on the destination).
           </div>
           <div class="card">
             <div class="card-header"><h2>TNB billed, debt not transferred</h2>
@@ -3386,7 +3315,7 @@
                 <button type="button" class="btn btn-pill" id="tnb1-detect-btn">🔍 Scan</button>
               </div>
             </div>
-            <div class="hint-text" id="tnb1-meta">Scanning on open…</div>
+            <div class="hint-text" id="tnb1-meta">Runs with Scan all (Summary) - or Scan this case.</div>
             <div id="tnb1-kpis"></div>
             <div class="key-panel-row" style="gap:10px;flex-wrap:wrap;align-items:center;">
               <input type="text" id="tnb1-search" class="text-input text-input-sm" placeholder="Filter: RCCS, account, destination, bill" style="width:280px;" />
@@ -3401,6 +3330,130 @@
               </table>
             </div>
           </div>
+        </div>
+              <!-- RJ 2026-11-25: tab 2 "TNB on Cancelled contract" -->
+        <div class="da-subpage" data-tnbd-sub="cancelled">
+          <div class="biss-info-banner">
+            ℹ️ TNB RCCS (5164COMTYP Electricity / 5163COMTYP Water, <strong>any status</strong>) whose account (ID_ACCOUNT = ID_PAYMENT_FORM)
+            has a <strong>Cancelled (ESTSC00005)</strong> contracted service for the TNB's offered service (Electricity = 1, Water = 19).
+            <strong>Cancelled contract only</strong> = every contract on that service is Cancelled; the other group also has an Active /
+            Terminated contract (there the TNB is normally billed on that one). The TNB status is the RCCS status (= its workflow step).
+          </div>
+          <div class="card">
+            <div class="card-header"><h2>TNB on cancelled contract</h2>
+              <div class="card-header-actions">
+                <button type="button" class="btn btn-pill-sm" id="tnb2-export-btn" disabled>⬇ Export CSV</button>
+                <button type="button" class="btn btn-pill" id="tnb2-detect-btn">🔍 Scan</button>
+              </div>
+            </div>
+            <div class="hint-text" id="tnb2-meta">Runs with Scan all (Summary) - or Scan this case.</div>
+            <div id="tnb2-kpis"></div>
+            <div class="key-panel-row" style="gap:10px;flex-wrap:wrap;align-items:center;">
+              <input type="text" id="tnb2-search" class="text-input text-input-sm" placeholder="Filter: RCCS, account, contract, bill" style="width:260px;" />
+              <select id="tnb2-status" class="text-input text-input-sm" style="width:auto;" title="TNB status (RCCS workflow step)"><option value="">All TNB statuses</option></select>
+              <button type="button" class="btn btn-pill-sm" id="tnb2-clear" hidden>✕ Clear filters</button>
+              <span class="hint-text" id="tnb2-shown"></span>
+            </div>
+            <div class="grid-wrap" style="margin-top:12px;">
+              <table class="data-grid" id="tnb2-table">
+                <thead><tr><th><input type="checkbox" id="tnb2-check-all" title="Select all shown" /></th><th>RCCS</th><th>TNB status</th><th>Account</th>
+                  <th>Cancelled contract(s)</th><th>Other contracts (same service)</th><th>TNB bill</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      
+        <!-- RJ 2026-11-25: case 3 = the former TNB CYCLE/DISC Analysis menu (logic unchanged, app.js tcd*) -->
+        <div class="da-subpage" data-tnbd-sub="cycledisc">
+          <div class="biss-info-banner">ℹ️ Sector supplies with a Cycle reading and a Disconnection reading on the same reading date, where at least one of the two is Terminated Not Billed — one row per pair, cycle and disconnection side by side.</div>
+        <div class="card">
+          <div class="card-header">
+            <h2>Cycle / Disconnection Pairs</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="tcd-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="tcd-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="tcd-summary">Click Scan to load (takes ~20–30s — it scans every reading).</div>
+          <div class="hx-dashboard" id="tcd-dash" hidden></div>
+
+          <div class="key-panel-row" id="tcd-filter-row" hidden>
+            <label class="field-label">Billing period</label>
+            <select id="tcd-filter-bp" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">NISS</label>
+            <input id="tcd-filter-niss" class="text-input text-input-sm" placeholder="NISS (partial ok)…" style="width:180px;" />
+            <label class="field-label">TNB side</label>
+            <select id="tcd-filter-tnb" class="text-input text-input-sm">
+              <option value="">Either</option>
+              <option value="cycle">Cycle is TNB</option>
+              <option value="disc">Disconnection is TNB</option>
+              <option value="both">Both TNB</option>
+            </select>
+            <label class="field-label">In contract</label>
+            <select id="tcd-filter-contract" class="text-input text-input-sm">
+              <option value="">All</option>
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
+            </select>
+            <button type="button" class="btn btn-pill-sm" id="tcd-filter-clear-btn">✕ Clear filters</button>
+          </div>
+          <div class="hint-text" id="tcd-filtered-count"></div>
+
+          <div class="grid-wrap" style="margin-top:14px;">
+            <table class="data-grid" id="tcd-table">
+              <thead>
+                <tr class="tcd-group-row">
+                  <th colspan="4"></th>
+                  <th colspan="10" class="tcd-group-cycle">Cycle reading</th>
+                  <th colspan="10" class="tcd-group-disc">Disconnection reading</th>
+                </tr>
+                <tr class="tcd-col-row"></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      
+        </div>
+
+        <!-- RJ 2026-11-25: case 4 = the former Disconnection TNB menu (logic unchanged, app.js dtnb*) -->
+        <div class="da-subpage" data-tnbd-sub="disctnb">
+          <div class="biss-info-banner">ℹ️ Disconnection readings in Terminated Not Billed with a non-zero ready usage — ideally these should not be TNB. Each is shown with the nearest contracted service (by end date) on the same sector supply.</div>
+        <div class="card">
+          <div class="card-header">
+            <h2>TNB Disconnections</h2>
+            <div class="card-header-actions">
+              <button type="button" class="btn btn-pill" id="dtnb-detect-btn">🔍 Scan</button>
+              <button type="button" class="btn btn-pill" id="dtnb-export-btn" disabled>⬇ Export CSV</button>
+            </div>
+          </div>
+          <div class="hint-text" id="dtnb-summary">Click Scan to load.</div>
+          <div class="hx-dashboard" id="dtnb-dash" hidden></div>
+
+          <div class="key-panel-row" id="dtnb-filter-row" hidden>
+            <label class="field-label">Billing period</label>
+            <select id="dtnb-filter-bp" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">NISS</label>
+            <input id="dtnb-filter-niss" class="text-input text-input-sm" placeholder="NISS (partial ok)…" style="width:170px;" />
+            <label class="field-label">Contract status</label>
+            <select id="dtnb-filter-contract" class="text-input text-input-sm"><option value="">All</option></select>
+            <label class="field-label">Estimated</label>
+            <select id="dtnb-filter-est" class="text-input text-input-sm">
+              <option value="">All</option><option value="1">Yes</option><option value="0">No</option>
+            </select>
+            <button type="button" class="btn btn-pill-sm" id="dtnb-filter-clear-btn">✕ Clear filters</button>
+          </div>
+          <div class="hint-text" id="dtnb-filtered-count"></div>
+
+          <div class="grid-wrap" style="margin-top:14px;">
+            <table class="data-grid" id="dtnb-table">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      
         </div>
       </section>
 

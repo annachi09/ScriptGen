@@ -11,9 +11,9 @@ icons and the active bar.
 | Section | Colour | Menus |
 |---|---|---|
 | (top) | indigo | Overview |
-| Monitor (read only) | sky `#38bdf8` | Anomaly Statistics, Billing Statistics, Temp Dashboard, Pending Service Requests, Rebilling Monitor, Sanitary Status, TNB Dashboard |
+| Monitor (read only) | sky `#38bdf8` | Anomaly Statistics, Billing Statistics, Temp Dashboard, Pending Service Requests, Rebilling Monitor, Sanitary Status, TNB Dashboard (Summary + 4 TNB cases, incl. the former TNB Cycle & Disconnection / TNB Disconnections menus) |
 | Billing fixes | amber `#f59e0b` | Bill Issuance Validator, Double ITBs, Wrong Bills, Wrong Billed Consumption, Incorrect Billing Period, Fix Billing Campaign 2026 |
-| Reading fixes | emerald `#34d399` | Diff Dates Anomalies, Hierarchy Analysis, Reading Validation, TNB Cycle & Disconnection, Stuck Hierarchy ITBs, TNB Disconnections, Reading Discrepancies |
+| Reading fixes | emerald `#34d399` | Diff Dates Anomalies, Hierarchy Analysis, Reading Validation, Stuck Hierarchy ITBs, Reading Discrepancies |
 | Quick fixes | violet `#a78bfa` | SR Quick Fix, MP Tools, Reprocess EFTS |
 | Lookup & SQL | indigo `#818cf8` | Workspace, Script, AI Assist, Bulk Checker |
 | Admin & help | slate `#94a3b8` | History, Dashboard, Documentation, Tools, Settings |

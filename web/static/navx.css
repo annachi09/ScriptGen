@@ -456,3 +456,67 @@
 /* RJ 2026-11-23 Reprocess EFTS (efts.js) */
 #page-reprocessefts .efts-preview { max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 #page-reprocessefts .efts-resp { margin: 4px 0 0; max-width: 420px; max-height: 120px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: 11px; opacity: .85; }
+
+/* =====================================================================
+   RJ 2026-11-25 TNB Dashboard - Summary page (tnbdashboard.js). Theme variables only, so light / dark both work.
+   ===================================================================== */
+#page-tnbdashboard { --tnbx-ok: #10b981; --tnbx-warn: #f59e0b; --tnbx-bad: #ef4444; --tnbx-info: #0ea5e9; --tnbx-neutral: #94a3b8; }
+#page-tnbdashboard [data-tone="ok"] { --t: var(--tnbx-ok); }
+#page-tnbdashboard [data-tone="warn"] { --t: var(--tnbx-warn); }
+#page-tnbdashboard [data-tone="bad"] { --t: var(--tnbx-bad); }
+#page-tnbdashboard [data-tone="info"] { --t: var(--tnbx-info); }
+#page-tnbdashboard [data-tone="neutral"] { --t: var(--tnbx-neutral); }
+.tnbx-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.tnbx-header-actions { display: flex; align-items: center; gap: 12px; }
+.tnbx-section-title { margin: 26px 0 10px; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-secondary); }
+
+/* headline KPIs */
+.tnbx-hero { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 6px; }
+.tnbx-kpi { position: relative; display: flex; flex-direction: column; gap: 6px; text-align: left; padding: 18px 20px 16px; cursor: pointer;
+  background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; box-shadow: var(--card-shadow); overflow: hidden;
+  transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease; color: var(--text-primary); font: inherit; }
+.tnbx-kpi::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--t); }
+.tnbx-kpi::after { content: ""; position: absolute; right: -40px; top: -40px; width: 120px; height: 120px; border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--t) 18%, transparent), transparent 70%); pointer-events: none; }
+.tnbx-kpi:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--t) 55%, var(--card-border)); }
+.tnbx-kpi-label { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
+.tnbx-kpi-value { font-size: 30px; font-weight: 750; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.tnbx-kpi-sub { font-size: 12px; color: var(--text-muted); }
+
+/* case cards */
+.tnbx-cases { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; }
+.tnbx-case { display: flex; flex-direction: column; gap: 8px; padding: 16px 18px; background: var(--card-bg); border: 1px solid var(--card-border);
+  border-top: 3px solid var(--t); border-radius: 14px; box-shadow: var(--card-shadow); }
+.tnbx-case header { display: flex; align-items: center; justify-content: space-between; }
+.tnbx-case-n { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-muted); }
+.tnbx-case h3 { margin: 0; font-size: 15.5px; font-weight: 700; color: var(--text-primary); }
+.tnbx-case p { margin: 0; font-size: 12.5px; color: var(--text-secondary); min-height: 32px; }
+.tnbx-case-big { font-size: 28px; font-weight: 750; letter-spacing: -.02em; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.tnbx-case-big small { font-size: 13px; font-weight: 600; color: var(--text-muted); letter-spacing: 0; }
+.tnbx-case-body { display: flex; flex-direction: column; gap: 5px; flex: 1; }
+.tnbx-stat { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; padding: 3px 0; border-bottom: 1px dashed var(--card-border); color: var(--text-secondary); }
+.tnbx-stat b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.tnbx-stat[data-tone] b { color: var(--t); }
+.tnbx-open { align-self: flex-start; margin-top: 6px; }
+.tnbx-chip { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700;
+  color: var(--t); background: color-mix(in srgb, var(--t) 14%, transparent); }
+.tnbx-bar { display: flex; height: 7px; margin-top: 8px; border-radius: 999px; overflow: hidden; background: color-mix(in srgb, var(--text-muted) 18%, transparent); }
+.tnbx-bar span { background: var(--t); }
+.tnbx-bar span + span { box-shadow: inset 2px 0 0 var(--card-bg); }
+.tnbx-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11.5px; color: var(--text-secondary); }
+.tnbx-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; background: var(--t); }
+.tnbx-legend b { color: var(--text-primary); font-weight: 650; }
+
+/* lower panels */
+.tnbx-grid2 { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: 14px; margin-top: 18px; }
+@media (max-width: 1100px) { .tnbx-grid2 { grid-template-columns: 1fr; } }
+.tnbx-panel .card-header { align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.tnbx-mini { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.tnbx-mini th { text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--text-muted);
+  padding: 6px 8px; border-bottom: 1px solid var(--card-border); }
+.tnbx-mini td { padding: 7px 8px; border-bottom: 1px solid color-mix(in srgb, var(--card-border) 60%, transparent); color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.tnbx-mini tbody tr:hover td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.tnbx-mini td:not(:first-child) { white-space: nowrap; }
+.tnbx-prio td:last-child { white-space: normal; color: var(--text-secondary); }
+.tnbx-prio a { color: var(--accent); font-weight: 600; text-decoration: none; }
+.tnbx-prio a:hover { text-decoration: underline; }
