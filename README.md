@@ -5642,6 +5642,19 @@ change" toggle is gone (every row needs it). `period_days_after` added in `shape
   KPIs "Line Anomalous · Lacks Data" / "Line Disputed · not run yet", "Line" pill per row. Live 16:05: 17 bills (16
   Disputed lines + 1 Anomalous) after RJ's 15:20 fix of the earlier ones.
 
+### Uniform design + speed (RJ 2026-11-27)
+
+RJ: "make our dashboard and all menus having uniform design, i like the one in bills statistics, also the scripts make
+it standard. and optimize all" (-> shared theme first; scripts = faster queries; optimize = page load & app speed).
+- `web/static/sg-theme.css` (loaded last) + navx.js `decorateHeaders`: every page header is the Billing Statistics
+  hero (gradient, group eyebrow, title, purpose, white Refresh), cards / KPI tiles / panels / tables / buttons in the same
+  style - including rbo-*, hx-*, tnbx-*, overview and settings widgets. CSS only; Billing Statistics unchanged.
+- Overview counters cached 10 min per card (`_OVERVIEW_TTL_S`, `?fresh=1` on Refresh, one scan in flight per card);
+  Fix Billing card reads its saved result (was 31 s on every open); static files `no-cache` + ETag (304) instead of
+  no-store; GZip >= 1 KB; counter requests quiet.
+- TNB staging transfer pairs via #pos (positive TFGEN10027 once, matched in tempdb): 9.4 s -> 0.65 s; TNB Case 1
+  detect 9.6 s -> 2.1 s, identical rows. Log: logs/2026-11-27_uniform-design-and-speed.md.
+
 ### Today's pages - info collapsed, Search screen, new KPI strip (RJ 2026-11-26)
 
 RJ: "for all the recent changes you did today, why the info is show, remeber we wanted it to be minimised as default,

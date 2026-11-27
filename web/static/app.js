@@ -991,7 +991,7 @@ function overviewRenderTrend(stats) {
   });
 }
 
-async function loadOverview() {
+async function loadOverview(fresh = false) {
   const grid = $("#overview-cards");
   const refreshBtn = $("#overview-refresh-btn");
   const wasEmpty = !grid.children.length;
@@ -1016,7 +1016,8 @@ async function loadOverview() {
         while (queue.length && gen === overviewGen) {
           const c = queue.shift();
           try {
-            const r = await api(`/api/overview/count/${encodeURIComponent(c.key)}`);
+            // RJ 2026-11-27: counts come from the server cache (10 min) unless Refresh was clicked
+            const r = await api(`/api/overview/count/${encodeURIComponent(c.key)}${fresh ? "?fresh=1" : ""}`, { quiet: true });
             overviewLive[c.key] = r.count ?? null;
             if (r.error) overviewLiveErr[c.key] = r.error; else delete overviewLiveErr[c.key];
           } catch (err) {
@@ -1039,7 +1040,7 @@ async function loadOverview() {
     if (refreshBtn && gen === overviewGen) { refreshBtn.disabled = false; refreshBtn.textContent = "🔄 Refresh"; }
   }
 }
-$("#overview-refresh-btn")?.addEventListener("click", () => loadOverview());
+$("#overview-refresh-btn")?.addEventListener("click", () => loadOverview(true));
 
 // ---------------- Nav ----------------
 $$(".nav-item[data-page]").forEach((btn) => {

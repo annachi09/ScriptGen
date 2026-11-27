@@ -140,13 +140,21 @@ JOIN OUC_ADMIN.GCCB_ONLINE_COLLECTION oc WITH (NOLOCK) ON oc.ID_ONLINE_COLLECTIO
 
 -- every transfer credit (negative TFGEN10027) on those accounts + where its counterpart (+same amount, created right
 -- after it -> next ID_BILLs) landed
+-- RJ 2026-11-27 (optimize): the counterpart lookup probed GCCOM_BILL once per credit (~2,600 random seeks, 9.4 s);
+-- every positive TFGEN10027 receipt (111k, index on BILL_TYPE, 0.2 s) is now loaded once into #pos and the same
+-- "next ID_BILLs" match runs in tempdb - 0.65 s, identical pairs (checked live: 2,570 / 0 differences).
+IF OBJECT_ID('tempdb..#pos') IS NOT NULL DROP TABLE #pos;
+SELECT d.ID_BILL, d.ID_PAYMENT_FORM, d.TOTAL_AMOUNT INTO #pos
+FROM GCCOM_BILL d WITH (NOLOCK) WHERE d.BILL_TYPE = 'TFGEN10027' AND d.TOTAL_AMOUNT > 0;
+CREATE CLUSTERED INDEX ix_pos ON #pos (ID_BILL);
 SELECT s.ID_PAYMENT_FORM AS ID_ACCOUNT, s.ID_BILL AS CR_BILL, s.TOTAL_AMOUNT AS CR_AMT, s.CREATE_DATE AS CR_AT,
        d.ID_BILL AS TO_BILL, d.ID_PAYMENT_FORM AS TO_PF INTO #px
 FROM (SELECT DISTINCT ID_ACCOUNT FROM #tb) acc
 JOIN GCCOM_BILL s WITH (NOLOCK) ON s.ID_PAYMENT_FORM = acc.ID_ACCOUNT AND s.BILL_TYPE = 'TFGEN10027' AND s.TOTAL_AMOUNT < 0
-OUTER APPLY (SELECT TOP 1 d.ID_BILL, d.ID_PAYMENT_FORM FROM GCCOM_BILL d WITH (NOLOCK)
-             WHERE d.ID_BILL > s.ID_BILL AND d.ID_BILL <= s.ID_BILL + 50 AND d.BILL_TYPE = 'TFGEN10027'
+OUTER APPLY (SELECT TOP 1 d.ID_BILL, d.ID_PAYMENT_FORM FROM #pos d
+             WHERE d.ID_BILL > s.ID_BILL AND d.ID_BILL <= s.ID_BILL + 50
                AND d.TOTAL_AMOUNT = -s.TOTAL_AMOUNT AND d.ID_PAYMENT_FORM <> s.ID_PAYMENT_FORM ORDER BY d.ID_BILL) d;
+DROP TABLE #pos;
 """
 
 

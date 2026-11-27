@@ -42,8 +42,14 @@ RJ 2026-11-26 ("remember we wanted it to be minimised as default, also why no se
   Refresh still click it). The endpoint takes an optional body `{ inputs }` (`FindRequest`, parsed by
   `app/core/search_inputs.py`) and narrows the scan in SQL; the response echoes `searched`, the meta line says
   `sgStd.scopeNote(searched)` ("Detect all" / "Search · n values").
-- **KPI cards = one joined strip** (`sgStd.kpis`): equal-height cells, dot + uppercase label, big number, sub line, tone bar
-  on hover / active; first cell is the headline (number in its tone).
+- **KPI cards** (`sgStd.kpis`): since 2026-11-27 separate Billing Statistics cards (sg-theme.css) - left colour bar,
+  tinted icon dot, uppercase label, big number, sub line; click = filter, active card tinted in its tone.
+
+RJ 2026-11-27 ("uniform design, i like the one in bills statistics"): **web/static/sg-theme.css** (loaded last) gives
+every page the Billing Statistics look - hero header with group eyebrow + purpose (navx.js `decorateHeaders`), 16px
+cards, KPI cards with a left colour bar, sticky uppercase table headers, pill buttons. New pages get it for free: use
+`.page-header > h1`, `.card`, `sgStd.kpis` / `.kpi-card`, `.data-grid` inside `.grid-wrap`. Don't add page-specific
+colours / radii - extend sg-theme.css instead.
 
 ## 3. Script rules (all generators)
 

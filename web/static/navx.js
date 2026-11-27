@@ -432,6 +432,31 @@
     });
   }
 
+  // ---------------- page headers = Billing Statistics hero (RJ 2026-11-27, sg-theme.css) ----------------
+  // Adds the section eyebrow (menu group + its colour) and, when the page has no subtitle, the menu's one-line
+  // purpose (MENU_DESC) so every header reads the same: GROUP · Title · what it does.
+  function decorateHeaders() {
+    $$(".page > .page-header").forEach((h) => {
+      if (h.dataset.sgHero) return;
+      const page = (h.parentElement.id || "").replace(/^page-/, "");
+      if (!page || page === "billingstats") return;
+      h.dataset.sgHero = "1";
+      const g = GROUPS.find((x) => x[0] === groupOf(page));
+      h.style.setProperty("--grp", groupColor(page));
+      const host = h.querySelector("h1")?.parentElement || h;
+      const eb = document.createElement("span");
+      eb.className = "sg-eyebrow";
+      eb.innerHTML = `<i></i>${esc(page === "overview" ? "Home" : (g ? g[1] : "ScriptGen"))}`;
+      host.insertBefore(eb, host.querySelector("h1") || host.firstChild);
+      if (!h.querySelector(".page-subtitle") && MENU_DESC[page]) {
+        const p = document.createElement("p");
+        p.className = "sg-hero-desc";
+        p.textContent = MENU_DESC[page];
+        (host.querySelector("h1") || eb).after(p);
+      }
+    });
+  }
+
   // ---------------- refresh ----------------
   let timer = null;
   function refresh() {
@@ -442,7 +467,7 @@
       const fo = $("#fav-only-btn"), sb = $(".navx-search");   // created later by app.js - star icon in the search bar
       if (fo && sb && fo.parentElement !== sb) sb.insertBefore(fo, sb.querySelector("kbd"));
       if (fo) { const on = fo.classList.contains("is-active"); if (fo.textContent !== (on ? "★" : "☆")) fo.textContent = on ? "★" : "☆"; }
-      pinFavorites(); renderBadges(); applyGroups(); decorateTabs();
+      pinFavorites(); renderBadges(); applyGroups(); decorateTabs(); decorateHeaders();
       if ($("#navx-search")?.value) renderResults();
     }, 60);
   }

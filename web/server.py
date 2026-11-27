@@ -159,7 +159,9 @@ app.add_middleware(
 # RJ 2026-10-21: FIX BILLING now returns every account (~163k expected) - compress big JSON
 # responses (repetitive keys shrink ~10x) so the transfer is not the bottleneck.
 from starlette.middleware.gzip import GZipMiddleware
-app.add_middleware(GZipMiddleware, minimum_size=50_000)
+# RJ 2026-11-27 ("optimize all" -> page load & app speed): compress everything >= 1 KB (JS / CSS / HTML too, not
+# only the big JSON) - app.js 749 KB -> ~180 KB on the wire, the other 25 static files ~4x smaller.
+app.add_middleware(GZipMiddleware, minimum_size=1_000)
 
 
 @app.middleware("http")
@@ -181,8 +183,15 @@ async def _no_cache_static_assets(request, call_next):
     users on a slow link.
     """
     response = await call_next(request)
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
+    # RJ 2026-11-27 (page load & app speed): static files are now "no-cache" + ETag / Last-Modified (StaticFiles sets
+    # them) - the browser keeps its copy but asks every time, and the server answers 304 Not Modified when the file
+    # did not change. Same "always the newest code" guarantee, without re-downloading ~1.3 MB on every reload.
+    # API responses stay no-store.
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    else:
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 
@@ -1521,7 +1530,9 @@ _OVERVIEW_COUNTERS = {
     "rebillingmonitor": lambda conn, user: rebilling_monitor_open(user=user)["count"],
     # RJ 2026-10-21: cards for the menus added since the Overview was built
     "readingdiscrepancies": lambda conn, user: reading_discrepancies_pending(user=user)["count"],
-    "fixbillingcampaign": lambda conn, user: fix_billing_campaign_detect(FixBillingCampaignRequest(), user=user)["main_count"],  # RJ 2026-10-29: = Campaign tab default (successful requests, no cancelled)
+    # RJ 2026-11-27 (optimize): the card reads the menu's saved last result (cache "prefer", refreshed by its Scan
+    # button and the idle background job) - it re-ran the 50k-row campaign query (31 s) on every app open.
+    "fixbillingcampaign": lambda conn, user: fix_billing_campaign_detect(FixBillingCampaignRequest(cache="prefer"), user=user)["main_count"],  # RJ 2026-10-29: = Campaign tab default (successful requests, no cancelled)
     # RJ 2026-10-09: pending service requests with a JIRA comment
     "pendingsr": lambda conn, user: pending_service_request_detect(user=user)["count"],
     # RJ 2026-11-24: Sanitary Status tab 1 - the page's own detect, same number the page leads with
@@ -1574,22 +1585,45 @@ alerts.register_digest_counters({k: (_DIGEST_LABELS.get(k, k), fn) for k, fn in 
                                  if not k.startswith("anomstats") and k != "billingstats"})
 
 
+# RJ 2026-11-27 ("optimize all" -> page load & app speed): every app open / reload ran ~25 full detect scans for the
+# Overview cards (Wrong Bill case 3 alone 10.5 s). Counts are now cached per connection + card for
+# _OVERVIEW_TTL_S; concurrent requests for the same card wait for the one scan in flight instead of starting
+# another. ?fresh=1 (the Overview's Refresh button) forces a new scan. Errors are never cached.
+import threading as _ov_threading
+_OVERVIEW_TTL_S = 600
+_overview_cache: dict = {}            # (conn name, key) -> (ts, payload)
+_overview_locks: dict = {}
+_overview_locks_guard = _ov_threading.Lock()
+
+
+def _overview_lock(k):
+    with _overview_locks_guard:
+        return _overview_locks.setdefault(k, _ov_threading.Lock())
+
+
 @app.get("/api/overview/count/{key}")
-def overview_count(key: str, user: str = Depends(require_login)):
+def overview_count(key: str, fresh: int = 0, user: str = Depends(require_login)):
     fn = _OVERVIEW_COUNTERS.get(key)
     if fn is None:
         raise HTTPException(status_code=404, detail=f"Unknown overview card '{key}'.")
     conn = load_config().get_active_connection()
     if not conn:
         return {"key": key, "count": None, "error": "No connection configured."}
-    t0 = time.time()
-    try:
-        count = fn(conn, user)
-    except HTTPException as exc:
-        return {"key": key, "count": None, "error": str(exc.detail)}
-    except Exception as exc:  # noqa: BLE001 - a failing card must not break the page
-        return {"key": key, "count": None, "error": str(exc)}
-    return {"key": key, "count": count, "elapsed_ms": int((time.time() - t0) * 1000)}
+    ck = (getattr(conn, "name", "") or str(id(conn)), key)
+    with _overview_lock(ck):
+        hit = _overview_cache.get(ck)
+        if hit and not fresh and time.time() - hit[0] < _OVERVIEW_TTL_S:
+            return {**hit[1], "cached": True, "age_s": int(time.time() - hit[0])}
+        t0 = time.time()
+        try:
+            count = fn(conn, user)
+        except HTTPException as exc:
+            return {"key": key, "count": None, "error": str(exc.detail)}
+        except Exception as exc:  # noqa: BLE001 - a failing card must not break the page
+            return {"key": key, "count": None, "error": str(exc)}
+        payload = {"key": key, "count": count, "elapsed_ms": int((time.time() - t0) * 1000)}
+        _overview_cache[ck] = (time.time(), payload)
+        return {**payload, "cached": False, "age_s": 0}
 
 
 # ---------------------------------------------------------------------

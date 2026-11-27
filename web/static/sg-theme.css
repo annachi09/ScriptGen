@@ -1,0 +1,185 @@
+/* =====================================================================================================
+   ScriptGen - shared page theme (RJ 2026-11-27): "make our dashboard and all menus having uniform design, i like
+   the one in bills statistics" -> "shared theme first, then pages".
+   Loaded LAST. Gives every page the Billing Statistics look (billingstats.css) without touching its markup:
+     - page header  -> gradient hero (group eyebrow + title + one-line purpose + white Refresh pill)
+     - cards        -> 16px radius, soft shadow, bold titles
+     - KPI cards    -> .kpi-card / .sg-kpi / .tnbx / .rbo cards = Billing Statistics KPI (left colour bar, icon tint)
+     - in-page tabs -> rounded cards with an accent ring when active
+     - filter rows  -> rounded "filter bar" panel
+     - tables       -> Billing Statistics matrix (uppercase header, sticky, soft hover)
+     - buttons / inputs -> pill buttons, 10px rounded inputs
+   The eyebrow + purpose line come from navx.js (group label + MENU_DESC). Billing Statistics itself is skipped.
+   Uses the app tokens (--card-bg, --card-border, --text-*, --accent) so light / dark both work.
+   ===================================================================================================== */
+:root {
+  --sgt-grad: linear-gradient(120deg, #4f46e5 0%, #7c3aed 38%, #0ea5e9 100%);
+  --sgt-radius: 16px;
+  --sgt-soft: color-mix(in srgb, var(--accent, #4f46e5) 7%, var(--card-bg, #fff));
+  --sgt-shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 10px 26px -18px rgba(15, 23, 42, .30);
+}
+
+/* ---------- page header = hero ---------- */
+.page:not(#page-billingstats) > .page-header {
+  position: relative; overflow: hidden; margin: 0 0 16px; padding: 22px 26px 20px; border-radius: 18px;
+  background: var(--sgt-grad); color: #fff; box-shadow: 0 18px 40px -20px rgba(79, 70, 229, .55);
+  min-height: 0;
+}
+.page:not(#page-billingstats) > .page-header::after {
+  content: ""; position: absolute; right: -80px; top: -130px; width: 340px; height: 340px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(255,255,255,.22), rgba(255,255,255,0) 70%); pointer-events: none;
+}
+.page:not(#page-billingstats) > .page-header > * { position: relative; z-index: 1; }
+.page:not(#page-billingstats) > .page-header h1 { margin: 2px 0 4px; font-size: 26px; font-weight: 800; letter-spacing: -.02em; color: #fff; line-height: 1.15; }
+.page:not(#page-billingstats) > .page-header .page-subtitle,
+.page:not(#page-billingstats) > .page-header .sg-hero-desc { margin: 0; max-width: 760px; font-size: 13.5px; color: rgba(255,255,255,.9); }
+.page:not(#page-billingstats) > .page-header .sg-eyebrow {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+  color: rgba(255,255,255,.88);
+}
+.page:not(#page-billingstats) > .page-header .sg-eyebrow i { width: 8px; height: 8px; border-radius: 50%; background: var(--grp, #fff);
+  box-shadow: 0 0 0 3px rgba(255,255,255,.25); }
+.page:not(#page-billingstats) > .page-header .hint-text,
+.page:not(#page-billingstats) > .page-header label,
+.page:not(#page-billingstats) > .page-header small { color: rgba(255,255,255,.85); }
+.page:not(#page-billingstats) > .page-header details.hx-hint > summary { background: rgba(255,255,255,.16); border-color: rgba(255,255,255,.35); color: #fff; }
+.page:not(#page-billingstats) > .page-header details.hx-hint[open] { background: rgba(15,23,42,.18); border-radius: 12px; padding: 6px 10px; }
+.page:not(#page-billingstats) > .page-header .hx-refresh-btn {
+  top: 20px; right: 22px; background: #fff; color: #4338ca; border: 0; box-shadow: 0 6px 16px -8px rgba(0,0,0,.45);
+}
+.page:not(#page-billingstats) > .page-header.hx-has-refresh { padding-right: 150px; }
+.page:not(#page-billingstats) > .page-header .btn, .page:not(#page-billingstats) > .page-header .btn-pill,
+.page:not(#page-billingstats) > .page-header .btn-pill-sm { background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.35); color: #fff; }
+.page:not(#page-billingstats) > .page-header .text-input { background: rgba(255,255,255,.95); color: #0f172a; }
+/* TNB Dashboard's own header block */
+.page .tnbx-header { padding: 22px 26px 20px; }
+.page .tnbx-header .tnbx-header-actions .hint-text { color: rgba(255,255,255,.85); }
+.page .tnbx-header #tnbx-scan-btn { background: #fff; color: #4338ca; border: 0; border-radius: 999px; font-weight: 700; }
+
+/* ---------- cards ---------- */
+.page .card { border-radius: var(--sgt-radius); border: 1px solid var(--card-border); box-shadow: var(--sgt-shadow); padding: 18px 20px; }
+.page .card-header { gap: 12px; margin-bottom: 12px; }
+.page .card-header h2 { font-size: 15.5px; font-weight: 800; letter-spacing: -.01em; }
+
+/* ---------- KPI cards (all variants) = Billing Statistics KPI ---------- */
+.page .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
+.page .kpi-card { border-radius: var(--sgt-radius); padding: 16px 18px; border: 1px solid var(--card-border); background: var(--card-bg); box-shadow: var(--sgt-shadow); }
+.page .kpi-card::after { display: none; }
+.page .kpi-card .kpi-value { font-size: 28px; font-weight: 800; letter-spacing: -.02em; margin-top: 6px; }
+.page .kpi-card .kpi-label { font-size: 12px; font-weight: 700; letter-spacing: .05em; }
+.page .kpi-card .kpi-card-icon { width: 30px; height: 30px; border-radius: 10px; }
+
+/* sgStd.kpis -> separate Billing Statistics cards (was a joined strip) */
+.page .sg-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin: 14px 0 12px;
+  border: 0; border-radius: 0; overflow: visible; background: transparent; }
+.page .sg-kpi { position: relative; overflow: hidden; min-height: 0; margin: 0; padding: 16px 18px; gap: 4px;
+  border: 1px solid var(--card-border); border-radius: var(--sgt-radius); background: var(--card-bg); box-shadow: var(--sgt-shadow);
+  transition: transform .15s, box-shadow .15s, border-color .15s; }
+.page .sg-kpi::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--sg-tone); }
+.page .sg-kpi::after { display: none; }
+.page .sg-kpi:hover:not([disabled]) { transform: translateY(-2px); background: var(--card-bg); border-color: var(--sg-tone); }
+.page .sg-kpi.is-active { background: color-mix(in srgb, var(--sg-tone) 8%, var(--card-bg)); border-color: var(--sg-tone);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sg-tone) 35%, transparent), var(--sgt-shadow); }
+.page .sg-kpi-label { font-size: 12px; font-weight: 700; letter-spacing: .05em; }
+.page .sg-kpi-dot { width: 26px; height: 26px; border-radius: 9px; box-shadow: none;
+  background: color-mix(in srgb, var(--sg-tone) 16%, transparent); position: relative; }
+.page .sg-kpi-dot::after { content: ""; position: absolute; inset: 9px; border-radius: 50%; background: var(--sg-tone); }
+.page .sg-kpi-value { font-size: 28px; font-weight: 800; margin-top: 6px; }
+.page .sg-kpi:first-child .sg-kpi-value { color: var(--text-primary); }
+.page .sg-kpi.is-active .sg-kpi-value { color: var(--sg-tone); }
+.page .sg-kpi-sub { font-size: 12px; }
+
+/* ---------- in-page tabs (navx tab cards) ---------- */
+.page .da-subnav.navx-cards { gap: 12px; }
+.page .navx-cards .da-subnav-btn { border-radius: 14px; padding: 12px 14px 12px 16px; box-shadow: var(--sgt-shadow); }
+.page .navx-cards .da-subnav-btn::before { width: 4px; }
+.page .navx-cards .da-subnav-btn.is-active { background: color-mix(in srgb, var(--tab-accent) 7%, var(--card-bg)); }
+.page .navx-tab-label { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.page .navx-tab-n { font-size: 24px; font-weight: 800; letter-spacing: -.02em; }
+
+/* ---------- filter bars ---------- */
+.page .card .key-panel-row, .page .rld-toolbar, .page .sg-find {
+  border-radius: 14px; }
+.page .card .key-panel-row:not(:empty) { padding: 10px 12px; margin: 10px 0; background: var(--sgt-soft); border: 1px solid var(--card-border); }
+.page .field-label, .page .key-panel-row > label.hint-text > span.hint-text, .page label.field > .hint-text {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-secondary); }
+
+/* ---------- tables = Billing Statistics matrix ---------- */
+.page .grid-wrap { border: 1px solid var(--card-border); border-radius: 14px; overflow: auto; background: var(--card-bg); }
+.page .data-grid { border-collapse: separate; border-spacing: 0; font-size: 13px; }
+.page .data-grid thead th, :root[data-theme="dark"] .page .data-grid thead th {
+  position: sticky; top: 0; z-index: 2; background: color-mix(in srgb, var(--accent, #4f46e5) 5%, var(--card-bg));
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-secondary);
+  padding: 10px 12px; border-bottom: 1px solid var(--card-border); }
+.page .data-grid td { padding: 9px 12px; border-bottom: 1px solid var(--card-border); }
+.page .data-grid tbody tr:last-child > td { border-bottom: 0; }
+.page .data-grid tbody tr:hover > td { background: var(--sgt-soft); }
+
+/* ---------- buttons + inputs ---------- */
+.page .btn-pill, .page .btn-pill-sm, .page .btn { border-radius: 999px; font-weight: 600; }
+.page .btn-pill:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--sgt-soft); }
+.page .btn-primary { background: var(--sgt-grad); border: 0; color: #fff; }
+.page .text-input, .page select.text-input { border-radius: 10px; }
+
+/* ---------- info banners + script output ---------- */
+.page .biss-info-banner { border-radius: 14px; }
+.page details.hx-hint > summary { border-radius: 999px; }
+.page pre.script-output { border-radius: 14px; }
+
+@media (max-width: 760px) {
+  .page:not(#page-billingstats) > .page-header.hx-has-refresh { padding-right: 26px; }
+  .page:not(#page-billingstats) > .page-header .hx-refresh-btn { position: static; margin-top: 10px; }
+}
+
+/* =====================================================================================================
+   Batch 2 (RJ 2026-11-27): the page-specific widgets brought to the same Billing Statistics look.
+   rbo-* (Rebilling Monitor, Fix Billing Campaign, Temp Dashboard, Double ITB), hx-* (Wrong Bill, Hierarchy,
+   Bulk Checker, Wrong Billed Consumption), tnbx-* (TNB Dashboard), overview cards, settings panels.
+   ===================================================================================================== */
+/* big summary blocks = Billing Statistics hero-style band, softer (inside the page) */
+.page .rbo-hero { border-radius: 18px; border: 0; padding: 20px 24px; color: #fff; background: var(--sgt-grad);
+  box-shadow: 0 16px 34px -20px rgba(79, 70, 229, .6); }
+.page .rbo-hero, .page .rbo-hero * { color: #fff; }
+.page .rbo-hero .rbo-hero-total b { font-size: 40px; font-weight: 800; }
+.page .rbo-hero .rbo-hero-total span, .page .rbo-hero .rbo-hero-stats div { color: rgba(255,255,255,.85); }
+.page .rbo-hero .rbo-split-bar { background: rgba(255,255,255,.25); }
+.page .rbo-hero .rbo-split-legend b, .page .rbo-hero .rbo-hero-stats b { color: #fff; }
+
+/* KPI tiles = Billing Statistics KPI */
+.page .rbo-kpis { gap: 14px; }
+.page .rbo-kpi { position: relative; overflow: hidden; gap: 6px; padding: 16px 18px; border-radius: var(--sgt-radius);
+  border: 1px solid var(--card-border); border-left: 1px solid var(--card-border); background: var(--card-bg); box-shadow: var(--sgt-shadow); }
+.page .rbo-kpi::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--kpi-c); }
+.page .rbo-kpi:hover { transform: translateY(-2px); border-color: var(--kpi-c); }
+.page .rbo-kpi.is-active { box-shadow: 0 0 0 2px color-mix(in srgb, var(--kpi-c) 35%, transparent), var(--sgt-shadow); }
+.page .rbo-kpi-label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.page .rbo-kpi-value { font-size: 28px; font-weight: 800; letter-spacing: -.02em; }
+.page .rbo-kpi-meter { height: 6px; border-radius: 999px; }
+
+/* chart / breakdown panels = Billing Statistics panels */
+.page .rbo-panel { border-radius: var(--sgt-radius); padding: 16px 18px; background: var(--card-bg); box-shadow: var(--sgt-shadow); }
+.page .rbo-panel h3, .page .rbo-panel header h3 { font-size: 15px; font-weight: 800; color: var(--text-primary); letter-spacing: -.01em; }
+.page .rbo-panel-alert { border-color: color-mix(in srgb, #ef4444 40%, var(--card-border)); }
+.page .rbo-section-title { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; color: var(--text-secondary); }
+.page .rbo-section-title span { background: var(--sgt-grad); color: #fff; }
+.page .rbo-seg button.is-active, .page .hx-seg button.is-active { background: var(--sgt-grad); color: #fff; border-color: transparent; }
+
+/* hx tiles / gauges / summary cards */
+.page .hx-tile, .page .hx-gauge { border-radius: var(--sgt-radius); box-shadow: var(--sgt-shadow); }
+.page .hx-tile { padding: 14px 16px; }
+.page .hx-card { border-radius: var(--sgt-radius); }
+
+/* TNB Dashboard cards */
+.page .tnbx-kpi, .page .tnbx-case { border-radius: var(--sgt-radius); box-shadow: var(--sgt-shadow); }
+.page .tnbx-kpi b, .page .tnbx-kpi .tnbx-kpi-n { font-weight: 800; letter-spacing: -.02em; }
+
+/* Overview cards */
+#page-overview .overview-card { border-radius: var(--sgt-radius); box-shadow: var(--sgt-shadow); }
+#page-overview .overview-card-value { font-weight: 800; letter-spacing: -.02em; }
+#page-overview .overview-chart-card { border-radius: var(--sgt-radius); }
+
+/* Settings */
+#page-settings .set-panel .card, #page-settings .set-stat { border-radius: var(--sgt-radius); }
+
+/* chips (Reading Discrepancies, Workspace) */
+.page .hx-chips button, .page .chip-row .chip { border-radius: 999px; }
